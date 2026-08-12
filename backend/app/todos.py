@@ -316,12 +316,29 @@ def make_todo_tool(db: Session | None, conversation_id: int | None):
                     "todos": normalized,
                 }
             if op in ("complete", "done"):
+                target_text = text.strip()
                 for item in items:
-                    if item.get("id") == task_id or item.get("text") == text.strip():
+                    if item.get("id") == task_id or item.get("text") == target_text:
                         item["done"] = True
                         item["completed_at"] = time.time()
                         save_todos(local, conversation_id, items)
                         return {"summary": f"已完成任务：{item['text'][:40]}", "todos": items}
+                # 模糊匹配：唯一包含关系也视为命中，减少模型"任务不存在"的空转
+                fuzzy = [
+                    i
+                    for i in items
+                    if target_text
+                    and (
+                        target_text in str(i.get("text", ""))
+                        or str(i.get("text", "")) in target_text
+                    )
+                ]
+                if len(fuzzy) == 1:
+                    item = fuzzy[0]
+                    item["done"] = True
+                    item["completed_at"] = time.time()
+                    save_todos(local, conversation_id, items)
+                    return {"summary": f"已完成任务：{item['text'][:40]}", "todos": items}
                 return {"error": f"未找到任务：{task_id or text}", "summary": "标记失败：任务不存在"}
             if op in ("remove", "delete"):
                 before = len(items)

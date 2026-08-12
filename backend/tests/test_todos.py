@@ -95,6 +95,20 @@ def test_tool_operations(monkeypatch):
     assert r["todos"] == todos.load_todos(object(), conv)
 
 
+def test_complete_fuzzy_match(monkeypatch):
+    _install_store(monkeypatch, FakeStore())
+    monkeypatch.setattr("app.db.database.db_ready", True)
+    monkeypatch.setattr("app.db.database.SessionLocal", lambda: object())
+    conv = 1009
+    todos.seed_todos_from_plan(object(), conv, ["检索知识库获取相关资料", "整理结论"])
+    tool = todos.make_todo_tool(object(), conv)
+    r = tool.invoke({"operation": "complete", "text": "检索知识库获取相关资料"})
+    assert r["todos"][0]["done"] is True
+    # 包含关系也能命中（模型常带上下文重述步骤）
+    r = tool.invoke({"operation": "complete", "text": "整理结论"})
+    assert r["todos"][1]["done"] is True
+
+
 def test_complete_steps_by_text(monkeypatch):
     _install_store(monkeypatch, FakeStore())
     conv = 1005

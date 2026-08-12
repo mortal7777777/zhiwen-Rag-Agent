@@ -78,6 +78,10 @@ def execute_web_search(query: str, provider: str, api_key: str, max_results: int
             results = _search_tavily(query, api_key, max_results)
         else:
             results = _search_duckduckgo(query, max_results)
+        for item in results:
+            credibility, reason = _credibility_for(item.get("url", ""))
+            item["credibility"] = credibility
+            item["credibility_reason"] = reason
         return {
             "query": query,
             "results": results,
@@ -91,6 +95,45 @@ def execute_web_search(query: str, provider: str, api_key: str, max_results: int
             "summary": f"联网搜索失败：{exc}",
             "error": str(exc),
         }
+
+
+# 网页可信度启发式评估（不消耗 LLM，纯域名规则）
+_HIGH_CREDIBILITY_DOMAINS = (
+    "wikipedia.org", "gov.cn", "edu.cn", "ac.cn", "who.int", "un.org",
+    "reuters.com", "apnews.com", "bbc.com", "bbc.co.uk", "nytimes.com",
+    "theguardian.com", "nature.com", "science.org", "nejm.org", "pubmed.ncbi.nlm.nih.gov",
+    "xinhuanet.com", "people.com.cn", "chinadaily.com.cn", "cctv.com", "nhk.or.jp",
+    "arxiv.org",
+)
+_MEDIUM_CREDIBILITY_DOMAINS = (
+    "zhihu.com", "thepaper.cn", "sina.com.cn", "sohu.com", "163.com", "qq.com",
+    "medium.com", "csdn.net", "cnblogs.com", "github.com", "gitee.com",
+    "stackoverflow.com", "segmentfault.com", "infoq.cn", "36kr.com",
+    "baike.baidu.com", "baidu.com",
+)
+_LOW_CREDIBILITY_DOMAINS = (
+    "reddit.com", "twitter.com", "x.com", "weibo.com", "douyin.com", "tiktok.com",
+    "bilibili.com", "quora.com", "wordpress.com", "blogspot.com", "medium.com/@",
+    "bit.ly", "t.co", "tinyurl.com",
+)
+
+
+def _credibility_for(url: str) -> tuple[str, str]:
+    """按来源域名给搜索结果打可信度标签（high / medium / low）。"""
+    from urllib.parse import urlparse
+
+    host = (urlparse(url or "").netloc or "").lower()
+    if not host:
+        return "low", "缺少来源链接"
+    if host in _LOW_CREDIBILITY_DOMAINS or host.endswith(tuple("." + d for d in _LOW_CREDIBILITY_DOMAINS)):
+        return "low", f"社交/论坛/UGC 类域名：{host}"
+    if host.endswith((".gov", ".edu", ".mil", ".gov.cn", ".edu.cn", ".ac.cn")):
+        return "high", f"政府/教育/科研机构域名：{host}"
+    if host in _HIGH_CREDIBILITY_DOMAINS or host.endswith(tuple("." + d for d in _HIGH_CREDIBILITY_DOMAINS)):
+        return "high", f"权威媒体/学术/百科域名：{host}"
+    if host in _MEDIUM_CREDIBILITY_DOMAINS or host.endswith(tuple("." + d for d in _MEDIUM_CREDIBILITY_DOMAINS)):
+        return "medium", f"门户/技术社区/自媒体平台：{host}"
+    return "medium", "未知来源域名，建议交叉验证"
 
 
 def _search_duckduckgo(query: str, max_results: int) -> list[dict]:
@@ -154,11 +197,12 @@ def make_knowledge_base_tool(
     web_provider: str,
     tavily_api_key: str,
     web_max_results: int,
+    allow_web_fallback: bool = True,
 ) -> BaseTool:
     """知识库检索工具。
 
-    内置 CRAG 兜底：知识库相关度不足时自动补充联网结果，
-    避免模型基于低相关片段硬答。
+    内置 CRAG 兜底：仅当用户本轮开启联网（allow_web_fallback）且
+    知识库相关度不足时，才补充联网结果，避免静默拖慢知识库模式。
     """
     retriever = KnowledgeBaseRetriever(retrieve_fn=rag_service.retrieve)
 
@@ -177,6 +221,7 @@ def make_knowledge_base_tool(
         )
         if (
             crag_enabled
+            and allow_web_fallback
             and web_provider != "off"
             and (not result.get("results") or best < crag_min_score)
         ):
@@ -320,6 +365,7 @@ def build_tools(
                 provider,
                 tavily_api_key,
                 max_results,
+                allow_web_fallback=use_web_search,
             )
         )
     if use_web_search:

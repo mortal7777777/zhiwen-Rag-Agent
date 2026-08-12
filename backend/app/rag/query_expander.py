@@ -11,13 +11,14 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from .llm import DeepSeekChat
 
 logger = logging.getLogger(__name__)
 
 # 单次查询总数上限，避免检索耗时和候选噪声失控
-MAX_QUERIES = 6
+MAX_QUERIES = 4
 
 # 常见复杂任务词：命中即视为需要扩展
 COMPLEX_KEYWORDS = (
@@ -46,6 +47,9 @@ class QueryExpander:
         self._use_multi_query = use_multi_query
         self._use_hyde = use_hyde
         self._use_multi_turn = use_multi_turn
+        # 简单内存缓存：相同问题（含近一轮历史）的扩展结果直接复用
+        self._cache: dict[str, tuple[float, list[str]]] = {}
+        self._cache_ttl = 600.0
 
     def expand(
         self,
@@ -53,29 +57,57 @@ class QueryExpander:
         history: list[dict] | None = None,
     ) -> list[str]:
         """返回扩展后的查询列表，原问题永远排第一。"""
+        cache_key = self._cache_key(question, history)
+        hit = self._cache.get(cache_key)
+        if hit and time.time() - hit[0] < self._cache_ttl:
+            return list(hit[1])
+
         queries: list[str] = [question]
+        simple = self._is_simple(question, history)
 
-        if self._use_multi_turn and history:
-            standalone = self._chat.disambiguate(question, history)
-            if standalone and standalone != question:
-                queries.append(standalone)
+        # Multi-Query / HyDE / 多轮补全彼此独立，并行调用可把扩展耗时减半
+        from concurrent.futures import ThreadPoolExecutor
 
-        # 简单问题（短 + 无复杂任务词 + 无指代）：直接返回，跳过 Multi-Query/HyDE
-        if self._is_simple(question, history):
-            return queries[:MAX_QUERIES]
+        futures: dict[str, object] = {}
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            if self._use_multi_turn and history:
+                futures["disambiguate"] = pool.submit(
+                    self._chat.disambiguate, question, history
+                )
+            if not simple:
+                if self._use_multi_query:
+                    futures["rewrite"] = pool.submit(
+                        self._chat.rewrite_queries,
+                        question,
+                        history,
+                        n=self._variants,
+                    )
+                if self._use_hyde:
+                    futures["hyde"] = pool.submit(
+                        self._chat.hypothetical_document, question, history
+                    )
 
-        if self._use_multi_query:
-            rewritten = self._chat.rewrite_queries(
-                question,
-                history,
-                n=self._variants,
-            )
-            queries.extend(rewritten)
-
-        if self._use_hyde:
-            hypothetical = self._chat.hypothetical_document(question, history)
-            if hypothetical and hypothetical != question:
-                queries.append(hypothetical)
+            if "disambiguate" in futures:
+                try:
+                    standalone = futures["disambiguate"].result()
+                    if standalone and standalone != question:
+                        queries.append(standalone)
+                except Exception as exc:
+                    logger.warning("多轮补全失败：%s", exc)
+            if not simple:
+                if "rewrite" in futures:
+                    try:
+                        rewritten = futures["rewrite"].result()
+                        queries.extend(rewritten or [])
+                    except Exception as exc:
+                        logger.warning("Multi-Query 失败：%s", exc)
+                if "hyde" in futures:
+                    try:
+                        hypothetical = futures["hyde"].result()
+                        if hypothetical and hypothetical != question:
+                            queries.append(hypothetical)
+                    except Exception as exc:
+                        logger.warning("HyDE 失败：%s", exc)
 
         # 去重并截断
         seen: set[str] = set()
@@ -85,7 +117,20 @@ class QueryExpander:
             if key and key not in seen:
                 seen.add(key)
                 result.append(query)
-        return result[:MAX_QUERIES]
+        result = result[:MAX_QUERIES]
+        self._cache[cache_key] = (time.time(), result)
+        if len(self._cache) > 128:
+            self._cache.clear()
+        return result
+
+    @staticmethod
+    def _cache_key(question: str, history: list[dict] | None) -> str:
+        """缓存键：问题 + 最近一条历史的后 60 字符（足够区分指代语境）。"""
+        tail = ""
+        if history:
+            last = history[-1]
+            tail = "|" + str(last.get("content") or "")[-60:]
+        return question.strip()[:200] + tail
 
     @staticmethod
     def _is_simple(question: str, history: list[dict] | None) -> bool:

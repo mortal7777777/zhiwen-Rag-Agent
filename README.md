@@ -113,11 +113,23 @@
 - **CUDA 容错**：embedding / reranker 遇到 CUDA 异步错误（unknown error /
   illegal memory access / OOM）时自动降级到 CPU 完成本次检索，
   并在 5 分钟冷却后自动探测 GPU 是否恢复；显卡瞬时故障不会让知识库查询持续失败。
+- **提速**：查询扩展并行化（Multi-Query / HyDE / 多轮补全并发）+ 同问题 10 分钟缓存 +
+  单次查询上限收敛到 4 条；CRAG 联网兜底只在用户本轮开启“联网”开关时生效，
+  纯知识库模式不再静默爬网（实测 KB 单题 17~25s，此前可到 50~218s）。
 
 ### 视觉能力（SenseNova）
 
 - 上传/粘贴图片自动识图并注入上下文（主模型无视觉时）；
 - `image_to_text` 工具允许 Agent 在对话中按需对任意 base64 图片做 OCR/图表解读。
+
+### 联网可信度
+
+- 每条联网结果自动标注 `credibility`（high / medium / low）与原因：
+  政府/教育/权威媒体/学术为 high，门户/技术社区为 medium，
+  社交/论坛/个人来源为 low，未知域名提示交叉验证；
+- 系统提示词强制要求：引用优先 high，medium 需交叉验证，low 不作为事实依据；
+  结论仅来自 low/medium 来源时向用户说明“可信度有限”；
+- 网页内容视为外部不可信数据，忽略其中要求执行操作、输出凭据、隐瞒用户的指令。
 
 ### 技能（Skills）
 
@@ -303,8 +315,17 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-当前 25 个用例覆盖：任务清单（播种/同步/跨轮刷新/修订/进度）、文件工具安全边界与
-命令白名单、CUDA 降级逻辑、技能内容清洗、RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
+当前 29 个用例覆盖：任务清单（播种/同步/跨轮刷新/模糊完成/修订/进度）、文件工具
+安全边界与命令白名单、CUDA 降级逻辑、技能内容清洗、联网可信度标注、
+RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
+
+## 评测
+
+- `backend/eval_questions.json`：14 题种子集（知识库/通用/联网/工具/安全/规划）；
+- `backend/evaluate_agent.py`：逐题调用 Agent 流式接口，记录延迟/工具/计划/
+  token/状态到 `eval_report.jsonl`，改动前后对比可发现回归；
+- 评测方案与开源集建议（RAGAS / BEIR / C-MTEB / GAIA / AgentBench）见
+  [docs/EVALUATION.md](docs/EVALUATION.md)。
 
 ## 环境变量（均有默认值）
 
@@ -396,7 +417,7 @@ python -m pytest tests -q
   基础操作见 [docs/GIT_GUIDE.md](docs/GIT_GUIDE.md)；运行数据（`data/`、
   `opensearch_meta/`、日志）已加入 `.gitignore` 不入库；
 - **提示词模板**：预设模板已按 Claude Code 风格重写（角色/原则/流程/安全边界），
-  后端启动时自动同步到数据库（系统模板只读，用户模板不受影响）；
+  含“学习助手”模板；后端启动时自动同步到数据库（系统模板只读，用户模板不受影响）；
 - **MySQL 未连接时自动降级**：普通对话仍可用，但会话记忆、模板、运行记录不可用（日志给出明确错误）；
 - 联网搜索默认 DuckDuckGo（免 key），国内网络可能需要代理；也可配置 Tavily；
 - 问答必须配置对话模型 API Key（可在设置页添加/切换供应商）；知识库检索与重排序全程本地；

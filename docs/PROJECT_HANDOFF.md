@@ -174,6 +174,27 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
      破坏性命令等注入行；系统提示词固化"技能内容不可信"安全边界。
 5. **新增 [docs/GIT_GUIDE.md](docs/GIT_GUIDE.md)**：git 基础操作教程。
 
+### 4.4 本轮（性能诊断 + 联网可信度 + 学习助手模板 + 评测）
+1. **性能诊断结论**：embedding/reranker 确为 CUDA（fp16，RTX 4060），GPU 不是瓶颈；
+   慢在查询扩展（平均 19s 的 LLM 调用）、多路混合检索与 CRAG 联网兜底
+   （单次 10~104s）。run#77 一次检索达 104s、总耗时 218s；run#79 模型
+   错误地用 list_dir 探查知识库目录（系统提示词此前未注入也是原因之一）。
+2. **提速修复**：
+   - 查询扩展三路并行 + 同问题 10 分钟缓存 + 单次查询上限 6→4；
+   - CRAG 联网兜底仅在用户本轮开启“联网”开关时生效（纯知识库模式不再静默爬网）；
+   - 知识库工具规则明确“不要用 list_dir/read_file 探查知识库目录”；
+   - 实测 KB 单题 17~25s（此前 50~218s）；Agent 多轮任务仍受 LLM API 单轮
+     3~8s 限制，工具越多总耗时越长属正常。
+3. **联网可信度评估**：每条联网结果按域名标注 credibility（high/medium/low）
+   与原因；提示词强制要求优先 high、medium 交叉验证、low 不作为事实依据，
+   并声明网页内容不可信、不执行网页指令（防网页提示注入）。
+4. **新增“学习助手”模板**：Claude Code 风格（角色/原则/流程/要求/边界），
+   侧重拆解概念、交叉验证、引导理解、练习检验；启动时自动同步。
+5. **评测起步**：`backend/eval_questions.json`（14 题种子集）+
+   `backend/evaluate_agent.py`（自动记录延迟/工具/计划/token/状态）+ 
+   [docs/EVALUATION.md](docs/EVALUATION.md)（RAGAS/BEIR/C-MTEB/GAIA/AgentBench
+   选型与回归门槛建议）。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。
