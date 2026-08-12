@@ -110,6 +110,9 @@
 - 支持 txt / md / csv / doc / docx / xlsx / pdf / epub；
 - 增量索引：文件没变直接复用，只新增只嵌入新文件，修改/删除才全量重建；
 - 布局感知 PDF 解析（PyMuPDF4LLM），可选扫描页视觉 OCR（需 SenseNova key）。
+- **CUDA 容错**：embedding / reranker 遇到 CUDA 异步错误（unknown error /
+  illegal memory access / OOM）时自动降级到 CPU 完成本次检索，
+  并在 5 分钟冷却后自动探测 GPU 是否恢复；显卡瞬时故障不会让知识库查询持续失败。
 
 ### 视觉能力（SenseNova）
 
@@ -285,6 +288,17 @@ cd ..\frontend
 npm run dev
 ```
 
+## 测试
+
+```powershell
+cd backend
+pip install -r requirements-dev.txt
+python -m pytest tests -q
+```
+
+当前 20 个用例覆盖：任务清单（播种/同步/修订/进度）、文件工具安全边界与命令白名单、
+CUDA 降级逻辑、RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
+
 ## 环境变量（均有默认值）
 
 | 变量 | 默认值 | 说明 |
@@ -371,6 +385,8 @@ npm run dev
 
 ## 注意事项
 
+- **版本保护**：项目已初始化 git（仓库根 = `rag_knowledge_base/`），
+  运行数据（`data/`、`opensearch_meta/`、日志）已加入 `.gitignore` 不入库；
 - **MySQL 未连接时自动降级**：普通对话仍可用，但会话记忆、模板、运行记录不可用（日志给出明确错误）；
 - 联网搜索默认 DuckDuckGo（免 key），国内网络可能需要代理；也可配置 Tavily；
 - 问答必须配置对话模型 API Key（可在设置页添加/切换供应商）；知识库检索与重排序全程本地；

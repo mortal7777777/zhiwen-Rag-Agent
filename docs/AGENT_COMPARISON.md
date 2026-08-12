@@ -5,6 +5,13 @@
 **Hermes**（Nous Research，开源 Agent 框架）。先对齐坐标系，再逐维度对比，
 最后给出客观的不足清单与改进路线。
 
+> **更新说明（2026-08-12）**：本文写作时列出的 P0 短板（文件/命令执行、MCP、
+> checkpoint、AGENTS.md 文件记忆）后续已全部落地：受控执行工具 + HITL 审批、
+> MCP client（stdio / streamable HTTP）、自定义 SQLite checkpoint、
+> 文件型项目记忆均已实现；git 版本保护与 pytest（20 用例）也已补齐。
+> 当前主要差距更新为：评测体系（RAGAS 类指标与回归门槛）、CI、
+> LangGraph 原生 checkpointer 迁移、成本优化（见 §4 标注）。
+
 ## 0. 定位差异
 
 | 系统 | 形态 | 定位 |
@@ -22,16 +29,16 @@
 | 维度 | 本项目 | Claude Code | Codex | Hermes |
 |---|---|---|---|---|
 | 编排 | LangGraph 4 节点状态图（prepare/agent/tools/finalize） | 内部循环 + 子代理（subagents） | 内部编排器 + skills 按需注入 | Agent 抽象 + toolsets + ACP 多后端复用 |
-| 状态/检查点 | AgentState + MySQL（无 checkpoint） | checkpoint / 会话恢复 | session restore / checkpoint | hermes_state 可移植状态 |
-| 工具 | KB 检索 / 联网 / 识图 / skill_lookup（4 个） | 文件编辑 / Shell / 浏览 / MCP / Git | 文件 / Shell / 浏览 / MCP / sandbox | 大量内置工具 + MCP 市场 + 外部 skills |
+| 状态/检查点 | AgentState + MySQL + 自定义 SQLite checkpoint（中断恢复） | checkpoint / 会话恢复 | session restore / checkpoint | hermes_state 可移植状态 |
+| 工具 | KB 检索 / 联网 / 识图 / skill_lookup + 文件/命令受控工具（HITL） | 文件编辑 / Shell / 浏览 / MCP / Git | 文件 / Shell / 浏览 / MCP / sandbox | 大量内置工具 + MCP 市场 + 外部 skills |
 | 技能 | 扫描本机 Codex/Claude/Hermes（146 个去重），启停/隐藏、结构化目录 | 无开放 skills 体系（内部子代理） | `~/.codex/skills` + 市场 + AGENTS.md | 80+ 内置 + 114 optional SKILL.md |
 | 记忆 | 三层：滚动摘要（软窗口）/ 分类长期事实 / 画像摘要，MySQL | CLAUDE.md（静态 + 自动维护的项目记忆） | AGENTS.md + 会话历史 | trajectory 压缩 + state 移植 + routines |
 | 上下文工程 | 软窗口双条件、模板差异化预算、记忆粗筛+语义召回、查询扩展判定 | 长任务上下文压缩、子任务隔离 | 上下文管理 + 多文件索引 | trajectory_compressor 中间态压缩 |
 | 并行 | 串行 ReAct（无子代理） | subagents 并行子任务 | 并行任务（部分场景） | 多 agent / 多后端并行 |
 | 可观测 | agent_runs + JSONL trace + /api/metrics + token 聚合 | verbose 日志、/status | usage 面板、session 列表 | 日志 + state 可导出 |
 | UI | Web（主题/打字机/引用索引/设置面板/技能管理） | 终端 TUI | CLI + 云端 Web | TUI + Web |
-| 安全 | 无沙箱（只做检索/调用 API） | 权限许可系统（命令需批准） | sandbox 容器 + 权限 | 沙箱/容器选项 |
-| 扩展生态 | 无 MCP、无插件 | MCP 丰富 | MCP + skills 市场 | MCP + ACP + cron |
+| 安全 | 受控执行 + HITL 人工确认（无系统级沙箱） | 权限许可系统（命令需批准） | sandbox 容器 + 权限 | 沙箱/容器选项 |
+| 扩展生态 | MCP client（stdio / streamable HTTP） | MCP 丰富 | MCP + skills 市场 | MCP + ACP + cron |
 | 多用户 | 单用户本地 | 单机 | 单用户（云端多端） | 单机 |
 
 ## 2. 各系统机制要点
@@ -83,15 +90,14 @@
 
 ### P0 · 能力边界
 
-1. **无文件/命令级执行能力**：不能读写文件、跑命令、操作项目——这是与 Claude Code /
-   Codex 最大的能力差。对本项目（个人知识库助手）不是必须，但要向"助手"进化
-   需要补上"受控执行工具"（沙箱内读写文件、白名单命令）。
-2. **无 MCP**：主流 Agent 的标配扩展方式，接入成本低、收益高（文件、浏览器、
-   数据库、时间、邮件等 MCP 服务器现成可用）。
-3. **无子代理/并行**：多路检索、多文档对比只能串行；LangGraph 已具备做并行分支
-   的条件（`send`/并行节点），但尚未实现。
-4. **无会话 checkpoint/恢复**：任务中断不能从检查点续跑，也不能回滚工具调用；
-   LangGraph 的 MemorySaver / AsyncSqliteSaver 可直接补上。
+1. ~~**无文件/命令级执行能力**~~ **已落地（2026-08-12）**：受控工具集 + HITL 审批、
+   路径容错、失败不烧预算；仍无系统级沙箱（Docker/容器）。
+2. ~~**无 MCP**~~ **已落地**：MCP client 支持 stdio / streamable HTTP；
+   生态厚度（现成服务器配套、市场）仍不及主流。
+3. **无子代理/并行**：多路检索、多文档对比仍串行；LangGraph 的 `send`/并行节点
+   尚未使用（ThreadPoolExecutor 只做工具级并行）。
+4. ~~**无会话 checkpoint/恢复**~~ **已落地**：自定义 SQLite checkpoint 可中断续跑；
+   尚未迁移 LangGraph 原生 saver（无时间旅行/回滚）。
 
 ### P1 · 记忆与可观测
 
@@ -110,6 +116,8 @@
 10. **无用量/成本仪表盘**：token 聚合数据已有，但没有 UI 展示；
 11. **无自动化/cron**：Hermes 有 routines，本项目没有定时任务；
 12. **无 hooks/事件系统**：任务开始/结束/工具调用没有对外回调。
+13. **评测与 CI（2026-08-12 新增）**：git 与 pytest（20 用例）已补齐；
+    仍无 RAGAS/TruLens 类评测集与回归门槛、无 CI。
 
 ## 5. 改进路线（每条给出落地路径）
 

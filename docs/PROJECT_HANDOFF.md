@@ -1,6 +1,6 @@
 # 项目交接文档（供新会话快速上手）
 
-> 最后更新：2026-08-12（新会话已继续：todo 硬约束落地，见 §4.1）
+> 最后更新：2026-08-12（第二轮：CUDA 容错 + git 版本保护 + pytest，见 §4.2）
 > 目的：把项目现状、架构、环境、最近改动与待办一次性交底，新会话先读本文件即可工作。
 
 ## 0. 一句话定位
@@ -14,7 +14,7 @@
 | 项 | 值 |
 |---|---|
 | 项目根 | `C:\Users\user\PycharmProjects\PythonProjectPytorch1\langchain01\rag_knowledge_base` |
-| 后端 | FastAPI + uvicorn，`0.0.0.0:8000`，**PID 41200**（重启后 PID 会变） |
+| 后端 | FastAPI + uvicorn，`0.0.0.0:8000`，**PID 25664**（重启后 PID 会变） |
 | 前端 | Vite + Vue3，dev server `::1:5173`，**PID 46732**（重启后 PID 会变） |
 | Python | `D:\conda_envs\pytorch_env\python.exe`（带 torch/cuda） |
 | MySQL | `mysql+pymysql://root:CHANGE_ME@127.0.0.1:3306/rag_assistant?charset=utf8mb4`，库名 `rag_assistant` |
@@ -137,6 +137,20 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
    改为每个工具调用使用独立短会话（`SessionLocal`），请求级 Session 不再被并发触碰。
 6. **可观测**：trace 新增 `todos` 快照与 `plan_done_count`；README 同步更新。
 
+### 4.2 本轮（CUDA 容错 + git + pytest）
+1. **CUDA 异步错误容错**：知识库查询偶发 `CUDA error: unknown error`
+   （显卡瞬时故障 / 内核上下文污染，一旦出现会持续失败直到进程重启）。
+   修复：embedding 与 reranker 识别 CUDA 类异常后**自动降级 CPU** 完成本次检索，
+   并设置 300 秒冷却，之后自动探测 GPU 是否恢复（恢复即切回 GPU）。
+   实测显卡恢复后知识库查询 4.5s 正常返回。
+2. **git 版本保护**：仓库根 `rag_knowledge_base/` 已 `git init` 并提交基线
+   （`396f940`）；`.gitignore` 排除 data/、opensearch_meta/、日志、node_modules/dist。
+3. **pytest 套件**：`backend/tests/` 共 20 个用例，覆盖 todos、文件工具安全边界/
+   白名单、CUDA 降级、工具纯函数；`requirements-dev.txt` 提供测试依赖；
+   不依赖 GPU / MySQL / 网络。
+4. **顺手修复**：`todo_update` 工具导入路径错误（`from .database` → `from .db.database`），
+   此前该工具实际执行失败但被日志掩盖。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。
@@ -155,6 +169,10 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 ---
 
 ## 5. 已知待办与下一步（用户未定方向，先讨论再动手）
+
+> **已落地（2026-08-12 第二轮）**：git 版本保护（`rag_knowledge_base/`）+ pytest 20 用例
+> + CUDA 容错（自动降级 CPU / 冷却恢复）。仍缺：评测体系（RAGAS 类指标与回归门槛）、
+> CI、LangGraph 原生 checkpointer 迁移、成本优化（记忆提取条件化 / 前缀缓存）。
 
 ### 用户明确提过的方向
 - **P0/P1 已基本完成**（MCP、受控执行、checkpoint、轨迹压缩、记忆整合、SSE 心跳、空参数兜底、标题后置等），文档里的 P0/P1 计划已实现；**用户隔离暂不做**。
