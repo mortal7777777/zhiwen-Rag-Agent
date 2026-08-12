@@ -1,0 +1,155 @@
+/* ============================================================
+   设计令牌：浅色 / 深色主题统一变量。
+   界面层次约定（由深到浅）：
+   应用底色 -> 全局导航 -> 会话侧栏 -> 聊天主区 -> 消息卡片
+   ============================================================ */
+
+:root {
+  /* 背景层次 */
+  --bg-app: #f3f4f8;           /* 页面底色 */
+  --bg-sidebar: #ffffff;       /* 左侧全局导航 */
+  --bg-panel: #fbfcfe;         /* 会话侧栏 */
+  --bg-chat: #ffffff;          /* 聊天主区 */
+  --bg-card: #f7f8fc;          /* 消息卡片 / 次级卡片 */
+  --bg-card-2: #fafbfe;        /* 更浅的卡片 */
+  --bg-hover: #f1f4f9;
+  --bg-active: #eef4ff;
+
+  /* 边框 */
+  --border: #e8ebf1;
+  --border-strong: #dde1ea;
+
+  /* 文本 */
+  --text-1: #23262d;
+  --text-2: #4c515b;
+  --text-3: #8b909b;
+
+  /* 品牌色 */
+  --primary: #1677ff;
+  --primary-2: #4f8dff;
+  --accent: #6f5bff;
+  --primary-soft: rgba(22, 119, 255, 0.08);
+  --primary-grad: linear-gradient(135deg, #1677ff 0%, #6f5bff 100%);
+
+  /* 语义色 */
+  --danger: #f56c6c;
+  --danger-bg: #fef0f0;
+  --danger-border: #fde2e2;
+  --success: #2eb872;
+
+  /* 对话气泡 */
+  --user-bubble-bg: #e8f1ff;
+  --user-bubble-border: #d6e6ff;
+  --user-bubble-text: #1f2329;
+  --plan-bg: #f7f9ff;
+  --plan-border: #e3ecff;
+  --web-tag-bg: #fff3e2;
+  --web-tag-text: #e8912d;
+
+  /* 阴影 */
+  --shadow-soft: 0 2px 10px rgba(31, 35, 41, 0.05);
+  --shadow-pop: 0 8px 24px rgba(22, 119, 255, 0.16);
+}
+
+html.dark {
+  /* 背景层次 */
+  --bg-app: #0e1014;
+  --bg-sidebar: #14161b;
+  --bg-panel: #171a20;
+  --bg-chat: #1a1d24;
+  --bg-card: #20242d;
+  --bg-card-2: #1d2129;
+  --bg-hover: #232833;
+  --bg-active: #1b2942;
+
+  /* 边框 */
+  --border: #262b34;
+  --border-strong: #313845;
+
+  /* 文本 */
+  --text-1: #e6e8ec;
+  --text-2: #c4c9d2;
+  --text-3: #858c98;
+
+  /* 品牌色 */
+  --primary: #4a94ff;
+  --primary-2: #6aa7ff;
+  --accent: #8b7bff;
+  --primary-soft: rgba(74, 148, 255, 0.14);
+  --primary-grad: linear-gradient(135deg, #4a94ff 0%, #8b7bff 100%);
+
+  /* 语义色 */
+  --danger: #f78989;
+  --danger-bg: #3a2326;
+  --danger-border: #4a2b2f;
+  --success: #4bd08a;
+
+  /* 对话气泡 */
+  --user-bubble-bg: #1e3a5f;
+  --user-bubble-border: #24405f;
+  --user-bubble-text: #dbe6f5;
+  --plan-bg: #1b2233;
+  --plan-border: #24405f;
+  --web-tag-bg: #3a2f1f;
+  --web-tag-text: #e8a33d;
+
+  /* 阴影 */
+  --shadow-soft: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 8px 24px rgba(74, 148, 255, 0.22);
+}
+
+/* 全局基础 */
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial,
+    sans-serif;
+  background: var(--bg-app);
+  color: var(--text-1);
+  -webkit-font-smoothing: antialiased;
+  transition: background 0.25s, color 0.25s;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-3);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Element Plus 组件在深色下的补充微调 */
+html.dark .el-drawer,
+html.dark .el-dialog {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+}
+
+html.dark .el-drawer__header,
+html.dark .el-dialog__header {
+  color: var(--text-1);
+}
+
+html.dark .el-card {
+  background: var(--bg-panel);
+}

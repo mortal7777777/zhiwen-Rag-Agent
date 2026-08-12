@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 日志与运行产物
+*.log
+backend/_*.py
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+
+# 运行时数据：上传文档、索引账本、trace、checkpoint（可重建，不入库）
+data/
+opensearch_meta/
+.agent_trash/
+
+# IDE / 系统
+.idea/
+.vscode/
+*.swp
+Thumbs.db

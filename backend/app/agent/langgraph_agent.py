@@ -1,0 +1,1632 @@
+"""LangGraph 版 Agent 编排：把原手工 ReAct 循环升级为显式状态图。
+
+图结构（4 节点 + 条件路由）：
+
+    START -> prepare -> agent -> tools -> agent -> ... -> finalize -> END
+                            (tools -> agent 循环直至无工具调用)
+
+- prepare   : 会话/历史/滚动摘要/规划/记忆/视觉/时间注入，组装分层消息与工具；
+- agent     : 流式生成（LLM 锁），有 tool_calls 走 tools，否则收尾；
+- tools     : 逐个执行工具、回填 ToolMessage、注入计划进度、检查调用上限；
+- finalize  : 来源去重/联网附录/持久化/运行记录/trace/标题后置/done。
+
+为什么用 LangGraph 而不是手工循环：
+1. 状态流转显式化（图即文档），条件边替代 if/else 嵌套；
+2. recursion_limit 可控，且异常兜底节点保证"超限也有最终回答"；
+3. 后续可平滑接入检查点（MemorySaver）、并行分支、Langfuse 一等回调。
+
+兼容性：SSE 事件协议（session/plan/vision/title/tool_start/tool_result/token/done/error）
+与前端完全一致；节点内通过 EventBus 把事件推给调用方。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import threading
+import time
+from datetime import datetime
+from queue import Queue
+from typing import TypedDict
+from zoneinfo import ZoneInfo
+
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langgraph.graph import END, START, StateGraph
+from sqlalchemy.orm import Session
+
+from .. import db
+from ..config import Settings
+from ..db import repository as repo
+from ..rag.service import RAGService
+from ..runtime_config import effective
+from ..tracing import get_usage_collector, reset_usage, usage_summary, write_trace
+from .agent import AgentService
+from .context import trim_history_for_budget
+from .prompts import compose_system_prompt
+from .tools import build_tools, extract_sources
+
+logger = logging.getLogger(__name__)
+
+
+class AgentState(TypedDict, total=False):
+    """LangGraph 节点间共享的状态。"""
+
+    service: "LangGraphAgentService"
+    bus: "EventBus"
+    db: Session | None
+    runtime: dict
+    stop_event: threading.Event | None
+
+    question: str
+    images: list[str]
+    use_web_search: bool
+    use_knowledge_base: bool
+    conversation_id: int | None
+    template_id: int | None
+    system_prompt: str | None
+    tool_mode: str
+    plan_only: bool
+    resume_plan: list[str] | None
+
+    messages: list
+    tools: list
+    pending_tool_calls: list
+    sources: list[dict]
+    tool_trace: list[dict]
+    counter: list[int]
+    tool_calls_used: int
+    failure_count: int
+    forced_final: bool
+    last_call_warned: bool
+
+    plan_steps: list[str]
+    plan_map: list[dict]
+    kb_documents: list[str]
+    memory_hits: list[str]
+    memory_summary: str | None
+    vision_descriptions: list[str]
+    summary_text: str | None
+    todos: list[dict]
+    plan_done_count: int
+    force_continue: bool
+    plan_push_count: int
+
+    title_holder: list[str]
+    title_thread: threading.Thread | None
+
+
+class EventBus:
+    """节点向调用方推送 SSE 事件的中转。"""
+
+    def __init__(self, queue: Queue) -> None:
+        self._queue = queue
+
+    def emit(self, event: str, data) -> None:
+        self._queue.put({"event": event, "data": data})
+
+
+def _plan_hint(step: str) -> dict:
+    """解析计划步骤的建议手段（工具提示），让 plan 真正指导执行。"""
+    s = step
+    tool_hint = ""
+    if any(k in s for k in ("知识库", "检索文档", "文档", "书籍", "著作", "章节")):
+        tool_hint = "knowledge_base_search"
+    elif any(k in s for k in ("联网", "搜索", "新闻", "网络", "实时", "热点")):
+        tool_hint = "web_search"
+    elif any(
+        k in s
+        for k in (
+            "文件夹",
+            "文件",
+            "写入",
+            "编辑",
+            "创建",
+            "删除",
+            "代码",
+            "脚本",
+            "运行",
+            "测试",
+            "项目",
+        )
+    ):
+        tool_hint = "file_tool/bash"
+    return {"step": s, "tool_hint": tool_hint}
+
+
+def _generate_reasoning_summary(
+    service: "LangGraphAgentService",
+    state: AgentState,
+    runtime: dict,
+) -> str:
+    """生成"已深度思考"摘要：基于计划+工具轨迹，用低温模型写一段简短思考过程。"""
+    trace_lines = "\n".join(
+        f"- 调用 {t.get('name')}：{str(t.get('summary') or '')[:80]}"
+        for t in (state.get("tool_trace") or [])[:4]
+    )
+    prompt = (
+        "根据下面的执行过程，用第一人称写一段不超过 120 字的'思考摘要'，"
+        "说明你如何分析问题、检索/搜索了什么、得到什么结论，以及为什么这样回答。"
+        "只输出摘要本身，不要解释。\n\n"
+        f"问题：{state['question'][:300]}\n"
+        f"计划：{'；'.join(state.get('plan_steps') or [])}\n"
+        f"工具过程：\n{trace_lines or '（无工具调用）'}"
+    )
+    try:
+        resp = service.context._invoke([HumanMessage(content=prompt)])
+        return (resp.content or "").strip()[:200]
+    except Exception as exc:
+        logger.warning("思考摘要生成失败：%s", exc)
+        return ""
+
+
+# ============================================================
+# 节点：prepare
+# ============================================================
+
+
+def _prepare_node(state: AgentState) -> dict:
+    """会话/历史/规划/记忆/视觉/工具组装，输出分层消息。"""
+    service: LangGraphAgentService = state["service"]
+    bus: EventBus = state["bus"]
+    db: Session | None = state["db"]
+    settings: Settings = service.settings
+    rag: RAGService = service.rag
+    runtime: dict = state["runtime"]
+    stop_event = state.get("stop_event")
+
+    question = state["question"]
+    images = state["images"] or []
+    use_web_search = state["use_web_search"]
+    use_knowledge_base = state["use_knowledge_base"]
+    conversation_id = state["conversation_id"]
+    template_id = state["template_id"]
+    system_prompt = state["system_prompt"]
+    tool_mode = state["tool_mode"]
+
+    def stopped() -> bool:
+        return stop_event is not None and stop_event.is_set()
+
+    # ---- 会话与历史（MySQL 记忆；失败则降级为无记忆模式）----
+    conv_id = conversation_id
+    conv_title = None
+    is_new_conversation = False
+    history_messages: list = []
+    summary_text: str | None = None
+    if db is not None:
+        try:
+            bound_template_id = template_id or None
+            conv = (
+                repo.get_conversation(db, conversation_id)
+                if conversation_id
+                else None
+            )
+            if conv is None:
+                conv = repo.create_conversation(
+                    db, title="新对话", template_id=bound_template_id
+                )
+                is_new_conversation = True
+            elif template_id is not None and (conv.template_id or None) != (
+                template_id or None
+            ):
+                conv = repo.update_conversation(
+                    db, conv.id, template_id=template_id
+                )
+            conv_id = conv.id
+            conv_title = conv.title
+            summary_text, recent_rows = service.context.compact_conversation(
+                db, conv_id
+            )
+            recent_rows = trim_history_for_budget(
+                recent_rows, settings.history_max_tokens
+            )
+            for row in recent_rows:
+                if row["role"] == "user":
+                    history_messages.append(HumanMessage(content=row["content"]))
+                elif row["role"] == "assistant":
+                    history_messages.append(AIMessage(content=row["content"]))
+        except Exception as exc:
+            logger.warning("读写会话失败，降级为无记忆模式：%s", exc)
+            conv_id = conversation_id
+            history_messages = []
+    runtime["conv_id"] = conv_id
+
+    # ---- checkpoint 恢复：上次任务中断时从快照继续 ----
+    restored: dict | None = None
+    if settings.checkpoint_enabled and db is not None and conv_id is not None:
+        try:
+            from ..checkpoint import get_store
+
+            restored = get_store(settings).load(conv_id)
+        except Exception as exc:
+            logger.warning("加载 checkpoint 失败：%s", exc)
+            restored = None
+    if not (restored and restored.get("pending") and restored.get("messages")):
+        restored = None
+
+    # ---- 新会话标题：后台线程生成，不阻塞首 token ----
+    title_holder: list[str] = []
+    title_thread: threading.Thread | None = None
+    if is_new_conversation and db is not None:
+        def _generate_title_async():
+            try:
+                from ..db.database import SessionLocal, db_ready
+
+                if not (db_ready and SessionLocal is not None):
+                    return
+                s = SessionLocal()
+                try:
+                    title = service._generate_title(question)
+                    if title:
+                        repo.rename_conversation(s, conv_id, title)
+                        title_holder.append(title)
+                finally:
+                    s.close()
+            except Exception as exc:
+                logger.warning("后台生成会话标题失败：%s", exc)
+
+        title_thread = threading.Thread(target=_generate_title_async, daemon=True)
+        title_thread.start()
+    state["title_holder"] = title_holder
+    state["title_thread"] = title_thread
+
+    # ---- 复杂问题先规划（支持计划模式确认后按同一计划执行） ----
+    tools_enabled = (
+        use_knowledge_base
+        or use_web_search
+        or effective(settings, "advanced_tools_enabled", True)
+    )
+    plan_steps: list[str] = []
+    plan_map: list[dict] = []
+    resume_plan = state.get("resume_plan") or []
+    if resume_plan:
+        # 计划模式确认后：沿用用户已确认的计划，不重新规划
+        plan_steps = list(resume_plan)
+        plan_map = [_plan_hint(step) for step in plan_steps]
+    elif tools_enabled and not stopped():
+        try:
+            plan_steps = service.context.plan(question)
+            plan_map = [_plan_hint(step) for step in plan_steps]
+        except Exception as exc:
+            logger.warning("任务规划失败：%s", exc)
+            plan_steps = []
+    if restored is not None and restored.get("plan_steps"):
+        # 恢复任务沿用原计划（不重新规划）
+        plan_steps = restored.get("plan_steps")
+        plan_map = restored.get("plan_map") or [_plan_hint(s) for s in plan_steps]
+    state["plan_steps"] = plan_steps
+    state["plan_map"] = plan_map
+
+    # ---- TodoWrite 任务清单：规划后播种，跨轮跟踪进度 ----
+    todos: list[dict] = []
+    if db is not None and conv_id is not None and not stopped():
+        try:
+            from ..todos import (
+                load_todos,
+                plan_progress,
+                seed_todos_from_plan,
+                todos_to_text,
+            )
+
+            todos = seed_todos_from_plan(db, conv_id, plan_steps) or load_todos(
+                db, conv_id
+            )
+        except Exception as exc:
+            logger.warning("任务清单加载失败：%s", exc)
+            todos = []
+    plan_done_count = 0
+    plan_push_count = 0
+    if todos:
+        try:
+            from ..todos import plan_progress
+
+            plan_done_count, _total, _remaining = plan_progress(todos)
+        except Exception as exc:
+            logger.warning("任务清单进度计算失败：%s", exc)
+            plan_done_count = 0
+    if restored is not None:
+        plan_done_count = int(restored.get("plan_done_count") or plan_done_count)
+        plan_push_count = int(restored.get("plan_push_count") or 0)
+    state["todos"] = todos
+    state["plan_done_count"] = plan_done_count
+    state["force_continue"] = False
+    state["plan_push_count"] = plan_push_count
+    if todos:
+        bus.emit("todos", {"todos": todos})
+
+    # ---- 知识库文档清单：让模型知道"库里有什么" ----
+    kb_documents: list[str] = []
+    if use_knowledge_base:
+        try:
+            kb_documents = [item["name"] for item in rag.list_documents()][:30]
+        except Exception as exc:
+            logger.warning("获取知识库文档清单失败：%s", exc)
+            kb_documents = []
+    state["kb_documents"] = kb_documents
+
+    # ---- 系统提示词 = 模板 + 工具规则 + 文档清单 ----
+    template_content = service._get_template_content(db, template_id, system_prompt)
+    advanced_tools_on = effective(settings, "advanced_tools_enabled", True)
+    system_prompt_final = compose_system_prompt(
+        template_content,
+        use_knowledge_base=use_knowledge_base,
+        use_web_search=use_web_search,
+        kb_documents=kb_documents,
+        advanced_tools=advanced_tools_on,
+        plan_only=bool(state.get("plan_only")),
+        todos_text=todos_to_text(todos) if todos else "",
+    )
+
+    bus.emit(
+        "session",
+        {"conversation_id": conv_id, "title": conv_title},
+    )
+    bus.emit("status", {"phase": "prepare", "text": "正在准备上下文…"})
+    if plan_steps:
+        bus.emit("plan", {"steps": plan_steps})
+
+    # ---- 长期事实记忆召回 ----
+    memory_hits: list[str] = []
+    memory_summary: str | None = None
+    if db is not None and conv_id is not None and not stopped():
+        try:
+            rag.acquire_gpu()
+            try:
+                memory_hits = service.context.retrieve_memories(
+                    db, rag.embeddings, question
+                )
+            finally:
+                rag.release_gpu()
+        except Exception as exc:
+            logger.warning("记忆召回失败：%s", exc)
+            memory_hits = []
+        try:
+            memory_summary = service.context.get_memory_summary(db)
+        except Exception:
+            memory_summary = None
+    state["memory_hits"] = memory_hits
+    state["memory_summary"] = memory_summary
+    state["summary_text"] = summary_text
+
+    # ---- 用户上传图片：主模型无视觉时先识图并注入上下文 ----
+    vision_descriptions: list[str] = []
+    if (
+        images
+        and settings.vision_auto_describe
+        and not settings.main_model_vision
+        and not stopped()
+    ):
+        try:
+            if service.vision.configured:
+                desc = service.vision.describe_images(images)
+                if desc:
+                    vision_descriptions = [desc]
+                    bus.emit(
+                        "vision",
+                        {
+                            "provider": "sensenova",
+                            "model": service.vision.provider.get("model")
+                            or "sensenova-6.8-flash-lite",
+                            "descriptions": vision_descriptions,
+                        },
+                    )
+        except Exception as exc:
+            logger.warning("图片识别失败，跳过：%s", exc)
+            vision_descriptions = []
+    state["vision_descriptions"] = vision_descriptions
+
+    # ---- 组装分层上下文：时间 -> 摘要 -> 记忆 -> 图片 -> 历史 -> 问题 ----
+    messages: list = []
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    weekday = "一二三四五六日"[now.weekday()]
+    time_context = f"当前时间：{now:%Y-%m-%d %H:%M}（星期{weekday}，Asia/Shanghai）。"
+    if db is not None and use_web_search:
+        try:
+            digest_raw = repo.get_meta(db, f"suggestions_{now:%Y-%m-%d}")
+            if digest_raw:
+                digest = json.loads(digest_raw)
+                news = next((i for i in digest if i.get("type") == "news"), None)
+                if news:
+                    time_context += f"\n今日热点话题（仅供参考，可据此展开）：{news.get('text', '')}"
+        except Exception:
+            pass
+
+    # 文件型项目记忆（AGENTS.md）与最近任务轨迹摘要：始终注入（若有）
+    project_memory_text = None
+    trajectory_summary = None
+    try:
+        from ..project_memory import load_project_memory
+        from ..trajectory import load_trajectory_summary
+
+        project_memory_text = load_project_memory(settings)
+        if db is not None and conv_id is not None:
+            trajectory_summary = load_trajectory_summary(db, conv_id)
+    except Exception as exc:
+        logger.warning("加载项目记忆/轨迹摘要失败：%s", exc)
+
+    if restored is not None:
+        # ---- 恢复路径：基于 checkpoint 的消息链继续 ----
+        messages = list(restored["messages"])
+        resume_notes = [
+            time_context,
+            "这是一次中断后恢复的任务。请基于上方已有的执行进展继续完成，"
+            "不要重复已经完成的检索/搜索步骤，除非信息确实缺失。",
+        ]
+        if project_memory_text:
+            resume_notes.append("项目记忆（AGENTS.md）：\n" + project_memory_text)
+        if trajectory_summary:
+            resume_notes.append("最近任务过程摘要：\n" + trajectory_summary)
+        messages.insert(0, SystemMessage(content="\n".join(resume_notes)))
+        messages.append(HumanMessage(content=question))
+        # 恢复进度状态
+        state["sources"] = restored.get("sources") or []
+        state["tool_trace"] = restored.get("tool_trace") or []
+        state["tool_calls_used"] = int(restored.get("tool_calls_used") or 0)
+        state["failure_count"] = int(restored.get("failure_count") or 0)
+        state["forced_final"] = bool(restored.get("forced_final"))
+        state["last_call_warned"] = bool(restored.get("last_call_warned"))
+        state["plan_done_count"] = int(restored.get("plan_done_count") or 0)
+        state["plan_push_count"] = int(restored.get("plan_push_count") or 0)
+        state["force_continue"] = False
+        runtime["final_text"] = restored.get("final_text") or ""
+    else:
+        messages.append(SystemMessage(content=time_context))
+        if project_memory_text:
+            messages.append(
+                SystemMessage(content="项目记忆（AGENTS.md）：\n" + project_memory_text)
+            )
+        if trajectory_summary:
+            messages.append(
+                SystemMessage(content="最近任务过程摘要：\n" + trajectory_summary)
+            )
+        if summary_text:
+            messages.append(
+                SystemMessage(
+                    content="以下是对本会话早期内容的摘要（供参考）：\n" + summary_text
+                )
+            )
+        if memory_summary:
+            messages.append(
+                SystemMessage(
+                    content="关于用户（长期记忆摘要，通常应作为默认背景）：\n"
+                    + memory_summary
+                )
+            )
+        if memory_hits:
+            messages.append(
+                SystemMessage(
+                    content="相关的长期记忆（如与本轮相关可参考）：\n"
+                    + "\n".join(f"- {item}" for item in memory_hits)
+                )
+            )
+        if vision_descriptions:
+            messages.append(
+                SystemMessage(
+                    content=(
+                        "用户上传了图片。以下是视觉模型对图片的理解，请据此回答：\n"
+                        + "\n".join(
+                            f"- 图片{i + 1}：{text}"
+                            for i, text in enumerate(vision_descriptions)
+                        )
+                    )
+                )
+            )
+        messages.extend(history_messages)
+        messages.append(HumanMessage(content=question))
+
+    # ---- 按开关组装工具 ----
+    skill_enabled_ids = None
+    try:
+        from ..skills import load_prefs
+
+        skill_enabled_ids = set(
+            (load_prefs(db) if db is not None else {}).get("enabled") or []
+        )
+    except Exception:
+        skill_enabled_ids = None
+    tools = build_tools(
+        rag,
+        use_web_search,
+        use_knowledge_base,
+        effective(settings, "web_search_provider"),
+        settings.tavily_api_key,
+        effective(settings, "web_search_max_results"),
+        crag_enabled=settings.crag_fallback_enabled,
+        crag_min_score=settings.crag_min_score,
+        vision=service.vision,
+        skills_enabled=effective(settings, "skills_enabled", True),
+        skill_enabled_ids=skill_enabled_ids,
+    )
+    # 扩展工具：MCP + 受控执行（文件/命令，敏感操作走人工确认）
+    tools.extend(service.mcp_tools(db))
+    tools.extend(service.extra_tools())
+    if db is not None and conv_id is not None:
+        try:
+            from ..todos import make_todo_tool
+
+            tools.append(make_todo_tool(db, conv_id))
+        except Exception as exc:
+            logger.warning("任务清单工具加载失败：%s", exc)
+
+    state["messages"] = messages
+    state["tools"] = tools
+    return {
+        "messages": messages,
+        "tools": tools,
+        "plan_steps": plan_steps,
+        "plan_map": plan_map,
+        "kb_documents": kb_documents,
+        "memory_hits": memory_hits,
+        "memory_summary": memory_summary,
+        "vision_descriptions": vision_descriptions,
+        "summary_text": summary_text,
+        "title_holder": title_holder,
+        "title_thread": title_thread,
+        "todos": todos,
+        "plan_done_count": plan_done_count,
+        "force_continue": False,
+        "plan_push_count": plan_push_count,
+        "sources": state["sources"],
+        "tool_trace": state["tool_trace"],
+        "tool_calls_used": state["tool_calls_used"],
+        "forced_final": state["forced_final"],
+        "last_call_warned": state["last_call_warned"],
+    }
+
+
+# ============================================================
+# 节点：agent（ReAct 思考 + 流式生成）
+# ============================================================
+
+
+def _agent_node(state: AgentState) -> dict:
+    service: LangGraphAgentService = state["service"]
+    bus: EventBus = state["bus"]
+    settings: Settings = service.settings
+    runtime: dict = state["runtime"]
+    messages = state["messages"]
+    tools = state["tools"]
+    stop_event = state.get("stop_event")
+
+    def stopped() -> bool:
+        return stop_event is not None and stop_event.is_set()
+
+    if stopped():
+        runtime["status"] = "stopped"
+        return {}
+
+    # 还剩最后一次工具调用时提前提示：优先补充检索，随后必须作答
+    remaining_calls = settings.agent_max_iterations - state["tool_calls_used"]
+    if (
+        tools
+        and state.get("plan_steps")
+        and remaining_calls == 1
+        and not state["forced_final"]
+        and not state["last_call_warned"]
+    ):
+        state["last_call_warned"] = True
+        messages.append(
+            SystemMessage(
+                content=(
+                    "你只剩最后一次工具调用机会。若信息仍不完整，"
+                    "请利用这次机会做一次补充检索（优先 knowledge_base_search"
+                    " 或 web_search）；之后必须给出最终回答。"
+                    "若仍不足，明确告诉用户缺少什么，不要编造。"
+                )
+            )
+        )
+
+    # 思考摘要前置：正文输出前先展示"已深度思考"（有工具调用历史时）
+    if (
+        state["tool_calls_used"] > 0
+        and settings.reasoning_summary_enabled
+        and not runtime.get("reasoning_emitted")
+    ):
+        runtime["reasoning_emitted"] = True
+        summary = ""
+        evt = runtime.get("_reasoning")
+        if evt is not None:
+            # 摘要已在工具执行期间后台预生成，最多等 1s；超时不阻塞正文
+            evt["done"].wait(timeout=1.0)
+            summary = evt.get("summary") or ""
+        if not summary:
+            # 预生成未就绪：直接开始正文（摘要缺失不影响回答，避免额外延迟）
+            summary = ""
+        if summary:
+            bus.emit("reasoning", {"summary": summary})
+
+    bus.emit("status", {"phase": "thinking", "text": "正在思考并生成回答…"})
+
+    # LLM 调用并发上限（生成阶段不占 GPU 锁）
+    service.rag.acquire_llm()
+    try:
+        chat = (
+            service.chat
+            if state["forced_final"] or not tools
+            else service.chat.bind_tools(tools)
+        )
+        chunks: list = []
+        stream = chat.stream(
+            messages,
+            config={"callbacks": [get_usage_collector()]},
+        )
+        for chunk in stream:
+            if stopped():
+                runtime["status"] = "stopped"
+                break
+            chunks.append(chunk)
+            content = getattr(chunk, "content", None)
+            if content:
+                runtime["final_text"] += content
+                bus.emit("token", content)
+    finally:
+        service.rag.release_llm()
+
+    if stopped():
+        return {}
+    if not chunks:
+        # 模型没有输出（如空响应）：直接收尾，避免死循环
+        state["pending_tool_calls"] = []
+        return {
+            "pending_tool_calls": [],
+            "plan_done_count": state.get("plan_done_count", 0),
+            "force_continue": False,
+            "plan_push_count": state.get("plan_push_count", 0),
+            "todos": state.get("todos") or [],
+        }
+
+    merged = chunks[0]
+    for chunk in chunks[1:]:
+        merged = merged + chunk
+    usage = getattr(merged, "usage_metadata", None)
+    if usage:
+        runtime["token_usage"] = dict(usage)
+        # 流式调用不在 on_llm_end 的 llm_output 里，手动补记到聚合统计
+        get_usage_collector().add_usage(
+            int(usage.get("input_tokens") or 0),
+            int(usage.get("output_tokens") or 0),
+        )
+
+    tool_calls = list(getattr(merged, "tool_calls", None) or [])
+    messages.append(
+        AIMessage(content=merged.content or "", tool_calls=tool_calls)
+    )
+    state["pending_tool_calls"] = tool_calls
+
+    # ---- 计划硬约束：还有未完成的工具型步骤时，不允许提前收尾 ----
+    force_continue = False
+    if (
+        not tool_calls
+        and not state["forced_final"]
+        and runtime.get("status") != "stopped"
+        and int(state.get("plan_push_count") or 0) < 3
+    ):
+        try:
+            from ..todos import plan_progress
+
+            todos = state.get("todos") or []
+            done, _total, remaining = (
+                plan_progress(todos) if todos else (0, 0, [])
+            )
+            if not todos and state.get("plan_map"):
+                # 任务清单不可用（如 DB 降级）时退回计划步骤顺序
+                done = min(
+                    int(state.get("plan_done_count") or 0),
+                    len(state["plan_map"]),
+                )
+                remaining = state["plan_map"][done:]
+            remaining_hint = any(
+                (
+                    item.get("tool_hint")
+                    if isinstance(item, dict) and "tool_hint" in item
+                    else _plan_hint(
+                        str(item.get("text") or item.get("step") or item)
+                    ).get("tool_hint")
+                )
+                for item in remaining
+            )
+            if remaining_hint:
+                force_continue = True
+                state["plan_push_count"] = (
+                    int(state.get("plan_push_count") or 0) + 1
+                )
+                remaining_text = "；".join(
+                    str(item.get("text") or item.get("step") or item)
+                    for item in remaining[:6]
+                )
+                messages.append(
+                    SystemMessage(
+                        content=(
+                            "【计划硬约束】以下步骤尚未完成且需要工具："
+                            f"{remaining_text}\n"
+                            "请继续调用对应工具完成这些步骤，不要提前输出最终回答；"
+                            "若某步确实无需执行，先用 todo_update remove 删除它，"
+                            "或用 todo_update complete 标记为已完成，再结束。"
+                        )
+                    )
+                )
+        except Exception as exc:
+            logger.warning("计划硬约束判断失败：%s", exc)
+            force_continue = False
+
+    return {
+        "messages": messages,
+        "pending_tool_calls": tool_calls,
+        "tool_calls_used": state["tool_calls_used"],
+        "forced_final": state["forced_final"],
+        "last_call_warned": state["last_call_warned"],
+        "plan_done_count": state.get("plan_done_count", 0),
+        "force_continue": force_continue,
+        "plan_push_count": state.get("plan_push_count", 0),
+        "todos": state.get("todos") or [],
+    }
+
+
+# ============================================================
+# 节点：tools（执行工具 + 回填）
+# ============================================================
+
+
+def _tools_node(state: AgentState) -> dict:
+    service: LangGraphAgentService = state["service"]
+    bus: EventBus = state["bus"]
+    settings: Settings = service.settings
+    runtime: dict = state["runtime"]
+    messages = state["messages"]
+    db: Session | None = state["db"]
+    stop_event = state.get("stop_event")
+    from ..permissions import (
+        describe_tool_call,
+        display_args,
+        get_permission_manager,
+        is_sensitive_tool,
+    )
+    from ..tools_extra import command_allowed
+
+    permission_manager = get_permission_manager()
+    try:
+        permission_manager.cleanup()
+    except Exception:
+        pass
+
+    tools_by_name = {t.name: t for t in state["tools"]}
+    counter = state["counter"]
+    tool_calls = state.get("pending_tool_calls") or []
+    if not tool_calls:
+        return {}
+
+    # 预生成"思考摘要"（后台线程）：与工具执行并行，
+    # 工具通常耗时数秒，摘要利用这段时间完成，作答轮几乎零额外延迟
+    if settings.reasoning_summary_enabled:
+        try:
+            evt = {"summary": None, "done": threading.Event()}
+            runtime["_reasoning"] = evt
+
+            def _pre_generate():
+                try:
+                    text = _generate_reasoning_summary(service, state, runtime)
+                    evt["summary"] = (text or "")[:200]
+                except Exception:
+                    evt["summary"] = ""
+                finally:
+                    evt["done"].set()
+
+            threading.Thread(target=_pre_generate, daemon=True).start()
+        except Exception as exc:
+            logger.warning("启动思考摘要预生成失败：%s", exc)
+
+    # ---- 计划模式（只读）：敏感操作直接拦截，不弹审批 ----
+    blocked: dict[str, str] = {}
+    if state.get("plan_only"):
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            args = tc.get("args") or {}
+            if is_sensitive_tool(name, args):
+                blocked[tc.get("id")] = (
+                    "当前为计划模式（只读）：不允许写文件/编辑/删除/执行命令。"
+                    "请基于已有信息整理出清晰的执行计划，等待用户确认后再执行。"
+                )
+
+    # ---- 人工确认（HITL）：敏感操作先请求用户批准，再进入执行 ----
+    # 写/编辑/删除/命令默认 ask；命令命中自动放行白名单或本会话已记住则无需确认；
+    # permission_mode=allow 时全部自动批准（类 Claude Code --dangerously-skip-permissions）。
+    approval: dict[str, dict] = {}
+    permission_mode = effective(settings, "tool_permission_mode", "ask")
+    if permission_mode == "ask":
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            args = tc.get("args") or {}
+            if tc.get("id") in blocked:
+                continue
+            needs = is_sensitive_tool(name, args)
+            command = str(args.get("command") or "")
+            if name in ("bash", "command_tool") and (
+                command_allowed(settings, command)[0]
+                or permission_manager.is_session_allowed(runtime.get("conv_id"), command)
+            ):
+                needs = False
+            if not needs:
+                continue
+            summary = describe_tool_call(name, args)
+            req = permission_manager.submit(
+                tool=name,
+                arguments=display_args(name, args),
+                summary=summary,
+                conversation_id=runtime.get("conv_id"),
+            )
+            bus.emit(
+                "permission_request",
+                {
+                    "id": req.id,
+                    "name": name,
+                    "arguments": req.arguments,
+                    "summary": summary,
+                },
+            )
+            bus.emit("status", {"phase": "permission", "text": f"等待确认：{summary}"})
+            approved = permission_manager.wait(
+                req,
+                timeout=int(effective(settings, "permission_timeout", 300) or 300),
+                stop_event=stop_event,
+            )
+            if approved:
+                bus.emit("permission_resolved", {"id": req.id, "approved": True, "reason": ""})
+                if req.remember_session and command:
+                    permission_manager.mark_session_allowed(
+                        runtime.get("conv_id"), command
+                    )
+                approval[tc.get("id")] = {
+                    "ok": True,
+                    "reason": "",
+                    "remember": bool(req.remember_session or req.remember_forever),
+                }
+            else:
+                reason = req.reason or (
+                    "用户拒绝了该操作" if req.status == "denied" else "等待确认超时，已自动取消"
+                )
+                bus.emit("permission_resolved", {"id": req.id, "approved": False, "reason": reason})
+                approval[tc.get("id")] = {"ok": False, "reason": reason}
+
+    # 并行执行多个工具调用（检索类内部已有 GPU 锁；API 类并发安全），保持返回顺序
+    def _execute(tc: dict) -> tuple[dict, dict]:
+        name = tc.get("name", "")
+        tool = tools_by_name.get(name)
+        args = tc.get("args") or {}
+        if tool is None:
+            return tc, {"error": f"未知工具：{name}", "_duration_ms": None}
+        blocked_reason = blocked.get(tc.get("id"))
+        if blocked_reason:
+            return tc, {
+                "summary": "计划模式：已拦截该敏感操作",
+                "error": blocked_reason,
+                "permission": "plan_only",
+                "_duration_ms": None,
+            }
+        gate = approval.get(tc.get("id"))
+        if gate is not None and not gate["ok"]:
+            return tc, {
+                "summary": f"用户拒绝了该操作：{gate['reason']}",
+                "error": f"操作未执行（用户拒绝）：{gate['reason']}。请说明影响并询问替代方案。",
+                "permission": "denied",
+                "_duration_ms": None,
+            }
+        elif not args:
+            # 空参数兜底：不浪费一次工具调用，直接提示模型补充参数
+            return tc, {
+                "summary": f"{name} 参数缺失，请补充参数后重试",
+                "error": f"参数缺失：调用 {name} 需要必要参数，请补充后重试",
+                "retry": True,
+                "_duration_ms": None,
+            }
+        try:
+            t0 = time.perf_counter()
+            result = tool.invoke(args)
+            duration = round((time.perf_counter() - t0) * 1000)
+            if not isinstance(result, dict):
+                result = {"result": result}
+            result["_duration_ms"] = duration
+            if gate is not None and gate.get("remember"):
+                result["summary"] = (
+                    str(result.get("summary") or "") + "（已记住，下次不再询问）"
+                )
+            return tc, result
+        except Exception as exc:
+            logger.warning("工具 %s 执行失败：%s", name, exc)
+            return tc, {"error": str(exc), "_duration_ms": -1}
+
+    outcomes: list[tuple[dict, dict]] = []
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(3, max(1, len(tool_calls)))) as pool:
+        outcomes = list(pool.map(_execute, tool_calls))
+
+    failed_ids: set[str] = set()
+    for tc, result in outcomes:
+        if stop_event is not None and stop_event.is_set():
+            runtime["status"] = "stopped"
+            break
+        name = tc.get("name", "")
+        entry = {
+            "name": name,
+            "arguments": tc.get("args") or {},
+            "summary": "",
+            "step": len(state["tool_trace"]) + 1,
+            "duration_ms": result.pop("_duration_ms", None),
+        }
+        state["tool_trace"].append(entry)
+        bus.emit(
+            "tool_start",
+            {
+                "id": tc.get("id"),
+                "name": name,
+                "arguments": tc.get("args") or {},
+            },
+        )
+
+        messages.append(
+            ToolMessage(
+                content=json.dumps(result, ensure_ascii=False),
+                name=name,
+                tool_call_id=tc.get("id") or "",
+            )
+        )
+        parsed = result if isinstance(result, dict) else {"summary": str(result)}
+        entry["summary"] = parsed.get("summary", "")
+        if parsed.get("permission"):
+            entry["permission"] = parsed.pop("permission")
+        # 失败判定：显式 error 或命令非零退出码（exit_code 非 None 且非 0）
+        if parsed.get("error") or parsed.get("exit_code") not in (None, 0):
+            failed_ids.add(tc.get("id"))
+        tool_sources = (
+            extract_sources(parsed)
+            if name in ("knowledge_base_search", "web_search")
+            else []
+        )
+        state["sources"].extend(tool_sources)
+        bus.emit(
+            "tool_result",
+            {
+                "id": tc.get("id"),
+                "name": name,
+                "summary": parsed.get("summary", ""),
+                "duration_ms": entry.get("duration_ms"),
+                "sources": tool_sources,
+            },
+        )
+
+    # 失败的工具调用不消耗迭代预算（成功数才累计）：
+    # 路径/权限/参数类错误多为可重试问题，烧掉预算会导致任务半途而废（如 run#55）
+    ok_count = len(tool_calls) - len(failed_ids)
+    state["tool_calls_used"] += ok_count
+    if failed_ids:
+        state["failure_count"] = state.get("failure_count", 0) + len(failed_ids)
+        for tc in tool_calls:
+            if tc.get("id") not in failed_ids:
+                continue
+            name = tc.get("name", "")
+            result = dict(next(r for t, r in outcomes if t.get("id") == tc.get("id")))
+            error = str(result.get("error") or "")[:240]
+            if result.get("output"):
+                error = (error + "\n" + str(result.get("output"))[:240])[:420]
+            messages.append(
+                SystemMessage(
+                    content=(
+                        f"工具 {name} 执行失败：{error}\n"
+                        "这是一次可重试的失败，不消耗你的工具调用预算。"
+                        "请换一种方式继续完成任务，不要就此停止：\n"
+                        "1. 先 list_dir / read_file / grep_search 确认路径与现状；\n"
+                        "2. 按错误信息修正参数（例如改用工作目录内的相对路径，或先创建父目录）；\n"
+                        "3. 若目标确实不可达（如在工作目录之外），向用户说明限制，"
+                        "并给出可落地的替代方案（写入工作目录内、修改工作目录等），"
+                        "询问用户后再继续。\n"
+                        "任务未完成前，请持续尝试合理的替代方法。"
+                    )
+                )
+            )
+
+    # ---- 计划进度同步 + 任务清单自动更新（硬约束）----
+    plan_steps = state.get("plan_steps") or []
+    plan_map = state.get("plan_map") or [_plan_hint(s) for s in plan_steps]
+    todos = state.get("todos") or []
+    conv_id = runtime.get("conv_id")
+    # 工具执行后重新读取 DB，保证 todo_update 的修改立即反映到进度与前端
+    if db is not None and conv_id is not None:
+        try:
+            from ..todos import load_todos
+
+            todos = load_todos(db, conv_id) or todos
+        except Exception as exc:
+            logger.warning("任务清单重新读取失败：%s", exc)
+    # 成功的非 todo_update 工具调用推进一个计划步骤；
+    # todo_update 只维护清单（list/add/complete/remove/set），不推进计划进度
+    advance = sum(
+        1
+        for tc in tool_calls
+        if tc.get("id") not in failed_ids and tc.get("name") != "todo_update"
+    )
+    if plan_steps and advance > 0:
+        prev_done = int(state.get("plan_done_count") or 0)
+        target = min(prev_done + advance, len(plan_steps))
+        if db is not None and conv_id is not None:
+            try:
+                from ..todos import sync_todos_from_plan
+
+                hints = [_plan_hint(s).get("tool_hint") for s in plan_steps]
+                todos = (
+                    sync_todos_from_plan(db, conv_id, plan_steps, target, hints=hints)
+                    or todos
+                )
+            except Exception as exc:
+                logger.warning("任务清单自动同步失败：%s", exc)
+        else:
+            # DB 不可用时仅推进内存进度
+            state["plan_done_count"] = target
+    done = 0
+    total = 0
+    remaining: list[dict] = []
+    if todos:
+        try:
+            from ..todos import plan_progress
+
+            done, total, remaining = plan_progress(todos)
+        except Exception as exc:
+            logger.warning("任务清单进度计算失败：%s", exc)
+            done = total = 0
+            remaining = []
+    if not todos and plan_map:
+        # 任务清单不可用（如 DB 降级）时退回计划步骤顺序
+        done = min(int(state.get("plan_done_count") or 0), len(plan_map))
+        total = len(plan_map)
+        remaining = plan_map[done:]
+    state["plan_done_count"] = done
+    state["todos"] = todos
+    if todos:
+        bus.emit("todos", {"todos": todos})
+
+    if total:
+        progress = [f"计划进度：已完成 {done}/{total} 步。"]
+        if remaining:
+            current = remaining[0]
+            progress.append(f"当前步骤：{current.get('text', '')}")
+            progress.append(
+                "剩余步骤："
+                + "；".join(str(t.get("text", "")) for t in remaining)
+            )
+            if any(
+                _plan_hint(str(t.get("text", ""))).get("tool_hint")
+                for t in remaining
+            ):
+                progress.append(
+                    "硬约束：剩余步骤尚未完成，请继续按顺序执行；不要提前输出最终回答。"
+                )
+        else:
+            progress.append("剩余：无，可以基于已获取的信息作答。")
+        progress_text = "\n".join(progress)
+        messages.append(SystemMessage(content=progress_text))
+        # 计划进度事件：前端按完成/当前/未开始渲染步骤状态
+        bus.emit(
+            "plan_progress",
+            {
+                "done": done,
+                "total": total,
+                "current": remaining[0].get("text") if remaining else None,
+                "text": progress_text,
+            },
+        )
+
+    # 达到工具调用上限：强制收尾（下一轮 agent 不绑定工具）
+    if (
+        state["tool_calls_used"] >= settings.agent_max_iterations
+        and not state["forced_final"]
+        and runtime.get("status") != "stopped"
+    ):
+        state["forced_final"] = True
+        messages.append(
+            SystemMessage(
+                content=(
+                    "你已达到本轮允许的工具调用次数上限。"
+                    "请基于已经获取的信息直接给出最终回答；"
+                    "如果信息仍然不足，请明确告诉用户缺少什么，不要继续调用工具。"
+                )
+            )
+        )
+
+    # 失败次数过多仍受阻：强制收尾并让模型向用户说明（避免无意义空转）
+    max_failures = getattr(settings, "agent_max_failures", 3)
+    if (
+        state.get("failure_count", 0) >= max_failures
+        and not state["forced_final"]
+        and runtime.get("status") != "stopped"
+    ):
+        state["forced_final"] = True
+        messages.append(
+            SystemMessage(
+                content=(
+                    "你已连续多次遇到工具执行失败（超过允许的失败重试上限）。"
+                    "请基于已经获得的信息给出最终回答，向用户如实说明："
+                    "任务卡在哪一步、失败原因、以及用户需要做什么（例如修改工作目录、"
+                    "提供权限、确认替代路径）。不要再尝试调用工具。"
+                )
+            )
+        )
+
+    # checkpoint：每轮工具执行后保存快照，异常中断可恢复
+    if settings.checkpoint_enabled and db is not None and runtime.get("conv_id"):
+        try:
+            from ..checkpoint import get_store
+
+            get_store(settings).save(
+                runtime["conv_id"],
+                {
+                    "messages": messages,
+                    "sources": state["sources"],
+                    "tool_trace": state["tool_trace"],
+                    "plan_steps": state.get("plan_steps") or [],
+                    "plan_map": state.get("plan_map") or [],
+                    "final_text": runtime.get("final_text") or "",
+                    "tool_calls_used": state["tool_calls_used"],
+                    "failure_count": state.get("failure_count", 0),
+                    "forced_final": state["forced_final"],
+                    "last_call_warned": state["last_call_warned"],
+                    "plan_done_count": state.get("plan_done_count", 0),
+                    "plan_push_count": state.get("plan_push_count", 0),
+                    "todos": state.get("todos") or [],
+                },
+            )
+        except Exception as exc:
+            logger.warning("保存 checkpoint 失败：%s", exc)
+
+    return {
+        "messages": messages,
+        "pending_tool_calls": [],
+        "tool_trace": state["tool_trace"],
+        "sources": state["sources"],
+        "tool_calls_used": state["tool_calls_used"],
+        "failure_count": state.get("failure_count", 0),
+        "forced_final": state["forced_final"],
+        "last_call_warned": state["last_call_warned"],
+        "plan_done_count": state.get("plan_done_count", 0),
+        "force_continue": False,
+        "plan_push_count": state.get("plan_push_count", 0),
+        "todos": state.get("todos") or [],
+    }
+
+
+# ============================================================
+# 节点：finalize（收尾）
+# ============================================================
+
+
+def _finalize_node(state: AgentState) -> dict:
+    service: LangGraphAgentService = state["service"]
+    bus: EventBus = state["bus"]
+    db: Session | None = state["db"]
+    settings: Settings = service.settings
+    runtime: dict = state["runtime"]
+
+    final_text = runtime.get("final_text") or ""
+    sources = state.get("sources") or []
+    tool_trace = state.get("tool_trace") or []
+    conv_id = runtime.get("conv_id")
+
+    # 收尾同步任务清单：纯推理/总结类步骤视为被最终回答覆盖，自动补完成；
+    # 工具型步骤若仍未完成则保留未勾选状态（审计留痕，不假装完成）
+    if db is not None and conv_id is not None and runtime.get("status") == "ok":
+        try:
+            from ..todos import complete_steps_by_text, load_todos, plan_progress
+
+            plan_steps = state.get("plan_steps") or []
+            final_steps = [
+                s for s in plan_steps if not _plan_hint(s).get("tool_hint")
+            ]
+            todos = load_todos(db, conv_id)
+            if final_steps:
+                todos = complete_steps_by_text(db, conv_id, final_steps) or todos
+            if todos:
+                state["todos"] = todos
+                done, _total, _remaining = plan_progress(todos)
+                state["plan_done_count"] = done
+                bus.emit("todos", {"todos": todos})
+        except Exception as exc:
+            logger.warning("收尾任务清单同步失败：%s", exc)
+
+    # 来源去重（按 index 去重，保证 [n] 编号与来源卡片一一对应）
+    deduped: list[dict] = []
+    seen_src: set[str] = set()
+    for item in sources:
+        key = str(item.get("index") or item.get("content", ""))
+        if key and key not in seen_src:
+            seen_src.add(key)
+            deduped.append(item)
+    deduped = deduped[:8]
+
+    # 联网来源自动附录：模型未标注 [n] 时补"参考来源"链接
+    appendix = ""
+    if final_text and not re.search(r"\[\d{1,3}\]", final_text):
+        web_sources = [s for s in deduped if s.get("type") == "web" and s.get("url")]
+        if web_sources:
+            refs = "\n".join(
+                f"{s.get('index')}. [{s.get('title', '来源')}]({s.get('url')})"
+                for s in web_sources
+            )
+            appendix = f"\n\n**参考来源**\n{refs}"
+            final_text += appendix
+            runtime["final_text"] = final_text
+
+    # 持久化 user 消息 + assistant 消息
+    if db is not None and conv_id is not None:
+        try:
+            repo.add_message(db, conv_id, "user", state["question"])
+            if runtime.get("status") != "stopped" and final_text:
+                repo.add_message(
+                    db,
+                    conv_id,
+                    "assistant",
+                    final_text,
+                    tool_trace=tool_trace,
+                    sources=deduped,
+                )
+        except Exception as exc:
+            logger.warning("保存对话消息失败：%s", exc)
+
+    # 决策运行记录 + 结构化 trace（可观测性）
+    if db is not None:
+        try:
+            run_status = (
+                "stopped"
+                if runtime.get("status") == "stopped"
+                else "error"
+                if runtime.get("error")
+                else "ok"
+            )
+            run = repo.create_agent_run(
+                db,
+                conversation_id=conv_id,
+                question=state["question"],
+                plan=state.get("plan_steps") or [],
+                tool_trace=tool_trace,
+                answer_len=len(final_text),
+                latency_ms=round((time.perf_counter() - runtime["started"]) * 1000),
+                status=run_status,
+                error=runtime.get("error"),
+                token_usage={**usage_summary(), "last_call": runtime.get("token_usage")},
+            )
+            write_trace(
+                settings,
+                run.id,
+                {
+                    "conversation_id": conv_id,
+                    "question": state["question"][:1000],
+                    "plan": state.get("plan_steps") or [],
+                    "tool_trace": tool_trace,
+                    "answer_len": len(final_text),
+                    "latency_ms": round(
+                        (time.perf_counter() - runtime["started"]) * 1000
+                    ),
+                    "status": run_status,
+                    "error": runtime.get("error"),
+                    "memory_hits": (state.get("memory_hits") or [])[:5],
+                    "todos": state.get("todos") or [],
+                    "plan_done_count": state.get("plan_done_count", 0),
+                    "usage": usage_summary(),
+                },
+            )
+        except Exception as exc:
+            logger.warning("写入 Agent 运行记录失败：%s", exc)
+
+    # 长任务轨迹压缩（P1）：工具调用 >= 3 次时生成过程摘要，下次提问注入
+    if (
+        settings.trajectory_compress_enabled
+        and db is not None
+        and conv_id is not None
+        and len(tool_trace) >= 3
+    ):
+        try:
+            from ..trajectory import compress_trajectory
+
+            compress_trajectory(
+                service.context._invoke,
+                db,
+                conv_id,
+                state["question"],
+                state.get("plan_steps") or [],
+                tool_trace,
+            )
+        except Exception as exc:
+            logger.warning("轨迹压缩失败：%s", exc)
+
+    # checkpoint：正常/停止收尾后清除快照
+    if settings.checkpoint_enabled and db is not None and conv_id is not None:
+        try:
+            from ..checkpoint import get_store
+
+            get_store(settings).clear(conv_id)
+        except Exception as exc:
+            logger.warning("清除 checkpoint 失败：%s", exc)
+
+    # 标题后置：后台已生成则推送给前端更新（未完成则由会话刷新兜底）
+    title_thread = state.get("title_thread")
+    if title_thread is not None and title_thread.is_alive():
+        title_thread.join(timeout=1.0)
+    if state.get("title_holder"):
+        bus.emit("title", {"title": state["title_holder"][0]})
+
+    # 附录作为 token 补发 + done
+    if appendix:
+        bus.emit("token", appendix)
+    bus.emit(
+        "done",
+        {
+            "ok": True,
+            "stopped": runtime.get("status") == "stopped",
+            "sources": deduped,
+            "tool_trace": tool_trace,
+        },
+    )
+    return {}
+
+
+# ============================================================
+# 条件路由
+# ============================================================
+
+
+def _route_after_agent(state: AgentState) -> str:
+    if state.get("stop_event") is not None and state["stop_event"].is_set():
+        return "finalize"
+    if state.get("pending_tool_calls"):
+        return "tools"
+    if state.get("force_continue"):
+        # 计划硬约束：未完成的工具型步骤存在时，不允许提前收尾
+        return "agent"
+    return "finalize"
+
+
+def _route_after_tools(state: AgentState) -> str:
+    if state.get("stop_event") is not None and state["stop_event"].is_set():
+        return "finalize"
+    return "agent"
+
+
+def build_agent_graph():
+    """构建 LangGraph：prepare -> agent -> tools -> (循环) -> finalize。"""
+    graph = StateGraph(AgentState)
+    graph.add_node("prepare", _prepare_node)
+    graph.add_node("agent", _agent_node)
+    graph.add_node("tools", _tools_node)
+    graph.add_node("finalize", _finalize_node)
+
+    graph.add_edge(START, "prepare")
+    graph.add_edge("prepare", "agent")
+    graph.add_conditional_edges(
+        "agent",
+        _route_after_agent,
+        {"tools": "tools", "agent": "agent", "finalize": "finalize"},
+    )
+    graph.add_conditional_edges(
+        "tools",
+        _route_after_tools,
+        {"agent": "agent", "finalize": "finalize"},
+    )
+    graph.add_edge("finalize", END)
+    return graph.compile()
+
+
+# ============================================================
+# 服务：LangGraphAgentService
+# ============================================================
+
+
+class LangGraphAgentService(AgentService):
+    """LangGraph 编排版 Agent 服务：接口与 AgentService 完全一致。"""
+
+    def __init__(self, settings: Settings, rag_service: RAGService):
+        super().__init__(settings, rag_service)
+        self._graph = None
+        self._mcp = None
+        self.recursion_limit = getattr(settings, "agent_recursion_limit", 30)
+
+    @property
+    def graph(self):
+        if self._graph is None:
+            self._graph = build_agent_graph()
+        return self._graph
+
+    def refresh(self) -> None:
+        """设置变更后重置懒加载缓存；图结构不变，无需重建。"""
+        super().refresh()
+        self._mcp = None
+
+    # ---------------- 扩展工具（P0：MCP / 受控执行）----------------
+
+    def mcp_tools(self, db: Session | None) -> list:
+        """加载启用中的 MCP 服务器工具（连接失败自动降级跳过）。"""
+        if not effective(self.settings, "mcp_enabled", True):
+            return []
+        if self._mcp is None:
+            from ..mcp_manager import MCPManager
+
+            self._mcp = MCPManager()
+        servers = self._load_mcp_servers(db)
+        if not servers:
+            return []
+        try:
+            return self._mcp.configure(servers)
+        except Exception as exc:
+            logger.warning("MCP 工具配置失败：%s", exc)
+            return []
+
+    def extra_tools(self) -> list:
+        """受控执行工具：类 Claude Code 文件/命令工具集（需在设置中开启总开关）。"""
+        if not effective(self.settings, "advanced_tools_enabled", True):
+            return []
+        try:
+            from ..tools_extra import make_agent_tools
+
+            return make_agent_tools(self.settings)
+        except Exception as exc:
+            logger.warning("受控执行工具加载失败：%s", exc)
+            return []
+
+    @staticmethod
+    def _load_mcp_servers(db: Session | None) -> list[dict]:
+        if db is None:
+            return []
+        try:
+            raw = repo.get_meta(db, "mcp_servers")
+            if raw:
+                data = json.loads(raw)
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            pass
+        return []
+
+    # ---------------- 入口（签名与 AgentService._run 一致）----------------
+
+    def _run(
+        self,
+        question: str,
+        use_web_search: bool,
+        use_knowledge_base: bool,
+        conversation_id: int | None,
+        template_id: int | None,
+        system_prompt: str | None,
+        db: Session | None,
+        tool_mode: str,
+        stop_event: threading.Event | None,
+        images: list[str] | None,
+        plan_only: bool = False,
+        resume_plan: list[str] | None = None,
+    ):
+        """执行 LangGraph 编排，逐事件产出（session/plan/vision/.../done）。"""
+        settings = self.settings
+        images = [img for img in (images or []) if img and img.strip()][
+            : settings.vision_max_images
+        ]
+
+        # 工具开关解析：tool_mode 优先，兼容旧前端布尔开关
+        use_knowledge_base, use_web_search = self._resolve_tool_flags(
+            tool_mode, use_web_search, use_knowledge_base
+        )
+
+        queue: Queue = Queue()
+        bus = EventBus(queue)
+        runtime: dict = {
+            "conv_id": conversation_id,
+            "started": time.perf_counter(),
+            "final_text": "",
+            "status": "ok",
+            "error": None,
+            "token_usage": None,
+        }
+        state: AgentState = {
+            "service": self,
+            "bus": bus,
+            "db": db,
+            "runtime": runtime,
+            "stop_event": stop_event,
+            "question": question,
+            "images": images,
+            "use_web_search": use_web_search,
+            "use_knowledge_base": use_knowledge_base,
+            "conversation_id": conversation_id,
+            "template_id": template_id,
+            "system_prompt": system_prompt,
+            "tool_mode": tool_mode,
+            "plan_only": bool(plan_only),
+            "resume_plan": list(resume_plan) if resume_plan else None,
+            "messages": [],
+            "tools": [],
+            "pending_tool_calls": [],
+            "sources": [],
+            "tool_trace": [],
+            "counter": [0],
+            "tool_calls_used": 0,
+            "failure_count": 0,
+            "forced_final": False,
+            "last_call_warned": False,
+            "plan_steps": [],
+            "plan_map": [],
+            "kb_documents": [],
+            "memory_hits": [],
+            "memory_summary": None,
+            "vision_descriptions": [],
+            "summary_text": None,
+            "todos": [],
+            "plan_done_count": 0,
+            "force_continue": False,
+            "plan_push_count": 0,
+            "title_holder": [],
+            "title_thread": None,
+        }
+
+        def worker():
+            # 本轮所有 LLM 调用的 token 用量聚合（线程级 callback）
+            reset_usage()
+            try:
+                self.graph.invoke(
+                    state,
+                    config={"recursion_limit": self.recursion_limit},
+                )
+                queue.put(None)
+            except Exception as exc:
+                logger.exception("LangGraph Agent 执行失败")
+                runtime["status"] = "error"
+                runtime["error"] = str(exc)
+                queue.put({"event": "error", "data": {"message": str(exc)}})
+                try:
+                    # 超限/异常兜底：保证有 done 事件与运行记录
+                    _finalize_node(state)
+                except Exception as inner:
+                    logger.warning("兜底收尾失败：%s", inner)
+                queue.put(None)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        while True:
+            event = queue.get()
+            if event is None:
+                break
+            yield event
+
+        # done 之后：后台提取长期事实记忆（不阻塞流式输出）
+        if (
+            db is not None
+            and runtime.get("conv_id") is not None
+            and runtime.get("status") == "ok"
+            and runtime.get("final_text")
+        ):
+            try:
+                force_memory = self.context.has_memory_intent(question)
+                facts = self.context.extract_facts(
+                    question,
+                    runtime["final_text"],
+                    force=force_memory,
+                )
+                if facts:
+                    added = self.context.add_facts(
+                        db, self.rag.embeddings, facts, runtime["conv_id"]
+                    )
+                    if added:
+                        logger.info("新增 %d 条长期记忆", added)
+                    try:
+                        result = self.context.maybe_consolidate(db)
+                        if result and (result["merged"] or result["archived"]):
+                            logger.info("长期记忆自动整合：%s", result)
+                        # 记忆变化后同步导出文件型项目记忆（AGENTS.md）
+                        try:
+                            from ..project_memory import export_project_memory
+
+                            export_project_memory(self.settings, db)
+                        except Exception as exc:
+                            logger.warning("项目记忆导出失败：%s", exc)
+                    except Exception as exc:
+                        logger.warning("长期记忆自动整合失败：%s", exc)
+            except Exception as exc:
+                logger.warning("长期记忆提取失败：%s", exc)
