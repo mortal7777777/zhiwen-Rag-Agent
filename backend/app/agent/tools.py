@@ -262,13 +262,21 @@ def make_skill_lookup_tool(
             )
             if not hits:
                 return {"summary": "未找到匹配的技能", "skills": []}
+            from ..skills import sanitize_skill_text
+
             items = [
                 {
                     "name": h["name"],
                     "source": h["source"],
-                    "description": h["description"],
-                    "instructions": h["excerpt"][:1200],
-                    "structure": skill_structure(h["path"]),
+                    "description": sanitize_skill_text(h["description"], 300),
+                    "instructions": sanitize_skill_text(h["excerpt"], 1200),
+                    "structure": [
+                        {
+                            "heading": s["heading"],
+                            "summary": sanitize_skill_text(s["summary"], 300),
+                        }
+                        for s in skill_structure(h["path"])
+                    ],
                 }
                 for h in hits
             ]

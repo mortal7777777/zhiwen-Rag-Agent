@@ -63,22 +63,17 @@ DEFAULT_ENABLED = {
     "content-research-writer", "email-draft-polish", "humanizer",
     "tailored-resume-generator", "meeting-notes-and-actions",
     # 研究与资料
-    "arxiv", "research-paper-writing", "grounded-citations", "llm-wiki",
-    "youtube-content", "blogwatcher",
+    "arxiv", "research-paper-writing", "grounded-citations",
     # 个人效率
-    "file-organizer", "notion", "obsidian", "google-workspace", "airtable",
-    "maps", "teams-meeting-pipeline", "himalaya",
+    "file-organizer",
     # 前端/设计
     "design-taste-frontend", "canvas-design", "architecture-diagram",
-    "baoyu-infographic", "popular-web-designs", "ascii-art",
+    "baoyu-infographic",
     # 编程与调试
-    "create-plan", "plan", "systematic-debugging", "simplify-code", "spike",
-    "test-driven-development", "python-debugpy", "node-inspect-debugger",
-    "requesting-code-review", "codebase-inspection", "github-auth",
-    "github-issues", "github-pr-workflow", "github-repo-management",
-    "github-code-review",
+    "create-plan", "systematic-debugging", "simplify-code",
+    "test-driven-development", "requesting-code-review", "codebase-inspection",
     # 数据与机器学习
-    "jupyter-live-kernel", "huggingface-hub",
+    "jupyter-live-kernel",
 }
 
 # 功能分组（用于设置页按功能筛选）
@@ -579,3 +574,81 @@ def skill_structure(skill_md_path: str, max_sections: int = 8) -> list[dict]:
         )
     )
     return cleaned[:max_sections]
+
+
+# ============================================================
+# 安全清洗与自动注入（防止 SKILL.md 提示注入）
+# ============================================================
+
+# 高风险指令模式：命中即整行替换为占位说明（只过滤"命令式越权"，不影响正常文档）
+RISK_PATTERNS = (
+    (r"ignore\s+(all\s+)?(previous|prior|above)", "试图覆盖此前指令"),
+    (r"you\s+are\s+now\b|pretend\s+you\s+are\b", "身份冒充指令"),
+    (r"disregard|override\s+(the\s+)?(system|safety|guardrail|policy|rules)", "越权指令"),
+    (r"exfiltrat|send\s+(all\s+)?(your\s+)?(data|files|keys|secrets|credentials)", "数据外传"),
+    (r"(output|print|reveal|show)\s+(your\s+)?(api\s*key|password|secret|token|credential)", "索要凭据"),
+    (r"do\s+not\s+(tell|inform|notify|ask)\s+(the\s+)?user", "隐瞒指令"),
+    (r"bypass|circumvent|disable\s+(.*)?(approval|permission|safety|security)", "绕过审批"),
+    (r"run\s+(it|this|commands|anything)\s+without\s+(asking|approval|permission|confirmation)", "擅自执行"),
+    (r"rm\s+-rf\s+[/~]|format\s+[a-z]:|del\s+/[fqs]", "破坏性命令"),
+)
+
+
+def sanitize_skill_text(text: str, limit: int = 1500) -> str:
+    """清洗技能内容：高风险指令行替换为占位说明，并做长度截断。"""
+    text = text or ""
+    lines = []
+    for ln in text.splitlines():
+        matched = next(
+            (label for pat, label in RISK_PATTERNS if re.search(pat, ln, re.I)),
+            None,
+        )
+        lines.append(f"[已过滤：{matched}]" if matched else ln)
+    cleaned = "\n".join(lines).strip()
+    if len(cleaned) > limit:
+        return cleaned[:limit] + "\n…（内容已截断）"
+    return cleaned
+
+
+def build_skill_catalog(enabled_ids: set[str] | None = None, limit: int = 40) -> str:
+    """生成紧凑的技能目录文本（名称 + 一句话描述），注入系统提示词。"""
+    skills = scan_skills()
+    if enabled_ids is not None:
+        skills = [s for s in skills if s["name"] in enabled_ids]
+    lines = []
+    for s in skills[:limit]:
+        desc = " ".join((s.get("description") or "").split())[:90]
+        lines.append(f"- {s['name']}：{desc}")
+    return "\n".join(lines)
+
+
+def matching_skills_for_injection(
+    query: str,
+    enabled_ids: set[str] | None = None,
+    top_k: int = 2,
+    max_sections: int = 6,
+) -> str:
+    """按关键词匹配当前问题最相关的技能，返回清洗后的结构化说明。
+
+    用于 prepare 阶段自动注入（不等模型主动调用 skill_lookup），
+    内容经 sanitize_skill_text 过滤高风险指令。
+    """
+    hits = search_skills(
+        query,
+        embeddings=None,
+        top_k=top_k,
+        enabled_ids=enabled_ids,
+    )
+    blocks = []
+    for h in hits:
+        sections = skill_structure(h["path"], max_sections=max_sections)
+        sec_text = "\n".join(
+            f"- {s['heading']}：{sanitize_skill_text(s['summary'], 200)}"
+            for s in sections
+        )
+        blocks.append(
+            f"### {h['name']}（来源：{h['source']}）\n"
+            f"{sanitize_skill_text(h.get('description') or '', 200)}\n"
+            f"{sec_text}"
+        )
+    return "\n\n".join(blocks)

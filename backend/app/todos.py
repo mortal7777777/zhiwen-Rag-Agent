@@ -36,6 +36,13 @@ def load_todos(db: Session | None, conversation_id: int | None) -> list[dict]:
     if db is None or not conversation_id:
         return []
     try:
+        # 请求级 Session 可能缓存了旧 AppMeta 行（todo_update 用独立会话写库），
+        # 读前强制过期，保证拿到最新清单
+        if db is not None:
+            try:
+                db.expire_all()
+            except Exception:
+                pass
         raw = repo.get_meta(db, _key(conversation_id))
         if not raw:
             return []
@@ -80,6 +87,50 @@ def seed_todos_from_plan(
     ]
     save_todos(db, conversation_id, items)
     return items
+
+
+def refresh_todos_for_plan(
+    db: Session | None,
+    conversation_id: int | None,
+    plan_steps: list[str],
+) -> list[dict]:
+    """每轮 prepare 时把任务清单对齐到当前计划，避免上一轮清单串台。
+
+    - 无新计划：上一轮清单若已全部完成则清空（不再回显旧任务）；
+      仍有未完成项则保留（支持跨轮续做同一任务）。
+    - 有新计划：与现有 plan 项一致则沿用；不一致则用新计划替换 plan 项，
+      保留 manual 项（模型/用户在过程中手动追加的工作）。
+    """
+    items = load_todos(db, conversation_id)
+    if not plan_steps:
+        if items and all(i.get("done") for i in items):
+            save_todos(db, conversation_id, [])
+            return []
+        return items
+
+    has_source = any(i.get("source") == "plan" for i in items)
+    plan_items = [i for i in items if i.get("source") == "plan"] if has_source else items
+    new_texts = [str(s).strip() for s in plan_steps if str(s).strip()]
+    if plan_items and [str(i.get("text", "")).strip() for i in plan_items] == new_texts:
+        return items  # 同一计划：继续沿用现有进度
+
+    now = time.time()
+    new_plan = [
+        {
+            "id": f"todo_{uuid.uuid4().hex[:8]}",
+            "text": str(step).strip()[:200],
+            "done": False,
+            "source": "plan",
+            "step_index": idx,
+            "created_at": now,
+            "updated_at": now,
+        }
+        for idx, step in enumerate(new_texts)
+    ]
+    manual = [] if not has_source else [i for i in items if i.get("source") != "plan"]
+    merged = new_plan + manual
+    save_todos(db, conversation_id, merged)
+    return merged
 
 
 def todos_to_text(items: list[dict] | None) -> str:

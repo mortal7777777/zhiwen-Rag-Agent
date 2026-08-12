@@ -391,25 +391,39 @@ def delete_template(db: Session, template_id: int) -> bool:
 
 
 def seed_templates(db: Session) -> None:
-    """幂等写入内置提示词模板。"""
+    """幂等写入/同步内置提示词模板。
+
+    已存在的系统模板（is_system=True）会在启动时按 PRESET_TEMPLATES
+    更新内容/描述/分类，保证代码里的提示词优化能生效；
+    用户自建模板不受影响。
+    """
     from ..agent.prompts import PRESET_TEMPLATES
 
-    existing = {
-        name
-        for (name,) in db.execute(select(PromptTemplate.name)).all()
-    }
     for preset in PRESET_TEMPLATES:
-        if preset["name"] in existing:
-            continue
-        db.add(
-            PromptTemplate(
-                name=preset["name"],
-                description=preset["description"],
-                category=preset["category"],
-                content=preset["content"],
-                is_system=True,
+        row = (
+            db.execute(
+                select(PromptTemplate).where(
+                    PromptTemplate.name == preset["name"]
+                )
             )
+            .scalars()
+            .first()
         )
+        if row is None:
+            db.add(
+                PromptTemplate(
+                    name=preset["name"],
+                    description=preset["description"],
+                    category=preset["category"],
+                    content=preset["content"],
+                    is_system=True,
+                )
+            )
+            continue
+        if row.is_system:
+            row.description = preset["description"]
+            row.category = preset["category"]
+            row.content = preset["content"]
     db.commit()
 
 

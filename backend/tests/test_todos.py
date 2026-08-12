@@ -104,3 +104,42 @@ def test_complete_steps_by_text(monkeypatch):
     items = todos.complete_steps_by_text(object(), conv, ["step C"])
     assert all(i["done"] for i in items)
     assert todos.todos_to_text(items).count("[x]") == 3
+
+
+def test_refresh_replaces_plan_for_new_task(monkeypatch):
+    store = _install_store(monkeypatch, FakeStore())
+    monkeypatch.setattr("app.db.database.db_ready", True)
+    monkeypatch.setattr("app.db.database.SessionLocal", lambda: object())
+    conv = 1006
+    todos.seed_todos_from_plan(object(), conv, ["old A", "old B"])
+    items = todos.refresh_todos_for_plan(object(), conv, ["new A", "new B", "new C"])
+    assert [i["text"] for i in items[:3]] == ["new A", "new B", "new C"]
+    assert all(not i["done"] for i in items[:3])
+    # manual 项跨新计划保留
+    todos.make_todo_tool(object(), conv).invoke({"operation": "add", "text": "manual keep"})
+    items = todos.refresh_todos_for_plan(object(), conv, ["another A"])
+    assert any(i["text"] == "manual keep" for i in items)
+
+
+def test_refresh_keeps_same_plan_progress(monkeypatch):
+    store = _install_store(monkeypatch, FakeStore())
+    conv = 1007
+    plan = ["step A", "step B"]
+    todos.seed_todos_from_plan(object(), conv, plan)
+    todos.sync_todos_from_plan(object(), conv, plan, 1)
+    items = todos.refresh_todos_for_plan(object(), conv, plan)
+    assert [i["done"] for i in items] == [True, False]
+    assert store._data[f"todos_{conv}"]
+
+
+def test_refresh_clears_completed_when_no_new_plan(monkeypatch):
+    store = _install_store(monkeypatch, FakeStore())
+    conv = 1008
+    todos.seed_todos_from_plan(object(), conv, ["step A"])
+    todos.sync_todos_from_plan(object(), conv, ["step A"], 1)
+    assert todos.refresh_todos_for_plan(object(), conv, []) == []
+    assert todos.load_todos(object(), conv) == []
+    # 未完成时保留（跨轮续做）
+    todos.seed_todos_from_plan(object(), conv, ["step A", "step B"])
+    items = todos.refresh_todos_for_plan(object(), conv, [])
+    assert len(items) == 2

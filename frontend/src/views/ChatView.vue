@@ -161,7 +161,6 @@ wo<template>
                     v-for="(t, i) in msg.todos"
                     :key="t.id"
                     :class="['plan-todo', { done: todoDone(msg, t, i) }]"
-                    @click="toggleTodo(msg, t)"
                   >
                     <el-icon v-if="todoDone(msg, t, i)" :size="13" class="plan-todo-check">
                       <CircleCheck />
@@ -668,7 +667,6 @@ import {
   listTemplates,
   renameConversation,
   resolvePermission,
-  saveTodos,
   streamAgentChat,
   updateMemory,
   updateTemplate,
@@ -1008,24 +1006,9 @@ function onPermissionKeydown(event) {
   }
 }
 
-/** 勾选/取消任务清单项（TodoWrite） */
-async function toggleTodo(msg, t) {
-  if (!activeId.value) return
-  const before = [...msg.todos]
-  t.done = !t.done
-  try {
-    await saveTodos(activeId.value, msg.todos)
-  } catch (error) {
-    t.done = !t.done
-    ElMessage.error(error.response?.data?.detail || '更新任务清单失败')
-  }
-}
-
-/** 任务项是否已完成：agent 标记 done，或 plan 进度已覆盖该步（自动打对钩） */
-function todoDone(msg, t, index) {
-  if (t.done) return true
-  if (msg.planDone != null && msg.plan.length && index < msg.planDone) return true
-  return false
+/** 任务项是否已完成：仅以模型/系统按进度标记的 done 为准，用户不可手改 */
+function todoDone(msg, t) {
+  return !!t.done
 }
 
 function isFailed(content) {
@@ -2545,12 +2528,6 @@ onBeforeUnmount(() => {
   border-radius: 7px;
   font-size: 13px;
   color: var(--text-1);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.plan-todo:hover {
-  background: var(--bg-hover);
 }
 
 .plan-todo.done {

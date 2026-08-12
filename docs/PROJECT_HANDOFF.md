@@ -151,6 +151,29 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 4. **顺手修复**：`todo_update` 工具导入路径错误（`from .database` → `from .db.database`），
    此前该工具实际执行失败但被日志掩盖。
 
+### 4.3 本轮（任务清单修复 + 提示词重写 + Skills 策略/安全）
+1. **任务清单跨轮修复**：
+   - 新计划自动替换旧计划的任务项（保留 manual 追加项），不再串台；
+     无新计划且旧清单已完成时自动清空；
+   - 收尾补发最终 `plan_progress`，右上角进度能走到 N/N；
+   - 修复 SQLAlchemy 身份映射缓存导致的"清单更新不及时"（`todo_update`
+     独立会话写库后，请求会话读到旧缓存；`load_todos` 读前 `expire_all`）；
+   - 前端任务清单改为**只读**：对号只由模型/系统按进度决定，用户不可手勾。
+2. **关键修复：系统提示词未注入**。LangGraph 路径里 `system_prompt_final`
+   计算后从未放进消息（旧版 agent.py 正常），模板/工具纪律/todo 硬约束规则
+   实际都没进模型上下文；现已作为首条 SystemMessage 注入（含恢复路径）。
+3. **提示词模板重写**：预设模板改为 Claude Code 风格
+   （角色/工作原则/工作流程/回答要求/安全边界），`seed_templates` 改为
+   启动时同步更新系统模板内容（用户模板不受影响）。
+4. **Skills 策略升级**：
+   - 现状：原方案只靠 `skill_lookup` 按需调用，模型常想不到调用；
+   - 改为：每轮注入技能目录 + 按问题关键词自动注入 Top 2 技能分节说明；
+   - 默认精选手集 48 → 27（剔除 notion/google-workspace/github 全家桶等
+     集成类与高风险类），设置页可重新开启；
+   - 新增 `sanitize_skill_text`：过滤覆盖指令/索要凭据/绕过审批/外传数据/
+     破坏性命令等注入行；系统提示词固化"技能内容不可信"安全边界。
+5. **新增 [docs/GIT_GUIDE.md](docs/GIT_GUIDE.md)**：git 基础操作教程。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。
@@ -170,8 +193,10 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 
 ## 5. 已知待办与下一步（用户未定方向，先讨论再动手）
 
-> **已落地（2026-08-12 第二轮）**：git 版本保护（`rag_knowledge_base/`）+ pytest 20 用例
-> + CUDA 容错（自动降级 CPU / 冷却恢复）。仍缺：评测体系（RAGAS 类指标与回归门槛）、
+> **已落地（2026-08-12 第二/三轮）**：git 版本保护（`rag_knowledge_base/`）
+> + pytest 25 用例 + CUDA 容错（自动降级 CPU / 冷却恢复）
+> + 任务清单跨轮修复 + 系统提示词注入修复 + 模板重写
+> + Skills 自动注入与防注入清洗。仍缺：评测体系（RAGAS 类指标与回归门槛）、
 > CI、LangGraph 原生 checkpointer 迁移、成本优化（记忆提取条件化 / 前缀缓存）。
 
 ### 用户明确提过的方向

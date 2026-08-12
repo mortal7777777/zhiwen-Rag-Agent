@@ -124,7 +124,14 @@
 - 扫描本机 **Codex / Claude / Hermes**（含 optional-skills）技能，去重后约 146 个；
 - 设置页支持搜索、**按功能筛选**（文档/写作/研究/效率/设计/编程/GitHub/数据/媒体/邮件）、来源筛选、
   启用开关与"从本助手移除"（只影响本助手，不修改其他 Agent 的文件）；
-- Agent 的 `skill_lookup` 只检索已启用技能，返回 **When to Use / Prerequisites / Steps 分节目录**。
+- **自动注入**：每轮对话自动把"技能目录"注入系统提示词，并按当前问题关键词
+  匹配 Top 2 技能、注入清洗后的分节说明（When to Use / Prerequisites / Steps），
+  不需要模型先想起调用 `skill_lookup`；
+- Agent 的 `skill_lookup` 只检索已启用技能，返回 **分节目录**；
+- **防注入**：技能内容视为不可信参考数据，高风险指令行（覆盖指令、索要凭据、
+  绕过审批、外传数据、破坏性命令）会被过滤替换，系统提示词中固化安全边界；
+- 默认精选手集 27 个（文档/写作/研究/设计/编程/数据），集成类（notion、
+  google-workspace、github 全家桶等）默认关闭，可在设置页按需开启。
 
 ### 可观测性
 
@@ -296,8 +303,8 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-当前 20 个用例覆盖：任务清单（播种/同步/修订/进度）、文件工具安全边界与命令白名单、
-CUDA 降级逻辑、RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
+当前 25 个用例覆盖：任务清单（播种/同步/跨轮刷新/修订/进度）、文件工具安全边界与
+命令白名单、CUDA 降级逻辑、技能内容清洗、RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
 
 ## 环境变量（均有默认值）
 
@@ -386,7 +393,10 @@ CUDA 降级逻辑、RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络�
 ## 注意事项
 
 - **版本保护**：项目已初始化 git（仓库根 = `rag_knowledge_base/`），
-  运行数据（`data/`、`opensearch_meta/`、日志）已加入 `.gitignore` 不入库；
+  基础操作见 [docs/GIT_GUIDE.md](docs/GIT_GUIDE.md)；运行数据（`data/`、
+  `opensearch_meta/`、日志）已加入 `.gitignore` 不入库；
+- **提示词模板**：预设模板已按 Claude Code 风格重写（角色/原则/流程/安全边界），
+  后端启动时自动同步到数据库（系统模板只读，用户模板不受影响）；
 - **MySQL 未连接时自动降级**：普通对话仍可用，但会话记忆、模板、运行记录不可用（日志给出明确错误）；
 - 联网搜索默认 DuckDuckGo（免 key），国内网络可能需要代理；也可配置 Tavily；
 - 问答必须配置对话模型 API Key（可在设置页添加/切换供应商）；知识库检索与重排序全程本地；
