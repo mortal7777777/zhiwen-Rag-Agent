@@ -447,25 +447,35 @@ class KeyReader:
     def _run_windows(self) -> None:
         import msvcrt
 
-        while not self._stop.is_set():
-            if not msvcrt.kbhit():
-                time.sleep(0.015)
-                continue
-            ch = msvcrt.getwch()
-            if ch in ("\x00", "\xe0"):
-                nxt = msvcrt.getwch()
-                mapping = {
-                    "H": "up",
-                    "P": "down",
-                    "K": "left",
-                    "M": "right",
-                    "G": "home",
-                    "O": "end",
-                    "S": "delete",
-                }
-                self._push(Key(mapping.get(nxt, "unknown"), nxt))
-                continue
-            self._push_key(ch)
+        try:
+            while not self._stop.is_set():
+                if not msvcrt.kbhit():
+                    time.sleep(0.015)
+                    continue
+                ch = msvcrt.getwch()
+                if ch in ("\x00", "\xe0"):
+                    nxt = msvcrt.getwch()
+                    mapping = {
+                        "H": "up",
+                        "P": "down",
+                        "K": "left",
+                        "M": "right",
+                        "G": "home",
+                        "O": "end",
+                        "S": "delete",
+                    }
+                    self._push(Key(mapping.get(nxt, "unknown"), nxt))
+                    continue
+                self._push_key(ch)
+        except Exception:
+            # stdin 不是控制台（管道/IDE 终端）时回退到行读取
+            while not self._stop.is_set():
+                line = sys.stdin.readline()
+                if line == "":
+                    self._push(Key("ctrl-d"))
+                    continue
+                for ch in line:
+                    self._push_key(ch)
 
     def _push_key(self, ch: str) -> None:
         if ch == "\x03":
@@ -1261,7 +1271,6 @@ def main() -> None:
     reader = KeyReader()
     screen = Screen()
     try:
-        _clear_screen()
         has_agents = os.path.exists(os.path.join(cwd, "AGENTS.md"))
         print_banner(model, tool_mode, has_agents)
         while True:
