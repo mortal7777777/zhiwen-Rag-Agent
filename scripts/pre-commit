@@ -1,9 +1,11 @@
 #!/bin/sh
 # 提交前自动运行后端测试；失败则阻止提交。
 # 安装：scripts/install-git-hooks.ps1
+# 注意：basetemp 用每次运行唯一的目录（.git/pytest-tmp-$$），
+# 避免 Windows 上 .git 目录 ACL 异常导致 pytest 无法清理旧 basetemp 而报 WinError 5。
 
 PYTHON="D:/conda_envs/pytorch_env/python.exe"
-BASETEMP=".git/pytest-tmp"
+BASETEMP=".git/pytest-tmp-$$"
 
 if [ ! -f "$PYTHON" ]; then
   echo "未找到 $PYTHON，跳过测试钩子" >&2
@@ -14,7 +16,11 @@ ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT" || exit 1
 
 "$PYTHON" -m pytest backend/tests -q -p no:cacheprovider --basetemp "$BASETEMP"
-if [ $? -ne 0 ]; then
+RESULT=$?
+# 尝试清理本次临时目录（失败可忽略：Windows ACL 问题不影响提交结果）
+rm -rf "$BASETEMP" 2>/dev/null
+
+if [ $RESULT -ne 0 ]; then
   echo "" >&2
   echo "pytest 失败，提交已阻止。确实要跳过请用：git commit --no-verify" >&2
   exit 1

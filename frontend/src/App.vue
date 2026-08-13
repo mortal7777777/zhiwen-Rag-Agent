@@ -538,9 +538,23 @@
                   <span class="generic-label">写后验证命令</span>
                   <el-input
                     v-model="toolsForm.verify_command"
-                    placeholder="如 pytest（留空=不自动验证）"
+                    placeholder="如 pytest（留空=按文件类型自动检测）"
                     size="small"
                     class="generic-select"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">类型自动验证</span>
+                  <el-switch v-model="toolsForm.verify_auto_detect" size="small" />
+                  <span class="generic-hint">.py→py_compile / .js→node --check / JSON/YAML 语法</span>
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">验证重试上限</span>
+                  <el-input-number
+                    v-model="toolsForm.verify_max_retries"
+                    :min="0"
+                    :max="5"
+                    size="small"
                   />
                 </div>
                 <div class="generic-row">
@@ -854,6 +868,8 @@ const toolsForm = ref({
   agent_subagents_enabled: true,
   agent_subagent_max_rounds: 2,
   verify_command: '',
+  verify_auto_detect: true,
+  verify_max_retries: 1,
   tool_workspace: '',
   command_allowlist: '',
   command_timeout: 60,
@@ -921,6 +937,8 @@ async function loadSettings() {
       agent_subagents_enabled: editable.agent_subagents_enabled !== false,
       agent_subagent_max_rounds: editable.agent_subagent_max_rounds ?? 2,
       verify_command: editable.verify_command || '',
+      verify_auto_detect: editable.verify_auto_detect !== false,
+      verify_max_retries: editable.verify_max_retries ?? 1,
       tool_workspace: editable.tool_workspace || '',
       command_allowlist: editable.command_allowlist || '',
       command_timeout: editable.command_timeout ?? 60,
@@ -1072,6 +1090,8 @@ async function saveToolsSettings() {
       agent_subagents_enabled: f.agent_subagents_enabled,
       agent_subagent_max_rounds: f.agent_subagent_max_rounds,
       verify_command: f.verify_command,
+      verify_auto_detect: f.verify_auto_detect,
+      verify_max_retries: f.verify_max_retries,
       tool_workspace: f.tool_workspace,
       command_allowlist: f.command_allowlist,
       command_timeout: f.command_timeout,
@@ -2025,6 +2045,12 @@ onMounted(() => {
 
 .generic-select {
   width: 210px;
+}
+
+.generic-hint {
+  font-size: 12px;
+  color: var(--text-3, #999);
+  line-height: 1.4;
 }
 
 /* ---- 技能 ---- */

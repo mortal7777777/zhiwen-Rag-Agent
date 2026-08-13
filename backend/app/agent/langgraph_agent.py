@@ -28,6 +28,7 @@ import re
 import threading
 import time
 import uuid
+from pathlib import Path
 from datetime import datetime
 from queue import Queue
 from typing import Annotated, TypedDict
@@ -87,6 +88,7 @@ class AgentState(TypedDict, total=False):
     failure_count: int
     forced_final: bool
     last_call_warned: bool
+    verify_fail_count: int
 
     plan_steps: list[str]
     plan_map: list[dict]
@@ -380,18 +382,28 @@ def _prepare_node(state: AgentState) -> dict:
             skills_catalog_text = ""
             skill_auto_text = ""
 
-    # ---- 系统提示词 = 模板 + 工具规则 + 文档清单 ----
+    # ---- 系统提示词：静态核心 + 动态部分分离（为 prompt caching 服务）----
+    # 静态核心（模板+工具规则）放消息最前、跨轮字节级稳定，命中 DeepSeek 等
+    # 提供商的自动前缀缓存；动态部分（任务清单/文档清单/技能目录）放历史之后。
     template_content = service._get_template_content(db, template_id, system_prompt)
     advanced_tools_on = effective(settings, "advanced_tools_enabled", True)
-    system_prompt_final = compose_system_prompt(
+    system_prompt_core = compose_system_prompt(
+        template_content,
+        use_knowledge_base=use_knowledge_base,
+        use_web_search=use_web_search,
+        advanced_tools=advanced_tools_on,
+        plan_only=bool(state.get("plan_only")),
+        static_only=True,
+    )
+    dynamic_prompt_text = compose_system_prompt(
         template_content,
         use_knowledge_base=use_knowledge_base,
         use_web_search=use_web_search,
         kb_documents=kb_documents,
         advanced_tools=advanced_tools_on,
-        plan_only=bool(state.get("plan_only")),
         todos_text=todos_to_text(todos) if todos else "",
         skills_catalog=skills_catalog_text,
+        dynamic_only=True,
     )
 
     bus.emit(
@@ -493,7 +505,7 @@ def _prepare_node(state: AgentState) -> dict:
             resume_notes.append("项目记忆（AGENTS.md）：\n" + project_memory_text)
         if trajectory_summary:
             resume_notes.append("最近任务过程摘要：\n" + trajectory_summary)
-        messages.insert(0, SystemMessage(content=system_prompt_final))
+        messages.insert(0, SystemMessage(content=system_prompt_core))
         messages.insert(1, SystemMessage(content="\n".join(resume_notes)))
         if skill_auto_text:
             messages.insert(
@@ -506,6 +518,8 @@ def _prepare_node(state: AgentState) -> dict:
                     )
                 ),
             )
+        if dynamic_prompt_text:
+            messages.append(SystemMessage(content=dynamic_prompt_text))
         messages.append(HumanMessage(content=question))
         # 恢复进度状态
         state["sources"] = restored.get("sources") or []
@@ -514,13 +528,17 @@ def _prepare_node(state: AgentState) -> dict:
         state["failure_count"] = int(restored.get("failure_count") or 0)
         state["forced_final"] = bool(restored.get("forced_final"))
         state["last_call_warned"] = bool(restored.get("last_call_warned"))
+        state["verify_fail_count"] = int(restored.get("verify_fail_count") or 0)
         state["plan_done_count"] = int(restored.get("plan_done_count") or 0)
         state["plan_push_count"] = int(restored.get("plan_push_count") or 0)
         state["force_continue"] = False
         state["dispatch_done"] = bool(restored.get("dispatch_done"))
         runtime["final_text"] = restored.get("final_text") or ""
     else:
-        messages.append(SystemMessage(content=system_prompt_final))
+        # 静态核心放最前（模板+工具规则，跨轮字节级稳定 -> 前缀缓存命中）；
+        # 动态指令紧接其后（任务清单/文档清单/技能，保持对模型的约束力）；
+        # 动态上下文（时间/摘要/记忆）和历史放末尾，不破坏静态前缀。
+        messages.append(SystemMessage(content=system_prompt_core))
         if skill_auto_text:
             messages.append(
                 SystemMessage(
@@ -531,6 +549,8 @@ def _prepare_node(state: AgentState) -> dict:
                     )
                 )
             )
+        if dynamic_prompt_text:
+            messages.append(SystemMessage(content=dynamic_prompt_text))
         messages.append(SystemMessage(content=time_context))
         if project_memory_text:
             messages.append(
@@ -624,6 +644,7 @@ def _prepare_node(state: AgentState) -> dict:
         "tool_calls_used": state["tool_calls_used"],
         "forced_final": state["forced_final"],
         "last_call_warned": state["last_call_warned"],
+        "verify_fail_count": int(state.get("verify_fail_count") or 0),
     }
 
 
@@ -1236,6 +1257,69 @@ def _agent_node(state: AgentState) -> dict:
 # ============================================================
 
 
+def _pick_verify_command(settings, path: str) -> str | None:
+    """为单个写入/编辑的文件选择验证命令。
+
+    优先级：显式配置的 verify_command（全局）> 按扩展名自动检测。
+    自动检测覆盖：.py（py_compile）/ .js/.mjs/.cjs（node --check）/
+    .json / .yaml/.yml（语法解析），其余类型不验证。
+    """
+    explicit = str(effective(settings, "verify_command") or "").strip()
+    if explicit:
+        return explicit
+    # 注意：effective(key) 不传 default，否则永远返回 default 读不到 settings 属性
+    if not effective(settings, "verify_auto_detect"):
+        return None
+    ext = Path(path).suffix.lower()
+    if ext == ".py":
+        return f'python -m py_compile "{path}"'
+    if ext in (".js", ".mjs", ".cjs"):
+        return f'node --check "{path}"'
+    if ext == ".json":
+        return (
+            'python -c "import json,sys;'
+            "json.load(open(sys.argv[1],encoding='utf-8'));"
+            'print(\'JSON OK\')" '
+            f'"{path}"'
+        )
+    if ext in (".yaml", ".yml"):
+        return (
+            'python -c "import yaml,sys;'
+            "yaml.safe_load(open(sys.argv[1],encoding='utf-8'));"
+            'print(\'YAML OK\')" '
+            f'"{path}"'
+        )
+    return None
+
+
+def _run_verify(settings, paths: list[str]) -> list[dict]:
+    """对写入/编辑的文件逐条运行验证，返回 [{path, command, exit_code, output}]。"""
+    from ..tools_extra import _run_command
+
+    results: list[dict] = []
+    for p in paths:
+        cmd = _pick_verify_command(settings, p)
+        if not cmd:
+            continue
+        try:
+            r = _run_command(settings, cmd)
+            results.append(
+                {
+                    "path": p,
+                    "command": cmd,
+                    "exit_code": r.get("exit_code"),
+                    "error": r.get("error"),
+                    "output": str(r.get("output") or "")[:400],
+                }
+            )
+        except Exception as exc:
+            logger.warning("验证命令执行失败 %s：%s", cmd, exc)
+            results.append(
+                {"path": p, "command": cmd, "exit_code": -1, "error": str(exc), "output": ""}
+            )
+    return results
+
+
 def _tools_node(state: AgentState) -> dict:
     service: LangGraphAgentService = state["service"]
     bus: EventBus = state["bus"]
@@ -1543,25 +1627,65 @@ def _tools_node(state: AgentState) -> dict:
                 )
             )
 
-    # ---- 写后自动验证（verify）：写入/编辑成功时运行配置的命令并回填结果 ----
-    verify_command = str(effective(settings, "verify_command") or "").strip()
-    if verify_command and any(
-        tc.get("name") in ("write_file", "edit_file")
-        and tc.get("id") not in failed_ids
+    # ---- 写后自动验证（verify）：按类型自动选命令或显式配置，失败可修复重试 ----
+    written_paths = [
+        str((tc.get("args") or {}).get("path") or "").strip()
         for tc in tool_calls
-    ):
-        from ..tools_extra import _run_command
-
-        verify_result = _run_command(settings, verify_command)
-        messages.append(
-            SystemMessage(
-                content=(
-                    "以下是你刚写入/编辑后自动运行的验证命令结果，"
-                    "请据此决定是否需要修复：\n"
-                    + json.dumps(verify_result, ensure_ascii=False)
+        if tc.get("name") in ("write_file", "edit_file")
+        and tc.get("id") not in failed_ids
+        and str((tc.get("args") or {}).get("path") or "").strip()
+    ]
+    if written_paths:
+        verify_results = _run_verify(settings, written_paths)
+        if verify_results:
+            failed = [
+                r
+                for r in verify_results
+                if r.get("exit_code") not in (None, 0) or r.get("error")
+            ]
+            lines = []
+            for r in verify_results:
+                head = str(r.get("output") or "").strip() or r.get("error") or "（无输出）"
+                lines.append(f"### {r['path']}  ({r['command']})\n{head[:300]}")
+            if not failed:
+                messages.append(
+                    SystemMessage(
+                        content=(
+                            "写后自动验证结果（全部通过）：\n"
+                            + "\n\n".join(lines)
+                            + "\n\n可以继续后续步骤。"
+                        )
+                    )
                 )
-            )
-        )
+            else:
+                verify_fail_count = int(state.get("verify_fail_count") or 0) + 1
+                state["verify_fail_count"] = verify_fail_count
+                retries_left = max(
+                    0,
+                    int(effective(settings, "verify_max_retries") or 1) - verify_fail_count,
+                )
+                msg = (
+                    f"写后自动验证失败（{len(failed)} 个文件，第 {verify_fail_count} 次失败）：\n"
+                    + "\n\n".join(lines)
+                )
+                if retries_left > 0:
+                    msg += (
+                        f"\n\n请根据上面的错误修复文件（edit_file/write_file）并等待复验，"
+                        f"还有 {retries_left} 次复验机会。"
+                    )
+                else:
+                    msg += (
+                        "\n\n已到验证重试上限。请停止继续修复，"
+                        "向用户如实说明验证未通过的原因、影响范围与建议。"
+                    )
+                messages.append(SystemMessage(content=msg))
+                bus.emit(
+                    "status",
+                    {
+                        "phase": "verify",
+                        "text": f"验证失败（{len(failed)} 个文件，第 {verify_fail_count} 次）",
+                    },
+                )
 
     # ---- 计划进度同步 + 任务清单自动更新（硬约束）----
     plan_steps = state.get("plan_steps") or []
@@ -1707,6 +1831,7 @@ def _tools_node(state: AgentState) -> dict:
                     "failure_count": state.get("failure_count", 0),
                     "forced_final": state["forced_final"],
                     "last_call_warned": state["last_call_warned"],
+                    "verify_fail_count": int(state.get("verify_fail_count") or 0),
                     "plan_done_count": state.get("plan_done_count", 0),
                     "plan_push_count": state.get("plan_push_count", 0),
                     "dispatch_done": bool(state.get("dispatch_done")),
@@ -1725,6 +1850,7 @@ def _tools_node(state: AgentState) -> dict:
         "failure_count": state.get("failure_count", 0),
         "forced_final": state["forced_final"],
         "last_call_warned": state["last_call_warned"],
+        "verify_fail_count": int(state.get("verify_fail_count") or 0),
         "plan_done_count": state.get("plan_done_count", 0),
         "force_continue": False,
         "plan_push_count": state.get("plan_push_count", 0),

@@ -51,6 +51,8 @@ class UsageCollector(BaseCallbackHandler):
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._total_tokens = 0
+        self._cache_hit_tokens = 0
+        self._cache_miss_tokens = 0
 
     def reset(self) -> None:
         with self._lock:
@@ -58,6 +60,8 @@ class UsageCollector(BaseCallbackHandler):
             self._prompt_tokens = 0
             self._completion_tokens = 0
             self._total_tokens = 0
+            self._cache_hit_tokens = 0
+            self._cache_miss_tokens = 0
 
     def on_llm_end(self, response, **kwargs) -> None:
         """LLM 调用结束时累计 token（OpenAI 兼容接口的 llm_output.token_usage）。"""
@@ -68,6 +72,12 @@ class UsageCollector(BaseCallbackHandler):
                 int(usage.get("prompt_tokens") or 0),
                 int(usage.get("completion_tokens") or 0),
             )
+            # DeepSeek 等供应商返回前缀缓存命中/未命中 token，best-effort 采集
+            if usage.get("prompt_cache_hit_tokens") is not None:
+                self.add_cache(
+                    int(usage.get("prompt_cache_hit_tokens") or 0),
+                    int(usage.get("prompt_cache_miss_tokens") or 0),
+                )
         except Exception:
             pass
 
@@ -79,6 +89,12 @@ class UsageCollector(BaseCallbackHandler):
             self._completion_tokens += max(0, completion_tokens)
             self._total_tokens += max(0, prompt_tokens) + max(0, completion_tokens)
 
+    def add_cache(self, hit_tokens: int, miss_tokens: int) -> None:
+        """手动补记前缀缓存命中/未命中 token（流式调用场景）。"""
+        with self._lock:
+            self._cache_hit_tokens += max(0, hit_tokens)
+            self._cache_miss_tokens += max(0, miss_tokens)
+
     def summary(self) -> dict:
         with self._lock:
             return {
@@ -86,6 +102,8 @@ class UsageCollector(BaseCallbackHandler):
                 "prompt_tokens": self._prompt_tokens,
                 "completion_tokens": self._completion_tokens,
                 "total_tokens": self._total_tokens,
+                "cache_hit_tokens": self._cache_hit_tokens,
+                "cache_miss_tokens": self._cache_miss_tokens,
             }
 
 

@@ -143,7 +143,9 @@ class Settings:
     advanced_tools_enabled: bool = True
     agent_subagents_enabled: bool = True   # Send 子代理并行总开关
     agent_subagent_max_rounds: int = 2     # 每个子代理最多 LLM 轮数
-    verify_command: str = ""               # 写/改文件后自动运行的验证命令（空=不验证）
+    verify_command: str = ""               # 写/改文件后自动运行的验证命令（空=按类型自动检测）
+    verify_auto_detect: bool = True        # 未配置 verify_command 时按文件类型自动选验证命令（py_compile/node --check/JSON 语法）
+    verify_max_retries: int = 1            # 验证失败后允许模型继续修复并复验的次数，超过则要求如实说明
     tool_workspace: str = ""              # 文件工具白名单根目录（空=项目根）
     command_allowlist: str = ""           # 命令白名单（逗号分隔的命令前缀，空=禁止执行）
     command_timeout: int = 60             # 命令执行超时（秒）
@@ -260,6 +262,8 @@ class Settings:
             agent_subagents_enabled=_env("AGENT_SUBAGENTS_ENABLED", "1") == "1",
             agent_subagent_max_rounds=int(_env("AGENT_SUBAGENT_MAX_ROUNDS", "2")),
             verify_command=_env("VERIFY_COMMAND", ""),
+            verify_auto_detect=_env("VERIFY_AUTO_DETECT", "1") == "1",
+            verify_max_retries=int(_env("VERIFY_MAX_RETRIES", "1")),
             tool_workspace=_env("TOOL_WORKSPACE", ""),
             command_allowlist=_env("COMMAND_ALLOWLIST", ""),
             command_timeout=int(_env("COMMAND_TIMEOUT", "60")),

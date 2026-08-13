@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from app.agent.langgraph_agent import (
     _build_subagent_tasks,
+    _pick_verify_command,
     _plan_hint,
     _remaining_needs_tools,
     _renumber_subagent_sources,
     _run_sensitive_subagent_tool,
+    _run_verify,
     _subagent_tools,
 )
 
@@ -108,3 +110,82 @@ def test_sensitive_subagent_tool_allow_mode():
         None,
     )
     assert res["summary"] == "ok"
+
+
+# ---------------- 写后验证：类型自适应 + 重试上限 ----------------
+
+class VSettings:
+    verify_command = ""
+    verify_auto_detect = True
+    verify_max_retries = 1
+    command_timeout = 30
+    command_sandbox = "subprocess"
+    sandbox_image = "python:3.11-slim"
+    sandbox_workspace_readonly = False
+
+
+def test_pick_verify_command_by_extension():
+    assert "py_compile" in _pick_verify_command(VSettings(), "scripts/app.py")
+    assert "node --check" in _pick_verify_command(VSettings(), "ui/index.js")
+    assert "json" in _pick_verify_command(VSettings(), "data/cfg.json")
+    assert "yaml" in _pick_verify_command(VSettings(), "conf/dev.yml")
+    assert _pick_verify_command(VSettings(), "README.md") is None
+    assert _pick_verify_command(VSettings(), "noext") is None
+
+
+def test_pick_verify_command_explicit_wins():
+    class S(VSettings):
+        verify_command = "python -m pytest -q"
+
+    assert _pick_verify_command(S(), "anything.py") == "python -m pytest -q"
+
+
+def test_pick_verify_command_auto_disabled():
+    class S(VSettings):
+        verify_auto_detect = False
+
+    assert _pick_verify_command(S(), "scripts/app.py") is None
+
+
+def test_run_verify_py_compile(tmp_path):
+    good = tmp_path / "ok.py"
+    good.write_text("def f():\n    return 1\n", encoding="utf-8")
+    bad = tmp_path / "bad.py"
+    bad.write_text("def f(:\n", encoding="utf-8")
+    results = _run_verify(VSettings(), [str(good), str(bad)])
+    by_path = {r["path"]: r for r in results}
+    assert by_path[str(good)]["exit_code"] == 0
+    assert by_path[str(bad)]["exit_code"] != 0
+
+
+def test_run_verify_skips_unknown_ext(tmp_path):
+    f = tmp_path / "notes.md"
+    f.write_text("# hi", encoding="utf-8")
+    assert _run_verify(VSettings(), [str(f)]) == []
+
+
+# ---------------- 系统提示词静态/动态拆分（prompt caching） ----------------
+
+def test_compose_system_prompt_static_dynamic_split():
+    from app.agent.prompts import compose_system_prompt
+
+    kwargs = dict(
+        template_content="你是助手。",
+        use_knowledge_base=True,
+        use_web_search=True,
+        kb_documents=["doc1.md"],
+        todos_text="[ ] 步骤A",
+        skills_catalog="skill: x",
+    )
+    full = compose_system_prompt(**kwargs)
+    static = compose_system_prompt(**kwargs, static_only=True)
+    dynamic = compose_system_prompt(**kwargs, dynamic_only=True)
+
+    # 静态核心：模板 + 工具规则，不含动态部分
+    assert "你是助手。" in static
+    assert "doc1.md" not in static and "步骤A" not in static and "skill: x" not in static
+    # 动态部分：只含清单/文档/技能
+    assert "doc1.md" in dynamic and "步骤A" in dynamic and "skill: x" in dynamic
+    assert "你是助手。" not in dynamic
+    # 完整 = 静态 + 动态 的信息覆盖（内容不重复，可拼回）
+    assert full.count("步骤A") == 1 and static.count("步骤A") == 0

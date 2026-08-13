@@ -108,6 +108,10 @@
 - **按需注入**：用户画像摘要（常驻）+ 语义召回（关键词 n-gram 粗筛 → 向量精排，
   相关性不足用最近记忆补位，按 token 预算裁剪）；
 - **分层上下文**：时间/热点 → 画像摘要 → 相关记忆 → 会话摘要 → 图片理解 → 历史（预算裁剪）→ 当前问题。
+- **Prompt caching（前缀缓存友好）**：系统提示词拆成"静态核心（模板+工具规则）+
+  动态部分（任务清单/文档清单/技能）"，静态核心与历史消息放在最前、跨轮字节级稳定，
+  动态上下文统一放到历史之后——命中 DeepSeek 等提供商的自动前缀缓存，
+  长会话/多轮工具循环的输入成本大幅下降（token 记录新增 cache_hit/cache_miss 指标可验证）。
 
 ### 多供应商模型管理（参考 cc-switch）
 
@@ -367,7 +371,9 @@ RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
 | `AGENT_MAX_ITERATIONS` | `6` | 工具调用循环上限 |
 | `AGENT_SUBAGENTS_ENABLED` | `1` | Send 子代理并行总开关 |
 | `AGENT_SUBAGENT_MAX_ROUNDS` | `2` | 每个子代理最多 LLM 轮数 |
-| `VERIFY_COMMAND` | 空 | 写/改文件后自动运行的验证命令 |
+| `VERIFY_COMMAND` | 空 | 写/改文件后自动运行的验证命令（显式配置优先，空=按类型自动检测） |
+| `VERIFY_AUTO_DETECT` | `1` | 未配置 VERIFY_COMMAND 时按扩展名自动验证（.py→py_compile / .js→node --check / .json/.yaml 语法） |
+| `VERIFY_MAX_RETRIES` | `1` | 验证失败后允许模型继续修复并复验的次数，超过则要求如实说明 |
 | `CHECKPOINT_NATIVE_ENABLED` | `1` | LangGraph 原生 checkpointer（快照时间线） |
 | `AGENT_MAX_FAILURES` | `3` | 工具失败重试上限（失败不占迭代预算） |
 | `AGENT_RECURSION_LIMIT` | `30` | LangGraph 图执行最大步数 |

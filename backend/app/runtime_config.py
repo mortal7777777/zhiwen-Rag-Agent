@@ -49,6 +49,8 @@ EDITABLE_KEYS = {
     "agent_subagents_enabled",
     "agent_subagent_max_rounds",
     "verify_command",
+    "verify_auto_detect",
+    "verify_max_retries",
     "tool_workspace",
     "command_allowlist",
     "command_timeout",

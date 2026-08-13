@@ -75,11 +75,21 @@ LLM 流式生成；有 tool_calls → tools，无则收尾。计划硬约束：�
 
 瓶颈：现在是“模型写 → 用户批准 → 沙箱跑 → 模型看输出”，验证闭环依赖模型自觉。
 
-已实现：写/改文件后可按 `verify_command` 自动跑验证命令并回填结果
-（当前为“提示模型据结果决定是否修复”，尚未强制失败自动再改）。
-下一步：失败自动再改一轮（有限次数）；
+已实现：写/改文件后自动验证并闭环修复：
+- `verify_command` 显式配置优先；未配置时按扩展名自动检测
+  （.py→py_compile / .js→node --check / .json、.yaml 语法解析），
+  自动检测可用 `VERIFY_AUTO_DETECT` 关闭；
+- 验证失败时把错误回填给模型并引导修复（edit_file/write_file 后自动复验），
+  `VERIFY_MAX_RETRIES`（默认 1）控制最多修复复验次数，超过则要求如实说明
+  原因、影响与建议，避免无限循环烧预算；
 - 沙箱已可用：设置中把“命令沙箱”切到 docker（`command_sandbox=docker`），
-  命令在 python:3.11-slim 容器里执行，`--network=none` 隔离外网。
+  验证命令同样在 python:3.11-slim 容器里执行，`--network=none` 隔离外网。
+
+已实现（2026-08-13 续 2）：Prompt caching 前缀缓存友好——系统提示词拆为
+静态核心（模板+工具规则，放消息最前）+ 动态部分（任务清单/文档清单/技能目录，
+放历史之后），静态核心与历史跨轮字节级稳定，命中 DeepSeek 等自动前缀缓存，
+多轮工具循环的重复输入成本大幅下降；token 记录新增 cache_hit/cache_miss
+（`usage_summary` 与 agent_runs 可见，可验证缓存命中率）。
 
 ### 场景 D：浏览器任务
 
