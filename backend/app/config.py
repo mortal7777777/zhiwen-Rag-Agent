@@ -75,6 +75,9 @@ class Settings:
     # ---- Agent 参数 ----
     agent_max_iterations: int = 6       # ReAct 循环最大轮数（工具调用次数上限）
     agent_max_failures: int = 3         # 工具连续失败重试上限（失败不占迭代预算，超过则强制收尾）
+    agent_task_max_iterations: int = 24  # 项目级任务（task_mode）的工具调用上限
+    agent_task_max_failures: int = 6     # 项目级任务的连续失败上限
+    task_mode_detect: bool = True        # 自动识别项目级任务并使用独立预算
     agent_recursion_limit: int = 30     # LangGraph 图执行最大步数（超过则兜底收尾）
     chat_temperature: float = 0.5       # 普通回答温度
     history_max_messages: int = 60      # 回传给模型的历史消息条数（软窗口，不足预算不压缩）
@@ -213,6 +216,9 @@ class Settings:
             web_search_max_results=int(_env("WEB_SEARCH_MAX_RESULTS", "6")),
             agent_max_iterations=int(_env("AGENT_MAX_ITERATIONS", "6")),
             agent_max_failures=int(_env("AGENT_MAX_FAILURES", "3")),
+            agent_task_max_iterations=int(_env("AGENT_TASK_MAX_ITERATIONS", "24")),
+            agent_task_max_failures=int(_env("AGENT_TASK_MAX_FAILURES", "6")),
+            task_mode_detect=_env("TASK_MODE_DETECT", "1") == "1",
             agent_recursion_limit=int(_env("AGENT_RECURSION_LIMIT", "30")),
             chat_temperature=float(_env("CHAT_TEMPERATURE", "0.5")),
             history_max_messages=int(_env("HISTORY_MAX_MESSAGES", "60")),

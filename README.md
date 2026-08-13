@@ -327,6 +327,21 @@ cd ..\frontend
 npm run dev
 ```
 
+### 终端客户端（类 Claude CLI 体验）
+
+```powershell
+# 项目根目录一键启动（已内置 Python 解释器路径）
+.\agent.ps1 --tool auto
+```
+
+终端内命令：`/new` 新会话、`/tools auto|knowledge|web|none` 切换模式、
+`/todos` 查看任务清单、`/status` 查看状态、`/help` 帮助、`Ctrl+C` 停止生成；
+审批用数字键 1/2/3/4 选择，流式文本按终端宽度自动换行。
+
+项目级任务（如“完成整个项目”）会自动进入 task_mode：工具预算 6→24、
+失败上限 3→6；预算用尽时输出“进度汇报”并保留进度，回复“继续”即可接着做，
+而不是被硬停。
+
 ## 测试
 
 ```powershell
@@ -369,6 +384,9 @@ RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
 | `TAVILY_API_KEY` | 空 | 使用 Tavily 时填写 |
 | `WEB_SEARCH_MAX_RESULTS` | `6` | 单次联网搜索结果条数 |
 | `AGENT_MAX_ITERATIONS` | `6` | 工具调用循环上限 |
+| `AGENT_TASK_MAX_ITERATIONS` | `24` | 项目级任务（task_mode）的工具调用上限 |
+| `AGENT_TASK_MAX_FAILURES` | `6` | 项目级任务的连续失败上限 |
+| `TASK_MODE_DETECT` | `1` | 自动识别项目级任务并使用独立预算 |
 | `AGENT_SUBAGENTS_ENABLED` | `1` | Send 子代理并行总开关 |
 | `AGENT_SUBAGENT_MAX_ROUNDS` | `2` | 每个子代理最多 LLM 轮数 |
 | `VERIFY_COMMAND` | 空 | 写/改文件后自动运行的验证命令（显式配置优先，空=按类型自动检测） |

@@ -246,6 +246,15 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 3. JSON/YAML 验证命令去除嵌套引号（json.tool / 无 print 的 python -c）；
 4. hooks 改为 `shlex.split` + `shell=False`，避免 shell 注入；测试增至 53 个。
 
+### 4.9 本轮（项目级任务独立限流 + 终端客户端优化）
+1. **task_mode**：自动识别“完成/实现/开发/搭建/重构/整个项目”等任务，
+   工具预算 6→24、失败上限 3→6（`AGENT_TASK_MAX_*` 可调）；
+   预算用尽时输出进度汇报并保留 todos/checkpoint，回复“继续”接着做；
+   普通问答维持原 6 次预算不受影响。
+2. **CLI 优化**：根目录 `.\agent.ps1` 一键启动；新增 `/todos /status` 命令；
+   流式文本按终端宽度换行；工具耗时、计划进度、任务清单渲染；数字键审批。
+3. 测试增至 55 个（新增 task_mode 识别与预算单测）。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。

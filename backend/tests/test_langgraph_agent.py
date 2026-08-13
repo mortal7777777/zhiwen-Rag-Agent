@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from app.agent.langgraph_agent import (
     _build_subagent_tasks,
+    _failure_limit,
+    _is_project_task,
+    _iteration_limit,
     _pick_verify_command,
     _plan_hint,
     _remaining_needs_tools,
@@ -12,6 +15,27 @@ from app.agent.langgraph_agent import (
     _run_verify,
     _subagent_tools,
 )
+
+
+class TaskSettings:
+    task_mode_detect = True
+    agent_max_iterations = 6
+    agent_max_failures = 3
+    agent_task_max_iterations = 24
+    agent_task_max_failures = 6
+
+
+def test_is_project_task():
+    assert _is_project_task(TaskSettings(), "请帮我完成整个项目", [])
+    assert _is_project_task(TaskSettings(), "短问题", ["1", "2", "3", "4"])
+    assert not _is_project_task(TaskSettings(), "什么是实事求是", [])
+
+
+def test_task_mode_budgets():
+    assert _iteration_limit({"task_mode": True}, TaskSettings()) == 24
+    assert _failure_limit({"task_mode": True}, TaskSettings()) == 6
+    assert _iteration_limit({"task_mode": False}, TaskSettings()) == 6
+    assert _failure_limit({"task_mode": False}, TaskSettings()) == 3
 
 
 def test_build_subagent_tasks_filters_and_dedups():

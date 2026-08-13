@@ -46,6 +46,9 @@ EDITABLE_KEYS = {
     "skills_enabled",
     # 高级工具（P0：受控执行 / MCP / 技能沙箱 / 思考摘要）
     "advanced_tools_enabled",
+    "agent_task_max_iterations",
+    "agent_task_max_failures",
+    "task_mode_detect",
     "agent_subagents_enabled",
     "agent_subagent_max_rounds",
     "verify_command",

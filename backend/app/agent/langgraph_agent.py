@@ -91,6 +91,7 @@ class AgentState(TypedDict, total=False):
     last_call_warned: bool
     verify_fail_count: int
     early_created: bool
+    task_mode: bool
 
     plan_steps: list[str]
     plan_map: list[dict]
@@ -147,6 +148,45 @@ def _plan_hint(step: str) -> dict:
     ):
         tool_hint = "file_tool/bash"
     return {"step": s, "tool_hint": tool_hint}
+
+
+_TASK_MODE_KEYWORDS = (
+    "完成", "实现", "开发", "搭建", "重构", "改造", "整个项目", "端到端",
+    "从零", "全部做完", "把这个项目", "做完整个",
+)
+
+
+def _is_project_task(settings, question: str, plan_steps: list[str]) -> bool:
+    """识别项目级任务：关键词 / 计划步数较多 / 长问题且计划需要工具。"""
+    if not effective(settings, "task_mode_detect"):
+        return False
+    q = question or ""
+    if any(k in q for k in _TASK_MODE_KEYWORDS):
+        return True
+    steps = plan_steps or []
+    if len(steps) >= 4:
+        return True
+    return len(q) >= 80 and any(
+        _plan_hint(s).get("tool_hint") for s in steps
+    )
+
+
+def _iteration_limit(state: AgentState, settings) -> int:
+    if state.get("task_mode"):
+        return max(
+            int(settings.agent_max_iterations),
+            int(effective(settings, "agent_task_max_iterations") or 24),
+        )
+    return int(settings.agent_max_iterations)
+
+
+def _failure_limit(state: AgentState, settings) -> int:
+    if state.get("task_mode"):
+        return max(
+            int(getattr(settings, "agent_max_failures", 3)),
+            int(effective(settings, "agent_task_max_failures") or 6),
+        )
+    return int(getattr(settings, "agent_max_failures", 3))
 
 
 def _generate_reasoning_summary(
@@ -252,7 +292,15 @@ def _prepare_node(state: AgentState) -> dict:
 
     # ---- checkpoint 恢复：上次任务中断时从快照继续 ----
     restored: dict | None = None
-    if settings.checkpoint_enabled and db is not None and conv_id is not None:
+    task_unfinished = bool(state.get("task_mode")) and any(
+        not (t or {}).get("done") for t in (state.get("todos") or [])
+    )
+    if (
+        settings.checkpoint_enabled
+        and db is not None
+        and conv_id is not None
+        and not task_unfinished
+    ):
         try:
             from ..checkpoint import get_store
 
@@ -315,6 +363,10 @@ def _prepare_node(state: AgentState) -> dict:
         plan_map = restored.get("plan_map") or [_plan_hint(s) for s in plan_steps]
     state["plan_steps"] = plan_steps
     state["plan_map"] = plan_map
+    task_mode = _is_project_task(settings, question, plan_steps)
+    if restored is not None and restored.get("task_mode"):
+        task_mode = True
+    state["task_mode"] = task_mode
 
     # ---- TodoWrite 任务清单：规划后播种，跨轮跟踪进度 ----
     todos: list[dict] = []
@@ -651,6 +703,7 @@ def _prepare_node(state: AgentState) -> dict:
         "forced_final": state["forced_final"],
         "last_call_warned": state["last_call_warned"],
         "verify_fail_count": int(state.get("verify_fail_count") or 0),
+        "task_mode": bool(state.get("task_mode")),
     }
 
 
@@ -1102,7 +1155,7 @@ def _agent_node(state: AgentState) -> dict:
         return {}
 
     # 还剩最后一次工具调用时提前提示：优先补充检索，随后必须作答
-    remaining_calls = settings.agent_max_iterations - state["tool_calls_used"]
+    remaining_calls = _iteration_limit(state, settings) - state["tool_calls_used"]
     if (
         tools
         and state.get("plan_steps")
@@ -1795,7 +1848,7 @@ def _tools_node(state: AgentState) -> dict:
 
     # 达到工具调用上限：强制收尾（下一轮 agent 不绑定工具）
     if (
-        state["tool_calls_used"] >= settings.agent_max_iterations
+        state["tool_calls_used"] >= _iteration_limit(state, settings)
         and not state["forced_final"]
         and runtime.get("status") != "stopped"
     ):
@@ -1803,15 +1856,24 @@ def _tools_node(state: AgentState) -> dict:
         messages.append(
             SystemMessage(
                 content=(
-                    "你已达到本轮允许的工具调用次数上限。"
-                    "请基于已经获取的信息直接给出最终回答；"
-                    "如果信息仍然不足，请明确告诉用户缺少什么，不要继续调用工具。"
+                    (
+                        "本轮项目任务的工具调用预算已用尽，但任务尚未完成。"
+                        "请给出【进度汇报】：已完成了哪些步骤、还有哪些未完成、"
+                        "下一步计划做什么；并明确告诉用户：回复“继续”即可接着做。"
+                        "不要假装任务已完成。"
+                    )
+                    if state.get("task_mode")
+                    else (
+                        "你已达到本轮允许的工具调用次数上限。"
+                        "请基于已经获取的信息直接给出最终回答；"
+                        "如果信息仍然不足，请明确告诉用户缺少什么，不要继续调用工具。"
+                    )
                 )
             )
         )
 
     # 失败次数过多仍受阻：强制收尾并让模型向用户说明（避免无意义空转）
-    max_failures = getattr(settings, "agent_max_failures", 3)
+    max_failures = _failure_limit(state, settings)
     if (
         state.get("failure_count", 0) >= max_failures
         and not state["forced_final"]
@@ -1821,10 +1883,19 @@ def _tools_node(state: AgentState) -> dict:
         messages.append(
             SystemMessage(
                 content=(
-                    "你已连续多次遇到工具执行失败（超过允许的失败重试上限）。"
-                    "请基于已经获得的信息给出最终回答，向用户如实说明："
-                    "任务卡在哪一步、失败原因、以及用户需要做什么（例如修改工作目录、"
-                    "提供权限、确认替代路径）。不要再尝试调用工具。"
+                    (
+                        "你已连续多次遇到工具执行失败（超过允许的失败重试上限）。"
+                        "请给出【进度汇报】：任务卡在哪一步、失败原因、用户需要做什么"
+                        "（例如修改工作目录、提供权限、确认替代路径）；"
+                        "并告诉用户回复“继续”即可接着做。不要再尝试调用工具。"
+                    )
+                    if state.get("task_mode")
+                    else (
+                        "你已连续多次遇到工具执行失败（超过允许的失败重试上限）。"
+                        "请基于已经获得的信息给出最终回答，向用户如实说明："
+                        "任务卡在哪一步、失败原因、以及用户需要做什么（例如修改工作目录、"
+                        "提供权限、确认替代路径）。不要再尝试调用工具。"
+                    )
                 )
             )
         )
@@ -1847,6 +1918,7 @@ def _tools_node(state: AgentState) -> dict:
                     "failure_count": state.get("failure_count", 0),
                     "forced_final": state["forced_final"],
                     "last_call_warned": state["last_call_warned"],
+                    "task_mode": bool(state.get("task_mode")),
                     "verify_fail_count": int(state.get("verify_fail_count") or 0),
                     "plan_done_count": state.get("plan_done_count", 0),
                     "plan_push_count": state.get("plan_push_count", 0),
@@ -2313,6 +2385,7 @@ class LangGraphAgentService(AgentService):
             "plan_push_count": 0,
             "early_created": early_created,
             "dispatch_done": False,
+            "task_mode": False,
             "subagent_results": [],
             "sub_task": {},
             "title_holder": [],

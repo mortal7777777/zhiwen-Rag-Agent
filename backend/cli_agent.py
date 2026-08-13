@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import urllib.request
 
@@ -44,6 +45,50 @@ ANSI = {
 def paint(text: str, color: str = "", bold: bool = False) -> str:
     prefix = ANSI.get(color, "") + (ANSI["bold"] if bold else "")
     return f"{prefix}{text}{ANSI['reset']}" if prefix else text
+
+
+_col = [0]
+
+
+def print_token(text: str) -> None:
+    """流式输出 token，按终端宽度自动换行，不打断文本。"""
+    try:
+        width = max(40, shutil.get_terminal_size((80, 24)).columns)
+    except Exception:
+        width = 80
+    for ch in text:
+        if ch == "\n":
+            sys.stdout.write("\n")
+            _col[0] = 0
+            continue
+        if _col[0] >= width - 1:
+            sys.stdout.write("\n")
+            _col[0] = 0
+        sys.stdout.write(ch)
+        _col[0] += 1
+    sys.stdout.flush()
+
+
+def fetch_todos(base_url: str, conversation_id: int | None) -> None:
+    if not conversation_id:
+        print(paint("还没有会话，先提问。", "yellow"))
+        return
+    try:
+        with urllib.request.urlopen(
+            f"{base_url}/api/todos/{conversation_id}", timeout=10
+        ) as resp:
+            todos = json.loads(resp.read().decode("utf-8")).get("todos") or []
+    except Exception as exc:
+        print(paint(f"读取任务清单失败：{exc}", "red"))
+        return
+    if not todos:
+        print(paint("当前没有任务清单。", "dim"))
+        return
+    print(paint("任务清单", "cyan", bold=True))
+    for t in todos:
+        mark = "✔" if t.get("done") else "○"
+        color = "green" if t.get("done") else "dim"
+        print(paint(f"  {mark} {t.get('text', '')}", color))
 
 
 def resolve_permission(
@@ -158,6 +203,17 @@ def stream_question(
                 print("\r" + paint("📋 执行计划", "cyan", bold=True))
                 for i, step in enumerate(data.get("steps") or [], 1):
                     print(paint(f"   {i}. {step}", "cyan"))
+            elif name == "plan_progress":
+                done = data.get("done")
+                total = data.get("total")
+                if done is not None and total:
+                    print("\r" + paint(f"📋 计划进度 {done}/{total}", "dim"))
+            elif name == "todos":
+                print("\r" + paint("任务清单", "cyan", bold=True))
+                for t in data.get("todos") or []:
+                    mark = "✔" if t.get("done") else "○"
+                    color = "green" if t.get("done") else "dim"
+                    print(paint(f"  {mark} {t.get('text', '')}", color))
             elif name == "reasoning":
                 print("\r" + paint("💭 已深度思考（摘要）", "cyan", bold=True))
                 print(paint(f"   {data.get('summary', '')}", "cyan"))
@@ -165,7 +221,9 @@ def stream_question(
                 print("\r" + paint(f"⚙️ 调用 {data.get('name')}…", "yellow"))
             elif name == "tool_result":
                 summary = data.get("summary") or ""
-                print(paint(f"   ✔ {summary}", "green"))
+                dur = data.get("duration_ms")
+                dur_text = f"（{dur}ms）" if isinstance(dur, (int, float)) else ""
+                print(paint(f"   ✔ {summary} {dur_text}", "green"))
             elif name == "permission_request":
                 _render_permission(data, base_url)
             elif name == "permission_resolved":
@@ -174,10 +232,11 @@ def stream_question(
                 else:
                     print(paint(f"   ▶ 已拒绝：{data.get('reason', '')}", "red"))
             elif name == "token":
-                print(data, end="", flush=True)
+                print_token(data)
             elif name == "title":
                 print("\r" + paint(f"[标题：{data.get('title', '')}]", "dim"))
             elif name == "done":
+                _col[0] = 0
                 print()
             elif name == "error":
                 print(paint(f"❌ {data.get('message', '未知错误')}", "red"))
@@ -197,11 +256,11 @@ def main() -> None:
     conversation_id = args.conversation
 
     print(paint("个人知识库 RAG 智能助手 · 终端版", "cyan", bold=True))
-    print(paint("输入问题开始对话，/help 查看命令，Ctrl+C 停止当前回答。", "dim"))
+    print(paint(f"工具模式：{tool_mode}   ·   输入问题开始，/help 查看命令", "dim"))
 
     while True:
         try:
-            question = input(paint("\n你 > ", "green", bold=True)).strip()
+            question = input(paint("\n› ", "green", bold=True)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -223,8 +282,25 @@ def main() -> None:
                 else:
                     print(paint("用法：/tools auto|knowledge|web|none", "yellow"))
                 continue
+            if cmd == "/todos":
+                fetch_todos(base, conversation_id)
+                continue
+            if cmd == "/status":
+                print(
+                    paint(
+                        f"模式={tool_mode} · 会话={conversation_id or '新会话'}",
+                        "dim",
+                    )
+                )
+                continue
             if cmd == "/help":
-                print(paint("/exit /quit 退出 · /new 新会话 · /tools <mode> 切换工具模式", "dim"))
+                print(
+                    paint(
+                        "/exit /quit 退出 · /new 新会话 · /tools auto|knowledge|web|none\n"
+                        "/todos 查看任务清单 · /status 查看当前状态",
+                        "dim",
+                    )
+                )
                 continue
             print(paint(f"未知命令：{cmd}（/help 查看）", "yellow"))
             continue
