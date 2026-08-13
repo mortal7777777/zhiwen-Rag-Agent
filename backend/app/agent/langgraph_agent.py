@@ -96,6 +96,7 @@ class AgentState(TypedDict, total=False):
     plan_done_count: int
     force_continue: bool
     plan_push_count: int
+    fanout_done: bool
 
     title_holder: list[str]
     title_thread: threading.Thread | None
@@ -511,6 +512,7 @@ def _prepare_node(state: AgentState) -> dict:
         state["plan_done_count"] = int(restored.get("plan_done_count") or 0)
         state["plan_push_count"] = int(restored.get("plan_push_count") or 0)
         state["force_continue"] = False
+        state["fanout_done"] = bool(restored.get("fanout_done"))
         runtime["final_text"] = restored.get("final_text") or ""
     else:
         messages.append(SystemMessage(content=system_prompt_final))
@@ -611,11 +613,142 @@ def _prepare_node(state: AgentState) -> dict:
         "plan_done_count": plan_done_count,
         "force_continue": False,
         "plan_push_count": plan_push_count,
+        "fanout_done": bool(state.get("fanout_done")),
         "sources": state["sources"],
         "tool_trace": state["tool_trace"],
         "tool_calls_used": state["tool_calls_used"],
         "forced_final": state["forced_final"],
         "last_call_warned": state["last_call_warned"],
+    }
+
+
+# ============================================================
+# 节点：fanout（并行检索分支：知识库 + 联网同时跑再汇总）
+# ============================================================
+
+
+def _should_fanout(state: AgentState) -> bool:
+    """同时开启知识库与联网、且计划确实同时需要两者时，先并行检索。"""
+    if state.get("fanout_done"):
+        return False
+    if not (state.get("use_knowledge_base") and state.get("use_web_search")):
+        return False
+    hints = {
+        item.get("tool_hint")
+        for item in (state.get("plan_map") or [])
+        if item.get("tool_hint")
+    }
+    return {"knowledge_base_search", "web_search"} <= hints
+
+
+def _fanout_node(state: AgentState) -> dict:
+    """并行执行 knowledge_base_search + web_search，结果合并回消息链。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from ..todos import plan_progress, sync_todos_from_plan
+
+    service: LangGraphAgentService = state["service"]
+    bus: EventBus = state["bus"]
+    db: Session | None = state["db"]
+    runtime: dict = state["runtime"]
+    messages = state["messages"]
+    tools_by_name = {t.name: t for t in state["tools"]}
+    targets = [
+        name
+        for name in ("knowledge_base_search", "web_search")
+        if name in tools_by_name
+    ]
+    if not targets:
+        return {"fanout_done": True}
+
+    def _run_one(name: str):
+        return name, tools_by_name[name].invoke({"query": state["question"]})
+
+    with ThreadPoolExecutor(max_workers=min(2, len(targets))) as pool:
+        outcomes = list(pool.map(_run_one, targets))
+
+    for name, result in outcomes:
+        entry = {
+            "name": name,
+            "arguments": {"query": state["question"]},
+            "summary": "",
+            "step": len(state["tool_trace"]) + 1,
+            "duration_ms": None,
+        }
+        state["tool_trace"].append(entry)
+        bus.emit(
+            "tool_start",
+            {
+                "id": f"fanout_{name}",
+                "name": name,
+                "arguments": {"query": state["question"]},
+            },
+        )
+        messages.append(
+            ToolMessage(
+                content=json.dumps(result, ensure_ascii=False),
+                name=name,
+                tool_call_id=f"fanout_{name}",
+            )
+        )
+        parsed = result if isinstance(result, dict) else {"summary": str(result)}
+        entry["summary"] = parsed.get("summary", "")
+        tool_sources = (
+            extract_sources(parsed)
+            if name in ("knowledge_base_search", "web_search")
+            else []
+        )
+        state["sources"].extend(tool_sources)
+        bus.emit(
+            "tool_result",
+            {
+                "id": f"fanout_{name}",
+                "name": name,
+                "summary": entry["summary"],
+                "duration_ms": None,
+                "sources": tool_sources,
+            },
+        )
+
+    ok_count = sum(1 for _, r in outcomes if not (r or {}).get("error"))
+    state["tool_calls_used"] += ok_count
+
+    plan_steps = state.get("plan_steps") or []
+    todos = state.get("todos") or []
+    if plan_steps and db is not None and runtime.get("conv_id"):
+        prev_done = int(state.get("plan_done_count") or 0)
+        target = min(prev_done + ok_count, len(plan_steps))
+        hints = [_plan_hint(s).get("tool_hint") for s in plan_steps]
+        todos = (
+            sync_todos_from_plan(
+                db, runtime["conv_id"], plan_steps, target, hints=hints
+            )
+            or todos
+        )
+        done, total, remaining = plan_progress(todos)
+        state["plan_done_count"] = done
+        state["todos"] = todos
+        bus.emit("todos", {"todos": todos})
+        if total:
+            bus.emit(
+                "plan_progress",
+                {
+                    "done": done,
+                    "total": total,
+                    "current": remaining[0].get("text") if remaining else None,
+                    "text": f"计划进度：已完成 {done}/{total} 步（并行检索）。",
+                },
+            )
+
+    state["fanout_done"] = True
+    return {
+        "messages": messages,
+        "tool_trace": state["tool_trace"],
+        "sources": state["sources"],
+        "tool_calls_used": state["tool_calls_used"],
+        "plan_done_count": state.get("plan_done_count", 0),
+        "todos": state.get("todos") or [],
+        "fanout_done": True,
     }
 
 
@@ -1215,6 +1348,7 @@ def _tools_node(state: AgentState) -> dict:
                     "last_call_warned": state["last_call_warned"],
                     "plan_done_count": state.get("plan_done_count", 0),
                     "plan_push_count": state.get("plan_push_count", 0),
+                    "fanout_done": bool(state.get("fanout_done")),
                     "todos": state.get("todos") or [],
                 },
             )
@@ -1429,6 +1563,14 @@ def _finalize_node(state: AgentState) -> dict:
 # ============================================================
 
 
+def _route_after_prepare(state: AgentState) -> str:
+    if state.get("stop_event") is not None and state["stop_event"].is_set():
+        return "agent"
+    if _should_fanout(state):
+        return "fanout"
+    return "agent"
+
+
 def _route_after_agent(state: AgentState) -> str:
     if state.get("stop_event") is not None and state["stop_event"].is_set():
         return "finalize"
@@ -1450,12 +1592,18 @@ def build_agent_graph():
     """构建 LangGraph：prepare -> agent -> tools -> (循环) -> finalize。"""
     graph = StateGraph(AgentState)
     graph.add_node("prepare", _prepare_node)
+    graph.add_node("fanout", _fanout_node)
     graph.add_node("agent", _agent_node)
     graph.add_node("tools", _tools_node)
     graph.add_node("finalize", _finalize_node)
 
     graph.add_edge(START, "prepare")
-    graph.add_edge("prepare", "agent")
+    graph.add_conditional_edges(
+        "prepare",
+        _route_after_prepare,
+        {"fanout": "fanout", "agent": "agent"},
+    )
+    graph.add_edge("fanout", "agent")
     graph.add_conditional_edges(
         "agent",
         _route_after_agent,
@@ -1615,6 +1763,7 @@ class LangGraphAgentService(AgentService):
             "plan_done_count": 0,
             "force_continue": False,
             "plan_push_count": 0,
+            "fanout_done": False,
             "title_holder": [],
             "title_thread": None,
         }
@@ -1657,29 +1806,35 @@ class LangGraphAgentService(AgentService):
         ):
             try:
                 force_memory = self.context.has_memory_intent(question)
-                facts = self.context.extract_facts(
-                    question,
-                    runtime["final_text"],
-                    force=force_memory,
+                auto_extract = (
+                    len(runtime.get("final_text") or "")
+                    >= int(getattr(settings, "memory_auto_extract_min_chars", 400) or 400)
                 )
-                if facts:
-                    added = self.context.add_facts(
-                        db, self.rag.embeddings, facts, runtime["conv_id"]
+                # 短问答跳过记忆提取，减少一轮无必要 LLM 调用；显式"记住"始终提取
+                if force_memory or auto_extract:
+                    facts = self.context.extract_facts(
+                        question,
+                        runtime["final_text"],
+                        force=force_memory,
                     )
-                    if added:
-                        logger.info("新增 %d 条长期记忆", added)
-                    try:
-                        result = self.context.maybe_consolidate(db)
-                        if result and (result["merged"] or result["archived"]):
-                            logger.info("长期记忆自动整合：%s", result)
-                        # 记忆变化后同步导出文件型项目记忆（AGENTS.md）
+                    if facts:
+                        added = self.context.add_facts(
+                            db, self.rag.embeddings, facts, runtime["conv_id"]
+                        )
+                        if added:
+                            logger.info("新增 %d 条长期记忆", added)
                         try:
-                            from ..project_memory import export_project_memory
+                            result = self.context.maybe_consolidate(db)
+                            if result and (result["merged"] or result["archived"]):
+                                logger.info("长期记忆自动整合：%s", result)
+                            # 记忆变化后同步导出文件型项目记忆（AGENTS.md）
+                            try:
+                                from ..project_memory import export_project_memory
 
-                            export_project_memory(self.settings, db)
+                                export_project_memory(self.settings, db)
+                            except Exception as exc:
+                                logger.warning("项目记忆导出失败：%s", exc)
                         except Exception as exc:
-                            logger.warning("项目记忆导出失败：%s", exc)
-                    except Exception as exc:
-                        logger.warning("长期记忆自动整合失败：%s", exc)
+                            logger.warning("长期记忆自动整合失败：%s", exc)
             except Exception as exc:
                 logger.warning("长期记忆提取失败：%s", exc)

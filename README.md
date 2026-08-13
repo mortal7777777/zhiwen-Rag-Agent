@@ -29,6 +29,8 @@
   - **技能检索** `skill_lookup`：按需取回本机已启用的 Skills 指令（结构化分节）。
 - 四种模式：**自动**（模型按需决定）/ **知识库** / **联网** / **不启用**（纯对话）；
 - **文件与终端工具**（见下节）：读取自动执行，写/命令敏感操作弹窗人工确认。
+- **并行检索 fan-out**：同时开启知识库与联网、且计划同时需要两者时，
+  `knowledge_base_search` 与 `web_search` 并行执行后再把结果汇总给模型；
 - **TodoWrite 任务清单（计划硬约束）**：规划后自动播种任务清单（MySQL 持久化、跨轮跟踪），
   Agent 可经 `todo_update` 增删改查（list/add/complete/remove/set，set 支持整体修订），
   前端计划卡片渲染为可勾选清单，切换会话后自动恢复；
@@ -261,6 +263,9 @@ rag_knowledge_base/
    plugins.security.disabled: true
    ```
 
+   本机安装路径：`D:\AI\新建文件夹 (3)\opensearch-3.5.0-windows-x64\opensearch-3.5.0`，
+   启动方式：后台运行其 `bin\opensearch.bat`（不是 Docker 容器）。
+
 2. **MySQL** 已启动，能创建数据库/表（默认 `rag_assistant`，首次启动自动建库建表、写入内置模板）。
 
 3. 本地模型（与 day5_2 共用，位于项目上一级的 `local_models/`）：
@@ -319,11 +324,16 @@ python -m pytest tests -q
 安全边界与命令白名单、CUDA 降级逻辑、技能内容清洗、联网可信度标注、
 RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
 
+提交前自动跑测试：已安装 pre-commit 钩子（`scripts/install-git-hooks.ps1`），
+`git commit` 前会自动执行 pytest，失败则阻止提交（`--no-verify` 可跳过）。
+
 ## 评测
 
 - `backend/eval_questions.json`：14 题种子集（知识库/通用/联网/工具/安全/规划）；
 - `backend/evaluate_agent.py`：逐题调用 Agent 流式接口，记录延迟/工具/计划/
   token/状态到 `eval_report.jsonl`，改动前后对比可发现回归；
+- `backend/eval_ragas.py`：RAGAS `faithfulness` 基线（DeepSeek 裁判），
+  结果写入 `ragas_baseline.jsonl`（基线示例：kb-001 faithfulness=1.0）；
 - 评测方案与开源集建议（RAGAS / BEIR / C-MTEB / GAIA / AgentBench）见
   [docs/EVALUATION.md](docs/EVALUATION.md)。
 
@@ -418,6 +428,12 @@ RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
   `opensearch_meta/`、日志）已加入 `.gitignore` 不入库；
 - **提示词模板**：预设模板已按 Claude Code 风格重写（角色/原则/流程/安全边界），
   含“学习助手”模板；后端启动时自动同步到数据库（系统模板只读，用户模板不受影响）；
+- **MySQL 直启**：`python run.py` 会读取 gitignore 的 `backend/.env.local`
+  （本机 MYSQL_URL）；或使用 `start_backend.ps1`；
+- **SenseNova DeepSeek-V4 flash**：base_url 必须带 `/v1`（已修正）；
+  免费档有 RPM/额度限流，超限时请在设置中切回 DeepSeek 官方供应商；
+- **长期记忆提取**：默认只对“≥400 字回答或显式‘记住’”的对话做提取
+  （`MEMORY_AUTO_EXTRACT_MIN_CHARS` 可调），短问答不再每轮多花一次 LLM 调用；
 - **MySQL 未连接时自动降级**：普通对话仍可用，但会话记忆、模板、运行记录不可用（日志给出明确错误）；
 - 联网搜索默认 DuckDuckGo（免 key），国内网络可能需要代理；也可配置 Tavily；
 - 问答必须配置对话模型 API Key（可在设置页添加/切换供应商）；知识库检索与重排序全程本地；

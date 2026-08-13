@@ -9,6 +9,7 @@ venv/
 *.log
 backend/_*.py
 backend/eval_report.jsonl
+backend/ragas_baseline.jsonl
 .env.local
 
 # 前端

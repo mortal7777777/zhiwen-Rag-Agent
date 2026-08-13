@@ -85,6 +85,8 @@ class Settings:
     summary_max_chars: int = 800        # 摘要最大字符数
     history_max_tokens: int = 32000     # 注入历史消息的 token 预算（估算，为长窗口模型放宽）
     memory_enabled: bool = True         # 长期事实记忆
+    # 自动提取记忆的最小回答长度：短问答不触发记忆提取 LLM 调用（省钱提速）
+    memory_auto_extract_min_chars: int = 400
     memory_top_k: int = 3               # 每次注入最相关的记忆条数
     memory_min_score: float = 0.35      # 记忆召回相似度阈值（BGE 余弦）
     memory_max_tokens: int = 600        # 每次注入记忆的 token 预算
@@ -210,6 +212,9 @@ class Settings:
             summary_max_chars=int(_env("SUMMARY_MAX_CHARS", "800")),
             history_max_tokens=int(_env("HISTORY_MAX_TOKENS", "32000")),
             memory_enabled=_env("MEMORY_ENABLED", "1") == "1",
+            memory_auto_extract_min_chars=int(
+                _env("MEMORY_AUTO_EXTRACT_MIN_CHARS", "400")
+            ),
             memory_top_k=int(_env("MEMORY_TOP_K", "3")),
             memory_min_score=float(_env("MEMORY_MIN_SCORE", "0.35")),
             memory_max_tokens=int(_env("MEMORY_MAX_TOKENS", "600")),

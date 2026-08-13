@@ -14,7 +14,7 @@
 | 项 | 值 |
 |---|---|
 | 项目根 | `C:\Users\user\PycharmProjects\PythonProjectPytorch1\langchain01\rag_knowledge_base` |
-| 后端 | FastAPI + uvicorn，`0.0.0.0:8000`，**PID 25664**（重启后 PID 会变） |
+| 后端 | FastAPI + uvicorn，`0.0.0.0:8000`，**PID 3096**（重启后 PID 会变） |
 | 前端 | Vite + Vue3，dev server `::1:5173`，**PID 46732**（重启后 PID 会变） |
 | Python | `D:\conda_envs\pytorch_env\python.exe`（带 torch/cuda） |
 | MySQL | `mysql+pymysql://root:CHANGE_ME@127.0.0.1:3306/rag_assistant?charset=utf8mb4`，库名 `rag_assistant` |
@@ -194,6 +194,25 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
    `backend/evaluate_agent.py`（自动记录延迟/工具/计划/token/状态）+ 
    [docs/EVALUATION.md](docs/EVALUATION.md)（RAGAS/BEIR/C-MTEB/GAIA/AgentBench
    选型与回归门槛建议）。
+
+### 4.5 本轮（运维修复 + 评测闭环 + 并行检索 + 成本优化）
+1. **MySQL 直启修复**：根因是 `python run.py` 未读 MYSQL_URL，默认 root 空密码
+   → Access denied。`run.py` 现支持 `backend/.env.local`（gitignored），
+   启动错误提示给出可操作指引；已验证恢复。
+2. **OpenSearch 恢复**：RAG 检索 500 是 OpenSearch 进程掉了（非 Docker，
+   安装于 `D:\AI\新建文件夹 (3)\opensearch-3.5.0-windows-x64\opensearch-3.5.0`），
+   已后台重启并验证；注意其数据盘仅剩 8% 空间，达到高水位可能进入只读。
+3. **SenseNova DeepSeek-V4 flash 验证**：模型可用，但 base_url 需带 `/v1`
+   （已修正配置）；免费档有 RPM/额度限流（实测 429 rpm exhausted），
+   当前主对话供应商已切回 DeepSeek 官方，额度恢复后可再切。
+4. **评测闭环**：pre-commit 钩子（pytest，失败阻止提交）+ `eval_ragas.py`
+   RAGAS faithfulness 基线（DeepSeek 裁判，kb-001=1.0，写入 ragas_baseline.jsonl）。
+5. **并行检索 fan-out**：知识库+联网同时开启且计划同时需要两者时，
+   新增 fanout 节点并行执行两种检索再汇总（路由逻辑已单测）。
+6. **成本优化**：记忆提取条件化（默认 ≥400 字回答或显式“记住”才提取，
+   `MEMORY_AUTO_EXTRACT_MIN_CHARS` 可调）；查询扩展缓存此前已完成。
+7. **#3 沙箱/浏览器现状**：Docker 客户端已装但 Desktop 未运行；Playwright 未安装。
+   待 Docker Desktop 启动后再接 Playwright MCP 与 bash 沙箱。
 
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
