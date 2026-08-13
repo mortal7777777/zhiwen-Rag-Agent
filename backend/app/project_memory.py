@@ -23,22 +23,54 @@ def project_memory_path(settings) -> Path:
     return Path(__file__).resolve().parents[2] / "AGENTS.md"  # rag_knowledge_base/AGENTS.md
 
 
-def load_project_memory(settings, override_path: str | None = None) -> str | None:
-    """读取项目记忆文件；override_path 指向 CLI 启动目录下的 AGENTS.md。"""
+def load_project_memory(
+    settings,
+    override_path: str | None = None,
+    max_chars: int = 8000,
+) -> str | None:
+    """按 CLAUDE.md 语义加载项目记忆：
+
+    override_path 存在时（CLI 启动目录）：从该目录逐级向上找 AGENTS.md，
+    再追加用户级 ~/.myragagent/AGENTS.md；否则用项目根 AGENTS.md + 用户级。
+    """
+    paths: list[Path] = []
     if override_path:
-        path = Path(override_path).expanduser().resolve()
-        if path.is_dir():
-            path = path / "AGENTS.md"
+        directory = Path(override_path).expanduser().resolve()
+        if directory.is_file():
+            directory = directory.parent
+        current = directory
+        while True:
+            candidate = current / "AGENTS.md"
+            if candidate.exists():
+                paths.append(candidate)
+            if current.parent == current:
+                break
+            current = current.parent
     else:
-        path = project_memory_path(settings)
-    try:
-        if not path.exists():
-            return None
-        text = path.read_text(encoding="utf-8", errors="ignore").strip()
-        return text[:4000] if text else None
-    except Exception as exc:
-        logger.warning("读取项目记忆失败：%s", exc)
+        default = project_memory_path(settings)
+        if default.exists():
+            paths.append(default)
+    user_global = Path.home() / ".myragagent" / "AGENTS.md"
+    if user_global.exists():
+        paths.append(user_global)
+
+    blocks: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore").strip()
+        except Exception as exc:
+            logger.warning("读取项目记忆失败 %s：%s", path, exc)
+            continue
+        if text:
+            blocks.append(f"[项目记忆：{path}]\n{text[:4000]}")
+    if not blocks:
         return None
+    return ("\n\n".join(blocks))[:max_chars] or None
 
 
 def export_project_memory(settings, db) -> dict:

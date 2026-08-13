@@ -23,6 +23,7 @@ import json
 import os
 import shutil
 import sys
+import time
 import urllib.request
 
 try:
@@ -96,19 +97,42 @@ SESSION_FILE = ".myragagent_session.json"
 
 
 def save_session(cwd: str, conversation_id: int) -> None:
+    """按目录记录最近会话（最多 10 条，最近在前）。"""
+    path = os.path.join(cwd, SESSION_FILE)
     try:
-        with open(os.path.join(cwd, SESSION_FILE), "w", encoding="utf-8") as f:
-            json.dump({"conversation_id": conversation_id}, f)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    history = [
+        h
+        for h in (data.get("history") or [])
+        if h.get("conversation_id") != conversation_id
+    ]
+    history.insert(0, {"conversation_id": conversation_id, "updated_at": time.time()})
+    data["history"] = history[:10]
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
     except Exception:
         pass
 
 
-def load_session(cwd: str) -> int | None:
+def load_session_history(cwd: str) -> list[dict]:
     try:
         with open(os.path.join(cwd, SESSION_FILE), encoding="utf-8") as f:
-            return int((json.load(f) or {}).get("conversation_id") or 0) or None
+            return (json.load(f) or {}).get("history") or []
     except Exception:
-        return None
+        return []
+
+
+def fetch_conversation_titles(base_url: str) -> dict[int, str]:
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/conversations", timeout=10) as resp:
+            items = json.loads(resp.read().decode("utf-8"))
+        return {int(c.get("id")): str(c.get("title") or "新对话") for c in items}
+    except Exception:
+        return {}
 
 
 def init_project_memory(cwd: str) -> None:
@@ -379,12 +403,33 @@ def main() -> None:
                 print(paint("已开启新会话。", "dim"))
                 continue
             if cmd == "/resume":
-                resumed = load_session(os.getcwd())
-                if resumed:
-                    conversation_id = resumed
-                    print(paint(f"已恢复会话 {resumed}。", "dim"))
-                else:
+                history = load_session_history(os.getcwd())
+                if not history:
                     print(paint("本目录还没有可恢复的会话。", "yellow"))
+                    continue
+                if arg.isdigit() and 1 <= int(arg) <= len(history):
+                    index = int(arg) - 1
+                elif len(history) == 1:
+                    index = 0
+                else:
+                    titles = fetch_conversation_titles(base)
+                    print(paint("最近会话（输入序号恢复）：", "cyan", bold=True))
+                    for i, h in enumerate(history, 1):
+                        cid = h.get("conversation_id")
+                        print(
+                            paint(
+                                f"  {i}. 会话 {cid} · {titles.get(int(cid), '')}",
+                                "dim",
+                            )
+                        )
+                    sel = input(paint("选择序号（回车=最新）：", "yellow")).strip()
+                    index = (
+                        int(sel) - 1
+                        if sel.isdigit() and 1 <= int(sel) <= len(history)
+                        else 0
+                    )
+                conversation_id = int(history[index].get("conversation_id"))
+                print(paint(f"已恢复会话 {conversation_id}。", "dim"))
                 continue
             if cmd == "/init":
                 init_project_memory(os.getcwd())

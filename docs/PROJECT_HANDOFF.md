@@ -262,6 +262,12 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 2. 会话 id 按目录持久化到 `.myragagent_session.json`，`/resume` 恢复、`/new` 清空；
 3. 输入 `/` 实时列出可用命令，Tab 自动补全（Windows msvcrt 实现）。
 
+### 4.11 本轮（记忆层级合并 + /resume 会话选择）
+1. `load_project_memory` 按 CLAUDE.md 语义：启动目录逐级向上合并父目录
+   AGENTS.md + 用户级 `~/.myragagent/AGENTS.md`，总长上限 8000 字符；
+2. `/resume` 列出本目录最近 10 轮会话（含标题）供选择，支持 `/resume 序号`；
+3. 新增分层记忆单测（57 通过）。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。

@@ -344,8 +344,10 @@ myragagent --tool auto
 输入 `/` 会在下方实时列出可用命令，Tab 自动补全。
 
 **按目录记忆（类 CLAUDE.md）**：CLI 会把启动目录传给后端，自动加载该目录下的
-`AGENTS.md`（不存在时可用 `/init` 创建）；会话 id 记录在目录内
-`.myragagent_session.json`，换目录即换上下文，`/resume` 续接上次对话。
+`AGENTS.md` 并逐级向上合并父目录的 `AGENTS.md`，最后追加用户级
+`~/.myragagent/AGENTS.md`（不存在时可用 `/init` 创建当前目录版本）；
+会话记录在目录内 `.myragagent_session.json`，`/resume` 列出最近 10 轮对话供选择，
+换目录即换上下文。
 
 项目级任务（如“完成整个项目”）会自动进入 task_mode：工具预算 6→24、
 失败上限 3→6；预算用尽时输出“进度汇报”并保留进度，回复“继续”即可接着做，
