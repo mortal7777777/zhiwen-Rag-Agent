@@ -79,7 +79,10 @@ def init_db() -> bool:
         except Exception as exc2:
             db_ready = False
             logger.warning(
-                "MySQL 初始化失败，会话记忆/模板功能不可用。请检查 MYSQL_URL 配置。错误：%s",
+                "MySQL 初始化失败，会话记忆/模板功能不可用。原因：%s。"
+                "若为 Access denied，请确认 MYSQL_URL 使用了正确密码；"
+                "可直接运行 start_backend.ps1，或在 backend/.env.local 中"
+                "写入 MYSQL_URL=mysql+pymysql://root:你的密码@127.0.0.1:3306/rag_assistant?charset=utf8mb4",
                 exc2,
             )
             return False

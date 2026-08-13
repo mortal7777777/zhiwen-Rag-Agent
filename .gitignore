@@ -9,6 +9,7 @@ venv/
 *.log
 backend/_*.py
 backend/eval_report.jsonl
+.env.local
 
 # 前端
 frontend/node_modules/
