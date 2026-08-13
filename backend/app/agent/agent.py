@@ -132,6 +132,7 @@ class AgentService:
         images: list[str] | None = None,
         plan_only: bool = False,
         resume_plan: list[str] | None = None,
+        project_dir: str | None = None,
     ):
         """执行完整 Agent 流程，逐事件产出（session/vision/plan/tool_start/tool_result/token/done/error）。"""
         # 没有外部会话时，自己开一个（SSE 工作线程内使用）
@@ -155,6 +156,7 @@ class AgentService:
                             images,
                             plan_only=plan_only,
                             resume_plan=resume_plan,
+                            project_dir=project_dir,
                         )
                     finally:
                         session.close()
@@ -174,6 +176,7 @@ class AgentService:
             images,
             plan_only=plan_only,
             resume_plan=resume_plan,
+            project_dir=project_dir,
         )
 
     def run_json(
@@ -190,6 +193,7 @@ class AgentService:
         images: list[str] | None = None,
         plan_only: bool = False,
         resume_plan: list[str] | None = None,
+        project_dir: str | None = None,
     ) -> dict:
         """非流式入口：收集事件并组装成 {answer, sources, tool_trace}。"""
         answer_parts: list[str] = []
@@ -211,6 +215,7 @@ class AgentService:
             images,
             plan_only=plan_only,
             resume_plan=resume_plan,
+            project_dir=project_dir,
         ):
             name, data = event["event"], event["data"]
             if name == "session":

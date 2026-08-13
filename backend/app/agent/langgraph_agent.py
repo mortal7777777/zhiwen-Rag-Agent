@@ -92,6 +92,7 @@ class AgentState(TypedDict, total=False):
     verify_fail_count: int
     early_created: bool
     task_mode: bool
+    project_dir: str | None
 
     plan_steps: list[str]
     plan_map: list[dict]
@@ -545,7 +546,9 @@ def _prepare_node(state: AgentState) -> dict:
         from ..project_memory import load_project_memory
         from ..trajectory import load_trajectory_summary
 
-        project_memory_text = load_project_memory(settings)
+        project_memory_text = load_project_memory(
+            settings, state.get("project_dir")
+        )
         if db is not None and conv_id is not None:
             trajectory_summary = load_trajectory_summary(db, conv_id)
     except Exception as exc:
@@ -2312,6 +2315,7 @@ class LangGraphAgentService(AgentService):
         images: list[str] | None,
         plan_only: bool = False,
         resume_plan: list[str] | None = None,
+        project_dir: str | None = None,
     ):
         """执行 LangGraph 编排，逐事件产出（session/plan/vision/.../done）。"""
         settings = self.settings
@@ -2362,6 +2366,7 @@ class LangGraphAgentService(AgentService):
             "tool_mode": tool_mode,
             "plan_only": bool(plan_only),
             "resume_plan": list(resume_plan) if resume_plan else None,
+            "project_dir": project_dir,
             "messages": [],
             "tools": [],
             "pending_tool_calls": [],

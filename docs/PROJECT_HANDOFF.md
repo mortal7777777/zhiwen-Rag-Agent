@@ -256,6 +256,12 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
    流式文本按终端宽度换行；工具耗时、计划进度、任务清单渲染；数字键审批。
 3. 测试增至 55 个（新增 task_mode 识别与预算单测）。
 
+### 4.10 本轮（按目录 AGENTS.md + /resume + / 命令菜单）
+1. CLI 传递 `project_dir`，后端按启动目录加载 AGENTS.md（类 CLAUDE.md 目录语义）；
+   `/init` 在当前目录创建模板；
+2. 会话 id 按目录持久化到 `.myragagent_session.json`，`/resume` 恢复、`/new` 清空；
+3. 输入 `/` 实时列出可用命令，Tab 自动补全（Windows msvcrt 实现）。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。

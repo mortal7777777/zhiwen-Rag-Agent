@@ -23,9 +23,14 @@ def project_memory_path(settings) -> Path:
     return Path(__file__).resolve().parents[2] / "AGENTS.md"  # rag_knowledge_base/AGENTS.md
 
 
-def load_project_memory(settings) -> str | None:
-    """读取项目记忆文件（不存在返回 None）。"""
-    path = project_memory_path(settings)
+def load_project_memory(settings, override_path: str | None = None) -> str | None:
+    """读取项目记忆文件；override_path 指向 CLI 启动目录下的 AGENTS.md。"""
+    if override_path:
+        path = Path(override_path).expanduser().resolve()
+        if path.is_dir():
+            path = path / "AGENTS.md"
+    else:
+        path = project_memory_path(settings)
     try:
         if not path.exists():
             return None

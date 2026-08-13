@@ -338,8 +338,14 @@ myragagent --tool auto
 未安装时可用项目根的 `.\agent.ps1` 兜底。
 
 终端内命令：`/new` 新会话、`/tools auto|knowledge|web|none` 切换模式、
-`/todos` 查看任务清单、`/status` 查看状态、`/help` 帮助、`Ctrl+C` 停止生成；
+`/todos` 查看任务清单、`/status` 查看状态、`/init` 在当前目录创建 AGENTS.md、
+`/resume` 恢复本目录上次会话、`/help` 帮助、`Ctrl+C` 停止生成；
 审批用数字键 1/2/3/4 选择，流式文本按终端宽度自动换行。
+输入 `/` 会在下方实时列出可用命令，Tab 自动补全。
+
+**按目录记忆（类 CLAUDE.md）**：CLI 会把启动目录传给后端，自动加载该目录下的
+`AGENTS.md`（不存在时可用 `/init` 创建）；会话 id 记录在目录内
+`.myragagent_session.json`，换目录即换上下文，`/resume` 续接上次对话。
 
 项目级任务（如“完成整个项目”）会自动进入 task_mode：工具预算 6→24、
 失败上限 3→6；预算用尽时输出“进度汇报”并保留进度，回复“继续”即可接着做，

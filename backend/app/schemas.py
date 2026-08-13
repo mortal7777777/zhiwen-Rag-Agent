@@ -84,6 +84,10 @@ class AgentChatRequest(BaseModel):
     system_prompt: str | None = Field(
         default=None, description="会话级自定义提示词（优先级最高）"
     )
+    project_dir: str | None = Field(
+        default=None,
+        description="CLI 启动目录；用于加载该目录下的 AGENTS.md 项目记忆",
+    )
     tool_mode: str = Field(
         default="auto",
         pattern="^(auto|knowledge|web|none)$",

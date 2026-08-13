@@ -43,6 +43,7 @@ def agent_chat(
             images=request.images,
             plan_only=request.plan_only,
             resume_plan=request.resume_plan,
+            project_dir=request.project_dir,
         )
     except Exception as exc:
         logger.exception("Agent 问答失败")
@@ -76,6 +77,7 @@ async def agent_stream(
                     images=request.images,
                     plan_only=request.plan_only,
                     resume_plan=request.resume_plan,
+                    project_dir=request.project_dir,
                 ):
                     queue.put(event)
                     # 注意：不要在这里 break，否则生成器被提前丢弃，

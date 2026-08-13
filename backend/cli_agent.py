@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import urllib.request
@@ -89,6 +90,97 @@ def fetch_todos(base_url: str, conversation_id: int | None) -> None:
         mark = "✔" if t.get("done") else "○"
         color = "green" if t.get("done") else "dim"
         print(paint(f"  {mark} {t.get('text', '')}", color))
+
+
+SESSION_FILE = ".myragagent_session.json"
+
+
+def save_session(cwd: str, conversation_id: int) -> None:
+    try:
+        with open(os.path.join(cwd, SESSION_FILE), "w", encoding="utf-8") as f:
+            json.dump({"conversation_id": conversation_id}, f)
+    except Exception:
+        pass
+
+
+def load_session(cwd: str) -> int | None:
+    try:
+        with open(os.path.join(cwd, SESSION_FILE), encoding="utf-8") as f:
+            return int((json.load(f) or {}).get("conversation_id") or 0) or None
+    except Exception:
+        return None
+
+
+def init_project_memory(cwd: str) -> None:
+    path = os.path.join(cwd, "AGENTS.md")
+    if os.path.exists(path):
+        print(paint("AGENTS.md 已存在，未覆盖。", "yellow"))
+        return
+    template = (
+        "# AGENTS.md\n\n"
+        "> 本文件由 AI 助手自动加载；按需维护。\n\n"
+        "## 项目背景\n\n"
+        "（描述这个目录里的项目是做什么的）\n\n"
+        "## 约定\n\n"
+        "- 描述代码风格、目录结构、常用命令等约定\n\n"
+        "## 注意事项\n\n"
+        "- 描述需要注意的坑与约束\n"
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(template)
+    print(paint(f"已创建 {path}，下一轮对话会自动加载。", "green"))
+
+
+COMMANDS = [
+    "/exit", "/quit", "/new", "/tools", "/todos", "/status", "/help",
+    "/init", "/resume",
+]
+
+
+def _render_menu(buf: str) -> None:
+    """实时重绘输入行与 / 命令候选（Windows 10+ 终端支持 ANSI）。"""
+    sys.stdout.write("\r\033[2K" + paint("› ", "green", bold=True) + buf)
+    sys.stdout.write("\n\033[2K")
+    if buf.startswith("/"):
+        matches = [c for c in COMMANDS if c.startswith(buf.split(" ")[0])]
+        if matches:
+            sys.stdout.write("  " + "  ".join(matches[:6]))
+    sys.stdout.write(f"\033[1A\033[{2 + len(buf)}C")
+    sys.stdout.flush()
+
+
+def read_input(prompt: str) -> str:
+    """带 / 命令实时菜单的输入；非 Windows 回退普通 input。"""
+    if sys.platform != "win32":
+        return input(prompt)
+    import msvcrt
+
+    sys.stdout.write(paint("› ", "green", bold=True))
+    sys.stdout.flush()
+    buf = ""
+    while True:
+        ch = msvcrt.getwch()
+        if ch in ("\r", "\n"):
+            sys.stdout.write("\n\n")
+            return buf
+        if ch == "\x03":
+            sys.stdout.write("\n")
+            raise KeyboardInterrupt
+        if ch in ("\b", "\x7f"):
+            if buf:
+                buf = buf[:-1]
+            _render_menu(buf)
+        elif ch == "\t":
+            matches = [c for c in COMMANDS if c.startswith(buf.split(" ")[0])]
+            if matches:
+                buf = matches[0]
+                _render_menu(buf)
+        elif ch == "\x1b":
+            buf = ""
+            _render_menu(buf)
+        elif ch.isprintable():
+            buf += ch
+            _render_menu(buf)
 
 
 def resolve_permission(
@@ -175,6 +267,7 @@ def stream_question(
             "conversation_id": conversation_id,
             "tool_mode": tool_mode,
             "template_id": None,
+            "project_dir": os.getcwd(),
         },
         ensure_ascii=False,
     ).encode("utf-8")
@@ -196,6 +289,8 @@ def stream_question(
             name, data = event.get("event"), event.get("data") or {}
             if name == "session":
                 conv_id = data.get("conversation_id")
+                if conv_id:
+                    save_session(os.getcwd(), int(conv_id))
                 print(paint(f"[会话 {conv_id}]", "dim"))
             elif name == "status":
                 print("\r" + paint(f"⏳ {data.get('text', '')}", "yellow"), end="", flush=True)
@@ -257,10 +352,14 @@ def main() -> None:
 
     print(paint("个人知识库 RAG 智能助手 · 终端版", "cyan", bold=True))
     print(paint(f"工具模式：{tool_mode}   ·   输入问题开始，/help 查看命令", "dim"))
+    if os.path.exists(os.path.join(os.getcwd(), "AGENTS.md")):
+        print(paint("已加载本目录 AGENTS.md", "dim"))
+    else:
+        print(paint("提示：输入 /init 可在本目录创建 AGENTS.md（项目记忆）", "dim"))
 
     while True:
         try:
-            question = input(paint("\n› ", "green", bold=True)).strip()
+            question = read_input("› ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -273,7 +372,22 @@ def main() -> None:
                 break
             if cmd == "/new":
                 conversation_id = None
+                try:
+                    os.remove(os.path.join(os.getcwd(), SESSION_FILE))
+                except OSError:
+                    pass
                 print(paint("已开启新会话。", "dim"))
+                continue
+            if cmd == "/resume":
+                resumed = load_session(os.getcwd())
+                if resumed:
+                    conversation_id = resumed
+                    print(paint(f"已恢复会话 {resumed}。", "dim"))
+                else:
+                    print(paint("本目录还没有可恢复的会话。", "yellow"))
+                continue
+            if cmd == "/init":
+                init_project_memory(os.getcwd())
                 continue
             if cmd == "/tools":
                 if arg in ("auto", "knowledge", "web", "none"):
@@ -297,7 +411,8 @@ def main() -> None:
                 print(
                     paint(
                         "/exit /quit 退出 · /new 新会话 · /tools auto|knowledge|web|none\n"
-                        "/todos 查看任务清单 · /status 查看当前状态",
+                        "/todos 任务清单 · /status 状态 · /init 创建 AGENTS.md\n"
+                        "/resume 恢复本目录上次会话",
                         "dim",
                     )
                 )
