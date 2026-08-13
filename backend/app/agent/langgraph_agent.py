@@ -89,6 +89,7 @@ class AgentState(TypedDict, total=False):
     forced_final: bool
     last_call_warned: bool
     verify_fail_count: int
+    early_created: bool
 
     plan_steps: list[str]
     plan_map: list[dict]
@@ -219,12 +220,16 @@ def _prepare_node(state: AgentState) -> dict:
                     db, title="新对话", template_id=bound_template_id
                 )
                 is_new_conversation = True
-            elif template_id is not None and (conv.template_id or None) != (
-                template_id or None
-            ):
-                conv = repo.update_conversation(
-                    db, conv.id, template_id=template_id
-                )
+            else:
+                if template_id is not None and (conv.template_id or None) != (
+                    template_id or None
+                ):
+                    conv = repo.update_conversation(
+                        db, conv.id, template_id=template_id
+                    )
+                # 入口阶段提前建号的新会话：视作新会话以触发生成标题
+                if state.get("early_created"):
+                    is_new_conversation = True
             conv_id = conv.id
             conv_title = conv.title
             summary_text, recent_rows = service.context.compact_conversation(
@@ -655,7 +660,8 @@ def _prepare_node(state: AgentState) -> dict:
 SUBAGENT_SYSTEM_PROMPT = (
     "你是主 Agent 派出的并行子任务代理。只完成分配给你的这一个子步骤："
     "必要时调用可用工具获取信息，然后用 2~4 句话输出该子步骤的结论摘要。"
-    "不要输出最终答案、不要调用无关工具、不要发起写操作或审批。"
+    "不要输出最终答案、不要调用与子任务无关的工具；写文件/执行命令等敏感操作"
+    "会由系统请求用户确认，被拒绝时如实说明影响并询问替代方案。"
 )
 
 
@@ -1294,11 +1300,25 @@ def _pick_verify_command(settings, path: str) -> str | None:
 
 def _run_verify(settings, paths: list[str]) -> list[dict]:
     """对写入/编辑的文件逐条运行验证，返回 [{path, command, exit_code, output}]。"""
-    from ..tools_extra import _run_command
+    from ..tools_extra import _resolve_workspace, _run_command
+
+    sandbox = str(effective(settings, "command_sandbox") or "subprocess").strip().lower()
+    workspace = Path(_resolve_workspace(settings)).resolve()
+
+    def _verifiable_path(path: str) -> str:
+        # Docker 沙箱里没有宿主机盘符路径：工作目录内的文件映射到 /workspace
+        if sandbox != "docker":
+            return path
+        try:
+            rel = Path(path).resolve().relative_to(workspace)
+            return "/workspace/" + rel.as_posix()
+        except ValueError:
+            return path
 
     results: list[dict] = []
     for p in paths:
-        cmd = _pick_verify_command(settings, p)
+        target = _verifiable_path(p)
+        cmd = _pick_verify_command(settings, target)
         if not cmd:
             continue
         try:
@@ -1660,9 +1680,12 @@ def _tools_node(state: AgentState) -> dict:
             else:
                 verify_fail_count = int(state.get("verify_fail_count") or 0) + 1
                 state["verify_fail_count"] = verify_fail_count
+                max_retries = max(
+                    0, int(effective(settings, "verify_max_retries") or 1)
+                )
                 retries_left = max(
                     0,
-                    int(effective(settings, "verify_max_retries") or 1) - verify_fail_count,
+                    max_retries + 1 - verify_fail_count,
                 )
                 msg = (
                     f"写后自动验证失败（{len(failed)} 个文件，第 {verify_fail_count} 次失败）：\n"
@@ -2237,12 +2260,14 @@ class LangGraphAgentService(AgentService):
         )
 
         # 新会话先建号：让原生 checkpointer 的 thread_id 从第一轮就能对齐 conv:id
+        early_created = False
         if conversation_id is None and db is not None:
             try:
                 conv = repo.create_conversation(
                     db, title="新对话", template_id=template_id or None
                 )
                 conversation_id = conv.id
+                early_created = True
             except Exception as exc:
                 logger.warning("提前创建会话失败：%s", exc)
 
@@ -2293,6 +2318,7 @@ class LangGraphAgentService(AgentService):
             "plan_done_count": 0,
             "force_continue": False,
             "plan_push_count": 0,
+            "early_created": early_created,
             "dispatch_done": False,
             "subagent_results": [],
             "sub_task": {},

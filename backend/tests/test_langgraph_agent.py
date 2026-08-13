@@ -164,6 +164,29 @@ def test_run_verify_skips_unknown_ext(tmp_path):
     assert _run_verify(VSettings(), [str(f)]) == []
 
 
+def test_run_verify_docker_translates_path(tmp_path, monkeypatch):
+    from app.agent import langgraph_agent as la
+    import app.tools_extra as te
+
+    f = tmp_path / "app.py"
+    f.write_text("x = 1\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        te,
+        "_run_command",
+        lambda settings, cmd: calls.append(cmd)
+        or {"exit_code": 0, "output": "ok"},
+    )
+    monkeypatch.setattr(te, "_resolve_workspace", lambda settings: str(tmp_path))
+
+    class S(VSettings):
+        command_sandbox = "docker"
+
+    results = la._run_verify(S(), [str(f)])
+    assert results and results[0]["exit_code"] == 0
+    assert calls and "/workspace/app.py" in calls[0]
+
+
 # ---------------- 系统提示词静态/动态拆分（prompt caching） ----------------
 
 def test_compose_system_prompt_static_dynamic_split():

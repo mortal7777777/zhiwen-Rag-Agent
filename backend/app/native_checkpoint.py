@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import date, datetime
 from pathlib import Path
 
 from langchain_core.messages import BaseMessage
@@ -25,6 +26,10 @@ def _sanitize(obj):
         return obj
     if isinstance(obj, BaseMessage):
         return obj  # jsonplus 原生支持 LangChain 消息
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, tuple):
+        return [_sanitize(x) for x in obj]
     if isinstance(obj, list):
         return [_sanitize(x) for x in obj]
     if isinstance(obj, dict):
