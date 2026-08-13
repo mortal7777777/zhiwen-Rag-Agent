@@ -23,12 +23,13 @@ from __future__ import annotations
 
 import json
 import logging
+import operator
 import re
 import threading
 import time
 from datetime import datetime
 from queue import Queue
-from typing import TypedDict
+from typing import Annotated, TypedDict
 from zoneinfo import ZoneInfo
 
 from langchain_core.messages import (
@@ -38,6 +39,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
 from sqlalchemy.orm import Session
 
 from .. import db
@@ -96,7 +98,9 @@ class AgentState(TypedDict, total=False):
     plan_done_count: int
     force_continue: bool
     plan_push_count: int
-    fanout_done: bool
+    sub_task: dict
+    subagent_results: Annotated[list[dict], operator.add]
+    dispatch_done: bool
 
     title_holder: list[str]
     title_thread: threading.Thread | None
@@ -512,7 +516,7 @@ def _prepare_node(state: AgentState) -> dict:
         state["plan_done_count"] = int(restored.get("plan_done_count") or 0)
         state["plan_push_count"] = int(restored.get("plan_push_count") or 0)
         state["force_continue"] = False
-        state["fanout_done"] = bool(restored.get("fanout_done"))
+        state["dispatch_done"] = bool(restored.get("dispatch_done"))
         runtime["final_text"] = restored.get("final_text") or ""
     else:
         messages.append(SystemMessage(content=system_prompt_final))
@@ -613,7 +617,7 @@ def _prepare_node(state: AgentState) -> dict:
         "plan_done_count": plan_done_count,
         "force_continue": False,
         "plan_push_count": plan_push_count,
-        "fanout_done": bool(state.get("fanout_done")),
+        "dispatch_done": bool(state.get("dispatch_done")),
         "sources": state["sources"],
         "tool_trace": state["tool_trace"],
         "tool_calls_used": state["tool_calls_used"],
@@ -623,101 +627,251 @@ def _prepare_node(state: AgentState) -> dict:
 
 
 # ============================================================
-# 节点：fanout（并行检索分支：知识库 + 联网同时跑再汇总）
+# 子代理并行（Send fan-out / fan-in，类 Claude Code 的 Task）
 # ============================================================
 
-
-def _should_fanout(state: AgentState) -> bool:
-    """同时开启知识库与联网、且计划确实同时需要两者时，先并行检索。"""
-    if state.get("fanout_done"):
-        return False
-    if not (state.get("use_knowledge_base") and state.get("use_web_search")):
-        return False
-    hints = {
-        item.get("tool_hint")
-        for item in (state.get("plan_map") or [])
-        if item.get("tool_hint")
-    }
-    return {"knowledge_base_search", "web_search"} <= hints
+SUBAGENT_SYSTEM_PROMPT = (
+    "你是主 Agent 派出的并行子任务代理。只完成分配给你的这一个子步骤："
+    "必要时调用可用工具获取信息，然后用 2~4 句话输出该子步骤的结论摘要。"
+    "不要输出最终答案、不要调用无关工具、不要发起写操作或审批。"
+)
 
 
-def _fanout_node(state: AgentState) -> dict:
-    """并行执行 knowledge_base_search + web_search，结果合并回消息链。"""
-    from concurrent.futures import ThreadPoolExecutor
+def _build_subagent_tasks(state: AgentState) -> list[dict]:
+    """把计划中带工具提示的步骤拆成子任务（最多 4 个）。"""
+    tasks: list[dict] = []
+    seen: set[str] = set()
+    for item in state.get("plan_map") or []:
+        hint = item.get("tool_hint") or ""
+        step = (item.get("step") or "").strip()
+        if not hint or not step:
+            continue
+        key = f"{hint}|{step[:40]}"
+        if key in seen:
+            continue
+        seen.add(key)
+        tasks.append({"step": step, "tool_hint": hint})
+    return tasks[:4]
 
-    from ..todos import plan_progress, sync_todos_from_plan
+
+def _subagent_tools(service: "LangGraphAgentService", hint: str, counter: list[int]):
+    """按工具提示给子代理构建受限工具集（只读/检索类，不含敏感操作）。"""
+    from ..tools_extra import (
+        make_grep_search_tool,
+        make_list_dir_tool,
+        make_read_file_tool,
+    )
+    from .tools import make_knowledge_base_tool, make_web_search_tool
+
+    settings = service.settings
+    if hint == "knowledge_base_search":
+        return [
+            make_knowledge_base_tool(
+                service.rag,
+                counter,
+                settings.crag_fallback_enabled,
+                settings.crag_min_score,
+                effective(settings, "web_search_provider"),
+                settings.tavily_api_key,
+                effective(settings, "web_search_max_results"),
+                allow_web_fallback=False,
+            )
+        ]
+    if hint == "web_search":
+        return [
+            make_web_search_tool(
+                effective(settings, "web_search_provider"),
+                settings.tavily_api_key,
+                effective(settings, "web_search_max_results"),
+                counter,
+            )
+        ]
+    if hint in ("file_tool/bash",):
+        return [
+            make_list_dir_tool(settings),
+            make_read_file_tool(settings),
+            make_grep_search_tool(settings),
+        ]
+    return []
+
+
+def _dispatch_node(state: AgentState) -> dict:
+    """fan-out 占位节点：真正的 Send 由条件边函数 _dispatch_tasks 发出。"""
+    return {}
+
+
+def _dispatch_tasks(state: AgentState):
+    """把每个子任务 Send 到独立上下文的 subagent 节点（并行 superstep）。"""
+    return [
+        Send(
+            "subagent",
+            {
+                "sub_task": task,
+                "service": state["service"],
+                "question": state["question"],
+            },
+        )
+        for task in _build_subagent_tasks(state)
+    ]
+
+
+def _subagent_node(state: AgentState) -> dict:
+    """一个子代理分支：独立 messages + 受限工具，最多 2 轮，返回结论摘要。"""
+    from .tools import extract_sources
 
     service: LangGraphAgentService = state["service"]
+    question = state.get("question") or ""
+    task = state.get("sub_task") or {}
+    step = task.get("step") or ""
+    hint = task.get("tool_hint") or ""
+    counter: list[int] = [0]
+    tools = _subagent_tools(service, hint, counter)
+
+    messages = [
+        SystemMessage(content=SUBAGENT_SYSTEM_PROMPT),
+        HumanMessage(content=f"原始问题：{question}\n\n子任务：{step}"),
+    ]
+    summary = ""
+    sources_local: list[dict] = []
+    trace_local: list[dict] = []
+    stop_event = state.get("stop_event")
+    service.rag.acquire_llm()
+    try:
+        for _round in range(2):
+            if stop_event is not None and stop_event.is_set():
+                break
+            chat = service.chat.bind_tools(tools) if tools else service.chat
+            resp = chat.invoke(
+                messages,
+                config={"callbacks": [get_usage_collector()]},
+            )
+            messages.append(resp)
+            tool_calls = list(getattr(resp, "tool_calls", None) or [])
+            if not tool_calls:
+                summary = resp.content or ""
+                break
+            by_name = {t.name: t for t in tools}
+            for tc in tool_calls:
+                tool = by_name.get(tc.get("name"))
+                args = tc.get("args") or {}
+                if tool is None:
+                    result: dict = {"error": f"子代理不可用工具：{tc.get('name')}"}
+                else:
+                    try:
+                        result = tool.invoke(args)
+                        if not isinstance(result, dict):
+                            result = {"result": result}
+                    except Exception as exc:
+                        result = {"error": str(exc)}
+                messages.append(
+                    ToolMessage(
+                        content=json.dumps(result, ensure_ascii=False),
+                        name=tc.get("name") or "",
+                        tool_call_id=tc.get("id") or "",
+                    )
+                )
+                trace_local.append(
+                    {
+                        "name": tc.get("name"),
+                        "arguments": args,
+                        "summary": result.get("summary", ""),
+                        "duration_ms": None,
+                    }
+                )
+                if tc.get("name") in ("knowledge_base_search", "web_search"):
+                    sources_local.extend(extract_sources(result))
+        if not summary and (stop_event is None or not stop_event.is_set()):
+            # 兜底：两轮都还在调工具时，强制补一次结论摘要，保证主 Agent 拿到结果
+            try:
+                messages.append(
+                    SystemMessage(
+                        content="请基于上面的工具结果，用 2~4 句话输出本子任务的结论摘要。"
+                    )
+                )
+                final_resp = service.chat.invoke(
+                    messages,
+                    config={"callbacks": [get_usage_collector()]},
+                )
+                summary = final_resp.content or ""
+            except Exception as exc:
+                summary = f"（子任务总结失败：{exc}）"
+    finally:
+        service.rag.release_llm()
+
+    return {
+        "subagent_results": [
+            {
+                "name": step[:40],
+                "task": step,
+                "summary": (summary or "（子任务未产出结论）")[:800],
+                "sources": sources_local,
+                "tool_trace": trace_local,
+            }
+        ]
+    }
+
+
+def _merge_node(state: AgentState) -> dict:
+    """fan-in：汇总各子代理结果，合并来源与轨迹，同步任务清单。"""
+    from ..todos import plan_progress, sync_todos_from_plan
+
     bus: EventBus = state["bus"]
     db: Session | None = state["db"]
     runtime: dict = state["runtime"]
     messages = state["messages"]
-    tools_by_name = {t.name: t for t in state["tools"]}
-    targets = [
-        name
-        for name in ("knowledge_base_search", "web_search")
-        if name in tools_by_name
-    ]
-    if not targets:
-        return {"fanout_done": True}
+    results = state.get("subagent_results") or []
+    counter = state["counter"]
 
-    def _run_one(name: str):
-        return name, tools_by_name[name].invoke({"query": state["question"]})
-
-    with ThreadPoolExecutor(max_workers=min(2, len(targets))) as pool:
-        outcomes = list(pool.map(_run_one, targets))
-
-    for name, result in outcomes:
-        entry = {
-            "name": name,
-            "arguments": {"query": state["question"]},
-            "summary": "",
-            "step": len(state["tool_trace"]) + 1,
-            "duration_ms": None,
-        }
-        state["tool_trace"].append(entry)
+    blocks: list[str] = []
+    merged_sources: list[dict] = []
+    for r in results:
+        blocks.append(
+            f"### {r.get('name') or r.get('task', '')}\n{r.get('summary') or ''}"
+        )
+        for s in r.get("sources") or []:
+            counter[0] += 1
+            item = dict(s)
+            item["index"] = counter[0]
+            merged_sources.append(item)
+        for t in r.get("tool_trace") or []:
+            entry = dict(t)
+            entry["step"] = len(state["tool_trace"]) + 1
+            state["tool_trace"].append(entry)
         bus.emit(
             "tool_start",
             {
-                "id": f"fanout_{name}",
-                "name": name,
-                "arguments": {"query": state["question"]},
+                "id": f"subagent_{counter[0]}",
+                "name": "subagent",
+                "arguments": {"task": str(r.get("task") or "")[:80]},
             },
         )
-        messages.append(
-            ToolMessage(
-                content=json.dumps(result, ensure_ascii=False),
-                name=name,
-                tool_call_id=f"fanout_{name}",
-            )
-        )
-        parsed = result if isinstance(result, dict) else {"summary": str(result)}
-        entry["summary"] = parsed.get("summary", "")
-        tool_sources = (
-            extract_sources(parsed)
-            if name in ("knowledge_base_search", "web_search")
-            else []
-        )
-        state["sources"].extend(tool_sources)
         bus.emit(
             "tool_result",
             {
-                "id": f"fanout_{name}",
-                "name": name,
-                "summary": entry["summary"],
+                "id": f"subagent_{counter[0]}",
+                "name": "subagent",
+                "summary": str(r.get("summary") or "")[:120],
                 "duration_ms": None,
-                "sources": tool_sources,
+                "sources": r.get("sources") or [],
             },
         )
 
-    ok_count = sum(1 for _, r in outcomes if not (r or {}).get("error"))
-    state["tool_calls_used"] += ok_count
+    state["sources"].extend(merged_sources)
+    if blocks:
+        messages.append(
+            SystemMessage(
+                content=(
+                    "以下是对应各子任务的并行结果摘要（已完成，引用来源已合并进索引）：\n\n"
+                    + "\n\n".join(blocks)
+                )
+            )
+        )
 
     plan_steps = state.get("plan_steps") or []
+    plan_map = state.get("plan_map") or []
     todos = state.get("todos") or []
     if plan_steps and db is not None and runtime.get("conv_id"):
-        prev_done = int(state.get("plan_done_count") or 0)
-        target = min(prev_done + ok_count, len(plan_steps))
+        target = sum(1 for i in plan_map if i.get("tool_hint"))
         hints = [_plan_hint(s).get("tool_hint") for s in plan_steps]
         todos = (
             sync_todos_from_plan(
@@ -736,19 +890,18 @@ def _fanout_node(state: AgentState) -> dict:
                     "done": done,
                     "total": total,
                     "current": remaining[0].get("text") if remaining else None,
-                    "text": f"计划进度：已完成 {done}/{total} 步（并行检索）。",
+                    "text": f"计划进度：已完成 {done}/{total} 步（子代理并行）。",
                 },
             )
 
-    state["fanout_done"] = True
+    state["dispatch_done"] = True
     return {
         "messages": messages,
         "tool_trace": state["tool_trace"],
         "sources": state["sources"],
-        "tool_calls_used": state["tool_calls_used"],
         "plan_done_count": state.get("plan_done_count", 0),
         "todos": state.get("todos") or [],
-        "fanout_done": True,
+        "dispatch_done": True,
     }
 
 
@@ -1348,7 +1501,7 @@ def _tools_node(state: AgentState) -> dict:
                     "last_call_warned": state["last_call_warned"],
                     "plan_done_count": state.get("plan_done_count", 0),
                     "plan_push_count": state.get("plan_push_count", 0),
-                    "fanout_done": bool(state.get("fanout_done")),
+                    "dispatch_done": bool(state.get("dispatch_done")),
                     "todos": state.get("todos") or [],
                 },
             )
@@ -1566,8 +1719,8 @@ def _finalize_node(state: AgentState) -> dict:
 def _route_after_prepare(state: AgentState) -> str:
     if state.get("stop_event") is not None and state["stop_event"].is_set():
         return "agent"
-    if _should_fanout(state):
-        return "fanout"
+    if not state.get("dispatch_done") and _build_subagent_tasks(state):
+        return "dispatch"
     return "agent"
 
 
@@ -1589,10 +1742,12 @@ def _route_after_tools(state: AgentState) -> str:
 
 
 def build_agent_graph():
-    """构建 LangGraph：prepare -> agent -> tools -> (循环) -> finalize。"""
+    """构建 LangGraph：prepare -> [dispatch -> subagents -> merge] -> agent -> tools -> finalize。"""
     graph = StateGraph(AgentState)
     graph.add_node("prepare", _prepare_node)
-    graph.add_node("fanout", _fanout_node)
+    graph.add_node("dispatch", _dispatch_node)
+    graph.add_node("subagent", _subagent_node)
+    graph.add_node("merge", _merge_node)
     graph.add_node("agent", _agent_node)
     graph.add_node("tools", _tools_node)
     graph.add_node("finalize", _finalize_node)
@@ -1601,9 +1756,11 @@ def build_agent_graph():
     graph.add_conditional_edges(
         "prepare",
         _route_after_prepare,
-        {"fanout": "fanout", "agent": "agent"},
+        {"dispatch": "dispatch", "agent": "agent"},
     )
-    graph.add_edge("fanout", "agent")
+    graph.add_conditional_edges("dispatch", _dispatch_tasks, ["subagent"])
+    graph.add_edge("subagent", "merge")
+    graph.add_edge("merge", "agent")
     graph.add_conditional_edges(
         "agent",
         _route_after_agent,
@@ -1763,7 +1920,9 @@ class LangGraphAgentService(AgentService):
             "plan_done_count": 0,
             "force_continue": False,
             "plan_push_count": 0,
-            "fanout_done": False,
+            "dispatch_done": False,
+            "subagent_results": [],
+            "sub_task": {},
             "title_holder": [],
             "title_thread": None,
         }
