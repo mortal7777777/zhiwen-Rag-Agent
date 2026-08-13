@@ -13,7 +13,7 @@ fi
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT" || exit 1
 
-"$PYTHON" -m pytest backend/tests -q --basetemp "$BASETEMP"
+"$PYTHON" -m pytest backend/tests -q -p no:cacheprovider --basetemp "$BASETEMP"
 if [ $? -ne 0 ]; then
   echo "" >&2
   echo "pytest 失败，提交已阻止。确实要跳过请用：git commit --no-verify" >&2
