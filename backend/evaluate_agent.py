@@ -23,12 +23,12 @@ BASE = "http://127.0.0.1:8000/api"
 REPORT = Path(__file__).resolve().parent / "eval_report.jsonl"
 
 
-def _post(path: str, payload: dict):
+def _post(path: str, payload: dict, method: str = "POST"):
     req = urllib.request.Request(
         BASE + path,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json"},
-        method="POST",
+        method=method,
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -39,7 +39,11 @@ def _get(path: str):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def stream_question(question: str, tool_mode: str, conversation_id=None) -> dict:
+def stream_question(
+    question: str,
+    tool_mode: str,
+    conversation_id=None,
+) -> dict:
     req = urllib.request.Request(
         BASE + "/agent/stream",
         data=json.dumps(
@@ -73,9 +77,10 @@ def stream_question(question: str, tool_mode: str, conversation_id=None) -> dict
                     if not line.startswith("data: "):
                         continue
                     try:
-                        events.append(json.loads(line[6:]))
+                        payload = json.loads(line[6:])
+                        events.append(payload)
                     except json.JSONDecodeError:
-                        pass
+                        continue
     for ev in events:
         e, d = ev.get("event"), ev.get("data") or {}
         if e == "session":
@@ -99,13 +104,16 @@ def stream_question(question: str, tool_mode: str, conversation_id=None) -> dict
         "error": error,
         "run": run,
     }
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--category", default="")
+    parser.add_argument("--approve", action="store_true", help="自动批准敏感操作（仅评测用）")
     args = parser.parse_args()
+    if args.approve:
+        # 评测模式：临时切到“自动批准”，跑完恢复“每次确认”
+        _post("/settings", {"updates": {"tool_permission_mode": "allow"}}, method="PUT")
+        print("已临时切换 tool_permission_mode=allow", flush=True)
     questions = json.loads(
         (Path(__file__).resolve().parent / "eval_questions.json").read_text(
             encoding="utf-8"
@@ -162,6 +170,9 @@ def main() -> None:
             f"answer_len={row.get('answer_len', '-')}",
             flush=True,
         )
+    if args.approve:
+        _post("/settings", {"updates": {"tool_permission_mode": "ask"}}, method="PUT")
+        print("已恢复 tool_permission_mode=ask", flush=True)
     print("\n完成，报告：", REPORT)
 
 

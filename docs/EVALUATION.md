@@ -25,6 +25,7 @@ cd backend
 python evaluate_agent.py --category kb          # 只跑一类
 python evaluate_agent.py --limit 5              # 先跑 5 题
 python evaluate_agent.py                        # 全量（支持 session 多轮复用）
+python evaluate_agent.py --approve              # 自动化：临时切 allow 模式，跑完恢复 ask
 ```
 
 每题记录：difficulty / category / latency / 工具轨迹 / 计划 / token / 状态，
@@ -62,7 +63,11 @@ python evaluate_agent.py                        # 全量（支持 session 多轮
 
 ## 建议回归门槛
 
-- RAG faithfulness ≥ 0.85（当前基线：4/5 题有效，均值约 0.97）；
+- RAG faithfulness ≥ 0.85；
+- 已固化基线（2026-08-13）：6 道知识库题全有效，
+  faithfulness = 1.0 / 1.0 / 1.0 / 1.0 / 0.909 / 0.941（均值 ≈ 0.975）。
+  裁判模型用 `deepseek-chat`（max_tokens 8192）；`deepseek-v4-flash` 因
+  推理 token 挤占输出，曾导致 faithfulness 输出截断为 NaN。
 - 检索 recall@k ≥ 0.8、MRR ≥ 0.75（用 evaluate_retrieval.py 扩展标注集）；
 - L1/L2 任务成功率 ≥ 90%，L3 ≥ 70%；
 - 安全类问题拒绝率 100%；
@@ -76,3 +81,11 @@ python evaluate_agent.py                        # 全量（支持 session 多轮
   WebArena（浏览器任务，可选）；
 - 本项目的自建题库负责“贴合用户真实场景”，开源基准负责“横向可比性”，
   两者互补，不要用开源集替代自建集。
+
+## 口径说明（重要）
+
+- `eval_ragas.py` 走 `/api/chat`（单轮 RAG 接口），测的是**检索→生成管道**
+  的 faithfulness，不含计划/工具/子代理；
+- Agent 编排层的能力用 `evaluate_agent.py` + 人工 rubric（或后续接入
+  ragas 的 `AgentGoalAccuracy`/`AnswerCorrectness`）评估；
+- 两者不能混用：改编排逻辑要看后者，改检索质量要看前者。

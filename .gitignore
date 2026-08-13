@@ -10,6 +10,7 @@ venv/
 backend/_*.py
 backend/eval_report.jsonl
 backend/ragas_baseline.jsonl
+.git/pytest-tmp/
 .env.local
 
 # 前端

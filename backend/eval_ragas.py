@@ -43,9 +43,9 @@ def load_judge():
         base_url="https://api.deepseek.com",
     )
     return llm_factory(
-        "deepseek-v4-flash",
+        "deepseek-chat",
         client=client,
-        max_tokens=4096,
+        max_tokens=8192,
         temperature=0,
     )
 
@@ -67,6 +67,7 @@ def rag_chat(question: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--id", default="")
     args = parser.parse_args()
     questions = json.loads(
         (Path(__file__).resolve().parent / "eval_questions.json").read_text(
@@ -74,6 +75,8 @@ def main() -> None:
         )
     )
     kb = [q for q in questions if q["category"] == "kb"]
+    if args.id:
+        kb = [q for q in kb if q["id"] == args.id]
     if args.limit:
         kb = kb[: args.limit]
 

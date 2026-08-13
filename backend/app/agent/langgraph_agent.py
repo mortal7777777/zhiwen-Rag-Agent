@@ -654,6 +654,32 @@ def _build_subagent_tasks(state: AgentState) -> list[dict]:
     return tasks[:4]
 
 
+def _renumber_subagent_sources(results: list[dict], counter: list[int]) -> list[dict]:
+    """把各子代理的局部引用编号重排为全局编号，避免分支间 [n] 冲突。"""
+    merged: list[dict] = []
+    for r in results or []:
+        for s in r.get("sources") or []:
+            counter[0] += 1
+            item = dict(s)
+            item["index"] = counter[0]
+            merged.append(item)
+    return merged
+
+
+def _remaining_needs_tools(remaining: list[dict]) -> bool:
+    """剩余计划步骤里是否还有需要工具的步骤（用于计划硬约束判断）。"""
+    return any(
+        (
+            item.get("tool_hint")
+            if isinstance(item, dict) and "tool_hint" in item
+            else _plan_hint(
+                str(item.get("text") or item.get("step") or item)
+            ).get("tool_hint")
+        )
+        for item in remaining or []
+    )
+
+
 def _subagent_tools(service: "LangGraphAgentService", hint: str, counter: list[int]):
     """按工具提示给子代理构建受限工具集（只读/检索类，不含敏感操作）。"""
     from ..tools_extra import (
@@ -823,16 +849,11 @@ def _merge_node(state: AgentState) -> dict:
     counter = state["counter"]
 
     blocks: list[str] = []
-    merged_sources: list[dict] = []
+    merged_sources: list[dict] = _renumber_subagent_sources(results, counter)
     for r in results:
         blocks.append(
             f"### {r.get('name') or r.get('task', '')}\n{r.get('summary') or ''}"
         )
-        for s in r.get("sources") or []:
-            counter[0] += 1
-            item = dict(s)
-            item["index"] = counter[0]
-            merged_sources.append(item)
         for t in r.get("tool_trace") or []:
             entry = dict(t)
             entry["step"] = len(state["tool_trace"]) + 1
@@ -1046,16 +1067,7 @@ def _agent_node(state: AgentState) -> dict:
                     len(state["plan_map"]),
                 )
                 remaining = state["plan_map"][done:]
-            remaining_hint = any(
-                (
-                    item.get("tool_hint")
-                    if isinstance(item, dict) and "tool_hint" in item
-                    else _plan_hint(
-                        str(item.get("text") or item.get("step") or item)
-                    ).get("tool_hint")
-                )
-                for item in remaining
-            )
+            remaining_hint = _remaining_needs_tools(remaining)
             if remaining_hint:
                 force_continue = True
                 state["plan_push_count"] = (

@@ -3,6 +3,7 @@
 # 安装：scripts/install-git-hooks.ps1
 
 PYTHON="D:/conda_envs/pytorch_env/python.exe"
+BASETEMP=".git/pytest-tmp"
 
 if [ ! -f "$PYTHON" ]; then
   echo "未找到 $PYTHON，跳过测试钩子" >&2
@@ -12,7 +13,7 @@ fi
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT" || exit 1
 
-"$PYTHON" -m pytest backend/tests -q
+"$PYTHON" -m pytest backend/tests -q --basetemp "$BASETEMP"
 if [ $? -ne 0 ]; then
   echo "" >&2
   echo "pytest 失败，提交已阻止。确实要跳过请用：git commit --no-verify" >&2

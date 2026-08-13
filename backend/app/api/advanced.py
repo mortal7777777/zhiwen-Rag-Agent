@@ -67,7 +67,8 @@ def list_pending_permissions() -> dict:
     """当前待人工确认的审批请求列表（调试/监控用）。"""
     from ..permissions import get_permission_manager
 
-    return {"pending": get_permission_manager().pending()}
+    mgr = get_permission_manager()
+    return {"pending": mgr.pending()}
 
 
 # ---------------- TodoWrite 任务清单 ----------------
