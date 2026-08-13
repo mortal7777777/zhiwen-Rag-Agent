@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 import asyncio
+import uuid
 from queue import Queue
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,6 +19,35 @@ from .deps import get_agent_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["agent"])
+
+# 正在运行的流式请求注册表：run_id -> stop_event。
+# 客户端 Ctrl+C 时通过 /agent/cancel/{run_id} 主动置停止信号，
+# 让后台线程立即收尾（不必等 SSE 生成器感知连接断开）。
+_ACTIVE_RUNS: dict[str, threading.Event] = {}
+_RUNS_LOCK = threading.Lock()
+
+
+def register_active_run(stop_event: threading.Event) -> str:
+    """登记一次流式运行，返回 run_id。"""
+    run_id = uuid.uuid4().hex
+    with _RUNS_LOCK:
+        _ACTIVE_RUNS[run_id] = stop_event
+    return run_id
+
+
+def unregister_active_run(run_id: str) -> None:
+    with _RUNS_LOCK:
+        _ACTIVE_RUNS.pop(run_id, None)
+
+
+def request_cancel(run_id: str) -> tuple[bool, str]:
+    """置运行停止信号；返回 (是否成功, 失败原因)。"""
+    with _RUNS_LOCK:
+        stop_event = _ACTIVE_RUNS.get(run_id)
+    if stop_event is None:
+        return False, "run not found"
+    stop_event.set()
+    return True, ""
 
 
 def _sse(payload: dict) -> str:
@@ -60,6 +90,7 @@ async def agent_stream(
     async def event_generator():
         queue: Queue = Queue()
         stop_event = threading.Event()
+        run_id = register_active_run(stop_event)
         # SSE 心跳：工具执行可能 10~20 秒无事件，注释行让前端/代理知道连接存活
         HEARTBEAT_INTERVAL = 15
 
@@ -108,10 +139,17 @@ async def agent_stream(
                     continue
                 if event is None:
                     break
+                # session 事件里带上 run_id，客户端可据此取消本次生成
+                if event.get("event") == "session":
+                    event = {
+                        **event,
+                        "data": {**(event.get("data") or {}), "run_id": run_id},
+                    }
                 yield _sse(event)
         finally:
             # 客户端断开连接时置停止信号，让后台线程尽快退出
             stop_event.set()
+            unregister_active_run(run_id)
 
     return StreamingResponse(
         event_generator(),
@@ -121,3 +159,10 @@ async def agent_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/agent/cancel/{run_id}")
+async def agent_cancel(run_id: str) -> dict:
+    """主动取消某次正在进行的流式生成（CLI 按 Ctrl+C 时调用）。"""
+    cancelled, reason = request_cancel(run_id)
+    return {"run_id": run_id, "cancelled": cancelled, "reason": reason}

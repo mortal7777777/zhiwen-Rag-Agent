@@ -339,9 +339,16 @@ myragagent --tool auto
 
 终端内命令：`/new` 新会话、`/tools auto|knowledge|web|none` 切换模式、
 `/todos` 查看任务清单、`/status` 查看状态、`/init` 在当前目录创建 AGENTS.md、
-`/resume` 恢复本目录上次会话、`/help` 帮助、`Ctrl+C` 停止生成；
-审批用数字键 1/2/3/4 选择，流式文本按终端宽度自动换行。
+`/resume` 恢复本目录上次会话、`/cost` 查看本会话 tokens、`/memory` 查看
+AGENTS.md 加载链、`/clear` 清屏、`/help` 帮助；
+审批用带边框弹窗的数字键 1/2/3/4 选择（回车=批准，Esc=拒绝），
+流式文本按终端宽度自动换行并渲染 Markdown（标题/列表/代码块/表格）。
 输入 `/` 会在下方实时列出可用命令，Tab 自动补全。
+
+**快捷键（类 Claude Code）**：`Ctrl+C`/`Esc` 即时打断生成（后端主动停止，
+已生成的部分保留）、`Ctrl+L` 清屏、`Ctrl+R` 重发上一问、`Ctrl+D` 空输入退出、
+`↑/↓` 历史（持久化到 `.myragagent_history.json`）、`←/→` 光标移动。
+生成期间照样打字，内容会留到下一轮输入。
 
 **按目录记忆（类 CLAUDE.md）**：CLI 会把启动目录传给后端，自动加载该目录下的
 `AGENTS.md` 并逐级向上合并父目录的 `AGENTS.md`，最后追加用户级

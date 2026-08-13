@@ -108,7 +108,7 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 - **记忆体系**：MySQL 会话/消息；滚动摘要（软窗口，60 条/32k tokens 预算）；长期事实记忆分类提取 + 自动整合 + 画像摘要 + 语义召回注入；`AGENTS.md` 文件型项目记忆。
 - **深度思考摘要**：工具执行期间后台预生成 ≤120 字摘要，`reasoning` 事件 → 前端“已深度思考”折叠区（原始 CoT 不展示）。
 - **可观测**：`agent_runs` 表 + JSONL trace；运行记录页；token 用量记录。
-- **终端客户端** `backend/cli_agent.py`：纯标准库，复用 `/api/agent/stream`；支持审批数字选择、/new /tools /help /exit、Ctrl+C 停止。后续升级方向：Textual TUI / ACP 桥（见 `docs/HERMES_STYLE_AGENT.md`）。
+- **终端客户端** `backend/cli_agent.py`：纯标准库、类 Claude Code 交互；流式 Markdown 渲染（标题/列表/引用/代码块/表格）、工具卡片+耗时、spinner、带边框数字键审批弹窗、状态栏（会话/模式/耗时/tokens）；↑/↓ 历史、Ctrl+C/Esc 即时打断（调用 `/api/agent/cancel/{run_id}` 让后端立刻收尾）、Ctrl+L 清屏、Ctrl+R 重发、Tab 补全；历史持久化到目录 `.myragagent_history.json`。
 
 ### 设置页当前值（重要）
 - `advanced_tools_enabled = true`（受控执行总开关，默认开）。
@@ -267,6 +267,33 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
    AGENTS.md + 用户级 `~/.myragagent/AGENTS.md`，总长上限 8000 字符；
 2. `/resume` 列出本目录最近 10 轮会话（含标题）供选择，支持 `/resume 序号`；
 3. 新增分层记忆单测（57 通过）。
+
+### 4.12 本轮（CLI Ctrl+C 打断修复 + 类 Claude Code 终端体验）
+1. **根因**：CLI 主线程阻塞在 `urllib` 的 socket 读上，Windows 下 Ctrl+C 只能在
+   读返回后的字节码边界生效，长工具执行期间几乎无响应；且断开后后端要等下一次
+   向已关闭连接 yield 才感知。
+2. **后端取消机制**：`app/api/agent.py` 新增运行注册表
+   （`register_active_run` / `request_cancel` / `unregister_active_run`）+
+   `POST /api/agent/cancel/{run_id}`；`session` 事件携带 `run_id`。取消立即置
+   `stop_event`，agent 在 LLM 分片/工具循环检查后收尾，`done` 带 `stopped=True`。
+3. **CLI 重写**（仍纯标准库，参考 Claude Code 交互设计）：
+   - 键盘读取线程与 SSE 读取线程分离，主线程轮询队列 → Ctrl+C/Esc/Ctrl+D 在生成期间
+     即时打断，并调用取消接口；
+   - 流式 Markdown 渲染（标题/列表/引用/代码块/行内代码/粗体/链接/表格），
+     CJK 宽字符正确换行，控制字符过滤防转义注入；
+   - 工具调用卡片（`⏺ name(args)` → `⎿ 结果(耗时)`）、执行中 spinner+已耗时、
+     计划进度条；
+   - 权限审批改为带边框弹窗（1/2/3/4，回车=批准，Esc=拒绝）；
+   - 状态栏：会话/模式/耗时/tokens（读 `/api/runs`）；新增 `/cost`、`/clear`、
+     `/memory`（查看 AGENTS.md 加载链）；
+   - ↑/↓ 历史（`.myragagent_history.json`）、Ctrl+L 清屏、Ctrl+R 重发、Tab 补全
+     （含 /tools 参数）、打字先行（生成期间输入留到下一轮）；
+   - 打断后保留已输出内容，提示“按 ↑ 找回问题”。
+4. **测试**：新增 `tests/test_cli_agent.py`（18 个纯函数单测）与
+   `tests/test_api_agent_cancel.py`（run_id 注入 + 取消停流的 anyio 逐帧集成测试），
+   全量 **78 通过**。
+5. **真机验证**：重启后端后实测——session 带 run_id，取消返回 `cancelled:true`，
+   `done` 在 2.7s 内到达且 `stopped=True`。
 
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
