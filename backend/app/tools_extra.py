@@ -138,29 +138,13 @@ def _run_command(settings, command: str, cwd: str = "") -> dict:
 def _run_docker_command(settings, command: str, workdir: Path) -> dict:
     """在 Docker 容器内执行命令（真正的进程/网络沙箱）。
 
-    - 挂载工作目录到容器 /workspace，命令在该目录执行；
-    - 默认 --network=none（沙箱内无外网）、限内存 512m / 1 CPU；
+    - 容器根文件系统只读（--read-only），临时目录用内存盘（/tmp）；
+    - 挂载工作目录到容器 /workspace；开启只读模式时以 :ro 挂载、工作目录为 /scratch；
+    - 默认 --network=none（沙箱内无外网）、限内存/CPU/进程数、去掉全部 Linux 能力；
     - 超时 = command_timeout + 30s（含镜像启动开销）。
     """
-    image = str(effective(settings, "sandbox_image") or "python:3.11-slim").strip()
+    cmd = _docker_run_cmd(settings, command, workdir)
     timeout = max(1, int(effective(settings, "command_timeout") or 60)) + 30
-    host_dir = str(workdir.resolve())
-    cmd = [
-        "docker",
-        "run",
-        "--rm",
-        "--network=none",
-        "--memory=512m",
-        "--cpus=1",
-        "-v",
-        f"{host_dir}:/workspace",
-        "-w",
-        "/workspace",
-        image,
-        "sh",
-        "-c",
-        command,
-    ]
     try:
         proc = subprocess.run(
             cmd,
@@ -191,6 +175,42 @@ def _run_docker_command(settings, command: str, workdir: Path) -> dict:
         }
     except Exception as exc:
         return {"error": str(exc), "summary": f"沙箱命令执行失败：{exc}"}
+
+
+def _docker_run_cmd(settings, command: str, workdir: Path) -> list[str]:
+    """构建 docker run 参数列表（独立成函数便于单测）。"""
+    image = str(effective(settings, "sandbox_image") or "python:3.11-slim").strip()
+    host_dir = str(workdir.resolve())
+    readonly = bool(effective(settings, "sandbox_workspace_readonly"))
+    mount = f"{host_dir}:/workspace:ro" if readonly else f"{host_dir}:/workspace"
+    container_wd = "/scratch" if readonly else "/workspace"
+    options = [
+        "docker",
+        "run",
+        "--rm",
+        "--network=none",
+        "--memory=512m",
+        "--cpus=1",
+        "--pids-limit=256",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--tmpfs",
+        "/tmp:rw,size=256m",
+    ]
+    if readonly:
+        options.extend(["--tmpfs", "/scratch:rw,size=256m"])
+    options.extend(
+        [
+        "-v",
+        mount,
+        "-w",
+        container_wd,
+        ]
+    )
+    return options + [image, "sh", "-c", command]
 
 
 def make_agent_tools(settings) -> list[BaseTool]:

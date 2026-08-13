@@ -99,3 +99,47 @@ START → prepare → fanout(KB|Web|Browser|Code, 并行)
 
 原则：单轮任务走短路，多轮任务按计划派子代理，副作用任务必须有 verify，
 敏感副作用始终 HITL。
+
+## 复现 Claude Code 的编排（LangGraph 版）
+
+> 依据公开流传/逆向整理的 Claude Code 实现（系统提示词、工具与权限模型、
+> hooks、subagents 的设计），以下为架构层面的对照与复现方案。
+
+Claude Code 的核心是一个 **agentic loop**：
+
+```text
+加载 CLAUDE.md + 系统提示词 + 工具定义
+  → LLM 输出（文本 + 若干 tool_use）
+  → 逐工具执行：先过权限规则（allow/ask/deny）与 PreToolUse hook
+  → ToolResult 回填 + PostToolUse hook
+  → 判断是否结束 / 是否超长需压缩 → 继续下一轮
+Task 工具 = 派生 subagent（独立上下文、受限工具集），完成后把摘要回填
+```
+
+本项目与它的对应关系：
+
+| Claude Code | 本项目现状 | 下一步复现 |
+|---|---|---|
+| 主循环 | `agent ⇄ tools` 状态图 | 已等价 |
+| 权限规则 allow/ask/deny | `permissions.py` HITL + 白名单 | 已等价 |
+| hooks（Pre/PostToolUse） | 无 | 在 tools 节点前后加 hook 注册表 |
+| Task subagents | 无 | 用 `Send` 做 fan-out/fan-in 子图 |
+| CLAUDE.md | AGENTS.md 项目记忆 | 已等价 |
+| 上下文压缩 | 滚动摘要 + 轨迹压缩 | 已等价 |
+| 沙箱 | Docker bash + 文件工具 | 已落地，继续加 verify |
+
+### Send 子代理的 LangGraph 骨架
+
+```python
+def dispatch(state):
+    # 主 agent 产出 Task(tool_calls) 时，把每个子任务派发成独立子图
+    return [Send("subagent", {"task": t}) for t in state["pending_tasks"]]
+
+graph.add_conditional_edges("agent", dispatch, ["subagent"])
+graph.add_node("subagent", subgraph)          # 独立 messages + 受限 tools
+graph.add_edge("subagent", "agent")           # 结果合并回父状态后再让 agent 汇总
+```
+
+子代理的要点：独立上下文（避免彼此污染）、只给与任务相关的工具、
+各自有自己的递归上限与 token 预算，返回“结论 + 依据摘要”而不是原始长文；
+父 agent 只做拆解与汇总。这个模式就是我们计划中 fan-out 的下一阶段。

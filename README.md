@@ -56,7 +56,9 @@
   `write_file` / `edit_file` / `delete_file` / `bash`（敏感，默认人工确认）；
 - **Docker 沙箱**：设置里把“命令沙箱”切到 docker 后，`bash` 在
   `python:3.11-slim` 容器内执行（挂载工作目录、`--network=none` 隔离外网、
-  限 512M 内存/1 CPU）；`COMMAND_SANDBOX` / `SANDBOX_IMAGE` 可配置；
+  限 512M 内存/1 CPU）；容器根文件系统只读、去 Linux 能力、限进程数，
+  可选“工作目录只读”（项目 `:ro` 挂载，写入走内存盘 `/scratch`）；
+  `COMMAND_SANDBOX` / `SANDBOX_IMAGE` / `SANDBOX_WORKSPACE_READONLY` 可配置；
 - **浏览器工具**：已接入 Playwright MCP（`browser_navigate` / `browser_type` /
   `browser_screenshot` 等），设置页可启停；
 - **HITL 流程**：Agent 请求敏感操作时，SSE 推送 `permission_request`，

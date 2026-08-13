@@ -538,6 +538,10 @@
                   />
                 </div>
                 <div class="generic-row">
+                  <span class="generic-label">沙箱内工作目录只读</span>
+                  <el-switch v-model="toolsForm.sandbox_workspace_readonly" size="small" />
+                </div>
+                <div class="generic-row">
                   <span class="generic-label">技能沙箱执行</span>
                   <el-switch v-model="toolsForm.skill_sandbox_enabled" size="small" />
                 </div>
@@ -545,7 +549,8 @@
               <div class="provider-hint">
                 白名单命令自动放行；未命中的命令在“每次确认”模式下仍会弹窗请求批准。
                 “Docker 沙箱”把 bash 放进容器执行；“技能沙箱执行”只控制技能命令的
-                执行接口，不影响技能是否加载/注入上下文。
+                执行接口，不影响技能是否加载/注入上下文。“工作目录只读”开启后，
+                项目以只读挂载，写入发生在沙箱内存盘 /scratch。
                 “自动批准”模式相当于 Claude Code 的 --dangerously-skip-permissions，请谨慎使用。
               </div>
               <div class="tools-test-row">
@@ -828,6 +833,7 @@ const toolsForm = ref({
   command_timeout: 60,
   command_sandbox: 'subprocess',
   sandbox_image: 'python:3.11-slim',
+  sandbox_workspace_readonly: false,
   tool_permission_mode: 'ask',
   permission_timeout: 300,
   skill_sandbox_enabled: false,
@@ -891,6 +897,7 @@ async function loadSettings() {
       command_timeout: editable.command_timeout ?? 60,
       command_sandbox: editable.command_sandbox || 'subprocess',
       sandbox_image: editable.sandbox_image || 'python:3.11-slim',
+      sandbox_workspace_readonly: editable.sandbox_workspace_readonly === true,
       tool_permission_mode: editable.tool_permission_mode || 'ask',
       permission_timeout: editable.permission_timeout ?? 300,
       skill_sandbox_enabled: editable.skill_sandbox_enabled === true,
@@ -1038,6 +1045,7 @@ async function saveToolsSettings() {
       command_timeout: f.command_timeout,
       command_sandbox: f.command_sandbox,
       sandbox_image: f.sandbox_image,
+      sandbox_workspace_readonly: f.sandbox_workspace_readonly,
       tool_permission_mode: f.tool_permission_mode,
       permission_timeout: f.permission_timeout,
       skill_sandbox_enabled: f.skill_sandbox_enabled,

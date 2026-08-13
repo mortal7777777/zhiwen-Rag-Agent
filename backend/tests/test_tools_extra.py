@@ -57,6 +57,31 @@ def test_run_command_echo(tmp_path):
     assert "hello" in result["output"]
 
 
+def test_docker_run_cmd_isolation_flags(tmp_path):
+    settings = FakeSettings(str(tmp_path))
+    settings.command_sandbox = "docker"
+    settings.sandbox_image = "python:3.11-slim"
+    settings.sandbox_workspace_readonly = False
+    cmd = tools_extra._docker_run_cmd(settings, "echo hi", tmp_path)
+    assert "--read-only" in cmd
+    assert "--network=none" in cmd
+    assert "--cap-drop" in cmd
+    assert "--pids-limit=256" in cmd
+    assert f"{str(tmp_path.resolve())}:/workspace" in cmd
+    assert cmd[cmd.index("-w") + 1] == "/workspace"
+
+
+def test_docker_run_cmd_readonly_workspace(tmp_path):
+    settings = FakeSettings(str(tmp_path))
+    settings.command_sandbox = "docker"
+    settings.sandbox_image = "python:3.11-slim"
+    settings.sandbox_workspace_readonly = True
+    cmd = tools_extra._docker_run_cmd(settings, "echo hi", tmp_path)
+    assert f"{str(tmp_path.resolve())}:/workspace:ro" in cmd
+    assert cmd[cmd.index("-w") + 1] == "/scratch"
+    assert "/scratch:rw,size=256m" in cmd
+
+
 def test_list_dir_read_grep(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("def foo():\n    return 42\n", encoding="utf-8")
