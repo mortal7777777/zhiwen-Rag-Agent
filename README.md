@@ -385,6 +385,8 @@ RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
 | `ADVANCED_TOOLS_ENABLED` | `1` | 文件/命令受控执行工具总开关 |
 | `TOOL_WORKSPACE` / `COMMAND_ALLOWLIST` | 空 | 文件工作目录（空=项目根）/ 命令自动放行前缀 |
 | `COMMAND_TIMEOUT` | `60` | 命令执行超时（秒） |
+| `COMMAND_SANDBOX` | `subprocess` | 命令执行环境：`subprocess`（本机）/ `docker`（容器沙箱） |
+| `SANDBOX_IMAGE` | `python:3.11-slim` | Docker 沙箱镜像 |
 | `TOOL_PERMISSION_MODE` | `ask` | 敏感操作确认：`ask`（每次确认）/ `allow`（自动批准） |
 | `PERMISSION_TIMEOUT` | `300` | 等待人工确认超时（秒），超时自动取消 |
 | `OPENSEARCH_URL` / `OPENSEARCH_INDEX` | `http://localhost:9200` / `rag_knowledge_base_v2` | OpenSearch 地址 / 索引名 |

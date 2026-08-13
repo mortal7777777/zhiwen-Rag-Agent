@@ -521,9 +521,31 @@
                   <span class="generic-label">执行超时（秒）</span>
                   <el-input-number v-model="toolsForm.command_timeout" :min="5" :max="300" size="small" />
                 </div>
+                <div class="generic-row">
+                  <span class="generic-label">命令执行环境</span>
+                  <el-select v-model="toolsForm.command_sandbox" size="small" class="generic-select">
+                    <el-option label="本机子进程（默认）" value="subprocess" />
+                    <el-option label="Docker 沙箱" value="docker" />
+                  </el-select>
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">沙箱镜像</span>
+                  <el-input
+                    v-model="toolsForm.sandbox_image"
+                    placeholder="python:3.11-slim"
+                    size="small"
+                    class="generic-select"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">技能沙箱执行</span>
+                  <el-switch v-model="toolsForm.skill_sandbox_enabled" size="small" />
+                </div>
               </div>
               <div class="provider-hint">
                 白名单命令自动放行；未命中的命令在“每次确认”模式下仍会弹窗请求批准。
+                “Docker 沙箱”把 bash 放进容器执行；“技能沙箱执行”只控制技能命令的
+                执行接口，不影响技能是否加载/注入上下文。
                 “自动批准”模式相当于 Claude Code 的 --dangerously-skip-permissions，请谨慎使用。
               </div>
               <div class="tools-test-row">
@@ -804,6 +826,8 @@ const toolsForm = ref({
   tool_workspace: '',
   command_allowlist: '',
   command_timeout: 60,
+  command_sandbox: 'subprocess',
+  sandbox_image: 'python:3.11-slim',
   tool_permission_mode: 'ask',
   permission_timeout: 300,
   skill_sandbox_enabled: false,
@@ -865,6 +889,8 @@ async function loadSettings() {
       tool_workspace: editable.tool_workspace || '',
       command_allowlist: editable.command_allowlist || '',
       command_timeout: editable.command_timeout ?? 60,
+      command_sandbox: editable.command_sandbox || 'subprocess',
+      sandbox_image: editable.sandbox_image || 'python:3.11-slim',
       tool_permission_mode: editable.tool_permission_mode || 'ask',
       permission_timeout: editable.permission_timeout ?? 300,
       skill_sandbox_enabled: editable.skill_sandbox_enabled === true,
@@ -1010,6 +1036,8 @@ async function saveToolsSettings() {
       tool_workspace: f.tool_workspace,
       command_allowlist: f.command_allowlist,
       command_timeout: f.command_timeout,
+      command_sandbox: f.command_sandbox,
+      sandbox_image: f.sandbox_image,
       tool_permission_mode: f.tool_permission_mode,
       permission_timeout: f.permission_timeout,
       skill_sandbox_enabled: f.skill_sandbox_enabled,
