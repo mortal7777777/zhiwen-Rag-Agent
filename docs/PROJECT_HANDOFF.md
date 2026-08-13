@@ -214,6 +214,19 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 7. **#3 沙箱/浏览器现状**：Docker 客户端已装但 Desktop 未运行；Playwright 未安装。
    待 Docker Desktop 启动后再接 Playwright MCP 与 bash 沙箱。
 
+### 4.6 本轮（全量评测基线 + 钩子修复 + 编排测试 + add_document）
+1. **全量 19 题评测基线**（`evaluate_agent.py --approve`）：19/19 status=ok，
+   总耗时约 11.3 分钟、合计 687,475 tokens；L1/L2/L3 平均耗时
+   11.6s / 34.6s / 53.1s，明细见 docs/EVALUATION.md。
+2. **pre-commit 钩子修复**：`--basetemp .git/pytest-tmp` + `-p no:cacheprovider`，
+   解决非管理员环境 Temp 目录 WinError 5；钩子已实测放行。
+3. **编排层测试**：新增子代理拆分/来源重编号/计划硬约束 5 个单测（共 37 个）。
+4. **RAGAS 基线修复**：裁判换 `deepseek-chat`（max_tokens 8192），
+   修复 NaN；6 道知识库题全有效，faithfulness 均值约 0.975。
+5. **知识库写入**：新增 `add_document` 工具（人工确认后写文件+增量建索引）。
+6. **审批自动化竞态**：`--approve` 改为跑前切 `allow`/跑后恢复 `ask`，
+   避免 SSE 审批事件延迟导致的 resolve 404。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。

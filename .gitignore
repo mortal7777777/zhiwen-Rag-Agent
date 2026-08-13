@@ -12,6 +12,7 @@ backend/eval_report.jsonl
 backend/ragas_baseline.jsonl
 .git/pytest-tmp/
 .pytest_cache/
+backend/.playwright-mcp/
 .env.local
 
 # 前端
