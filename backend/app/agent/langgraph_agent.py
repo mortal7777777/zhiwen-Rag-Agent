@@ -683,9 +683,13 @@ def _remaining_needs_tools(remaining: list[dict]) -> bool:
 def _subagent_tools(service: "LangGraphAgentService", hint: str, counter: list[int]):
     """按工具提示给子代理构建受限工具集（只读/检索类，不含敏感操作）。"""
     from ..tools_extra import (
+        make_bash_tool,
+        make_delete_file_tool,
+        make_edit_file_tool,
         make_grep_search_tool,
         make_list_dir_tool,
         make_read_file_tool,
+        make_write_file_tool,
     )
     from .tools import make_knowledge_base_tool, make_web_search_tool
 
@@ -717,6 +721,10 @@ def _subagent_tools(service: "LangGraphAgentService", hint: str, counter: list[i
             make_list_dir_tool(settings),
             make_read_file_tool(settings),
             make_grep_search_tool(settings),
+            make_write_file_tool(settings),
+            make_edit_file_tool(settings),
+            make_delete_file_tool(settings),
+            make_bash_tool(settings),
         ]
     return []
 
@@ -735,17 +743,115 @@ def _dispatch_tasks(state: AgentState):
                 "sub_task": task,
                 "service": state["service"],
                 "question": state["question"],
+                "bus": state["bus"],
+                "runtime": state["runtime"],
+                "db": state["db"],
+                "stop_event": state.get("stop_event"),
             },
         )
         for task in _build_subagent_tasks(state)
     ]
 
 
+def _run_sensitive_subagent_tool(
+    service: "LangGraphAgentService",
+    permission_manager,
+    name: str,
+    args: dict,
+    invoke_fn,
+    tool,
+    bus,
+    runtime: dict,
+    stop_event,
+) -> dict:
+    """子代理执行敏感工具：白名单自动放行，否则走与主 Agent 一致的 HITL。"""
+    from ..tools_extra import command_allowed
+
+    settings = service.settings
+    command = str(args.get("command") or "")
+    allowed_cmd = (
+        name in ("bash", "command_tool")
+        and (
+            command_allowed(settings, command)[0]
+            or permission_manager.is_session_allowed(runtime.get("conv_id"), command)
+        )
+    )
+    mode = effective(settings, "tool_permission_mode") or "ask"
+    if mode == "allow" or allowed_cmd:
+        return invoke_fn(tool, args)
+
+    summary = describe_tool_call(name, args)
+    req = permission_manager.submit(
+        tool=name,
+        arguments=display_args(name, args),
+        summary=summary,
+        conversation_id=runtime.get("conv_id"),
+    )
+    if bus is not None:
+        bus.emit(
+            "permission_request",
+            {
+                "id": req.id,
+                "name": name,
+                "arguments": req.arguments,
+                "summary": summary,
+            },
+        )
+        bus.emit(
+            "status",
+            {"phase": "permission", "text": f"子代理等待确认：{summary}"},
+        )
+    approved = permission_manager.wait(
+        req,
+        timeout=int(effective(settings, "permission_timeout", 300) or 300),
+        stop_event=stop_event,
+    )
+    if approved:
+        if bus is not None:
+            bus.emit(
+                "permission_resolved",
+                {"id": req.id, "approved": True, "reason": ""},
+            )
+        if req.remember_session and command:
+            permission_manager.mark_session_allowed(runtime.get("conv_id"), command)
+        result = invoke_fn(tool, args)
+        if req.remember_forever and command:
+            result["summary"] = (
+                str(result.get("summary") or "") + "（已记住，下次不再询问）"
+            )
+        return result
+    reason = req.reason or (
+        "用户拒绝了该操作"
+        if req.status == "denied"
+        else "等待确认超时，已自动取消"
+    )
+    if bus is not None:
+        bus.emit(
+            "permission_resolved",
+            {"id": req.id, "approved": False, "reason": reason},
+        )
+    return {
+        "summary": f"用户拒绝了该操作：{reason}",
+        "permission": "denied",
+        "error": f"操作未执行（用户拒绝）：{reason}。请说明影响并询问替代方案。",
+    }
+
+
 def _subagent_node(state: AgentState) -> dict:
-    """一个子代理分支：独立 messages + 受限工具，最多 2 轮，返回结论摘要。"""
+    """一个子代理分支：独立 messages + 受限工具，敏感操作走 HITL，返回结论摘要。"""
+    from ..permissions import (
+        describe_tool_call,
+        display_args,
+        get_permission_manager,
+        is_sensitive_tool,
+    )
+    from ..tools_extra import command_allowed
     from .tools import extract_sources
 
     service: LangGraphAgentService = state["service"]
+    settings = service.settings
+    bus: EventBus | None = state.get("bus")
+    runtime: dict = state.get("runtime") or {}
     question = state.get("question") or ""
     task = state.get("sub_task") or {}
     step = task.get("step") or ""
@@ -761,9 +867,19 @@ def _subagent_node(state: AgentState) -> dict:
     sources_local: list[dict] = []
     trace_local: list[dict] = []
     stop_event = state.get("stop_event")
+    permission_manager = get_permission_manager()
+    max_rounds = max(1, int(effective(settings, "agent_subagent_max_rounds") or 2))
+
+    def _invoke(tool, args: dict) -> dict:
+        try:
+            out = tool.invoke(args)
+            return out if isinstance(out, dict) else {"result": out}
+        except Exception as exc:
+            return {"error": str(exc)}
+
     service.rag.acquire_llm()
     try:
-        for _round in range(2):
+        for _round in range(max_rounds):
             if stop_event is not None and stop_event.is_set():
                 break
             chat = service.chat.bind_tools(tools) if tools else service.chat
@@ -778,33 +894,41 @@ def _subagent_node(state: AgentState) -> dict:
                 break
             by_name = {t.name: t for t in tools}
             for tc in tool_calls:
-                tool = by_name.get(tc.get("name"))
+                name = tc.get("name")
+                tool = by_name.get(name)
                 args = tc.get("args") or {}
                 if tool is None:
-                    result: dict = {"error": f"子代理不可用工具：{tc.get('name')}"}
+                    result: dict = {"error": f"子代理不可用工具：{name}"}
+                elif is_sensitive_tool(name, args):
+                    result = _run_sensitive_subagent_tool(
+                        service,
+                        permission_manager,
+                        name,
+                        args,
+                        _invoke,
+                        tool,
+                        bus,
+                        runtime,
+                        stop_event,
+                    )
                 else:
-                    try:
-                        result = tool.invoke(args)
-                        if not isinstance(result, dict):
-                            result = {"result": result}
-                    except Exception as exc:
-                        result = {"error": str(exc)}
+                    result = _invoke(tool, args)
                 messages.append(
                     ToolMessage(
                         content=json.dumps(result, ensure_ascii=False),
-                        name=tc.get("name") or "",
+                        name=name or "",
                         tool_call_id=tc.get("id") or "",
                     )
                 )
                 trace_local.append(
                     {
-                        "name": tc.get("name"),
+                        "name": name,
                         "arguments": args,
                         "summary": result.get("summary", ""),
                         "duration_ms": None,
                     }
                 )
-                if tc.get("name") in ("knowledge_base_search", "web_search"):
+                if name in ("knowledge_base_search", "web_search"):
                     sources_local.extend(extract_sources(result))
         if not summary and (stop_event is None or not stop_event.is_set()):
             # 兜底：两轮都还在调工具时，强制补一次结论摘要，保证主 Agent 拿到结果
@@ -1366,6 +1490,26 @@ def _tools_node(state: AgentState) -> dict:
                     )
                 )
             )
+
+    # ---- 写后自动验证（verify）：写入/编辑成功时运行配置的命令并回填结果 ----
+    verify_command = str(effective(settings, "verify_command") or "").strip()
+    if verify_command and any(
+        tc.get("name") in ("write_file", "edit_file")
+        and tc.get("id") not in failed_ids
+        for tc in tool_calls
+    ):
+        from ..tools_extra import _run_command
+
+        verify_result = _run_command(settings, verify_command)
+        messages.append(
+            SystemMessage(
+                content=(
+                    "以下是你刚写入/编辑后自动运行的验证命令结果，"
+                    "请据此决定是否需要修复：\n"
+                    + json.dumps(verify_result, ensure_ascii=False)
+                )
+            )
+        )
 
     # ---- 计划进度同步 + 任务清单自动更新（硬约束）----
     plan_steps = state.get("plan_steps") or []

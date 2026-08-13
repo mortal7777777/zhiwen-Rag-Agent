@@ -304,10 +304,6 @@
               <div class="settings-label">通用</div>
               <div class="generic-form">
                 <div class="generic-row">
-                  <span class="generic-label">子代理并行</span>
-                  <el-switch v-model="toolsForm.agent_subagents_enabled" size="small" />
-                </div>
-                <div class="generic-row">
                   <span class="generic-label">回答温度</span>
                   <el-input-number v-model="temperature" :min="0" :max="2" :step="0.1" size="small" />
                 </div>
@@ -524,6 +520,28 @@
                 <div class="generic-row">
                   <span class="generic-label">执行超时（秒）</span>
                   <el-input-number v-model="toolsForm.command_timeout" :min="5" :max="300" size="small" />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">子代理并行</span>
+                  <el-switch v-model="toolsForm.agent_subagents_enabled" size="small" />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">子代理最大轮数</span>
+                  <el-input-number
+                    v-model="toolsForm.agent_subagent_max_rounds"
+                    :min="1"
+                    :max="5"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">写后验证命令</span>
+                  <el-input
+                    v-model="toolsForm.verify_command"
+                    placeholder="如 pytest（留空=不自动验证）"
+                    size="small"
+                    class="generic-select"
+                  />
                 </div>
                 <div class="generic-row">
                   <span class="generic-label">命令执行环境</span>
@@ -834,6 +852,8 @@ const providers = ref([])
 const toolsForm = ref({
   advanced_tools_enabled: false,
   agent_subagents_enabled: true,
+  agent_subagent_max_rounds: 2,
+  verify_command: '',
   tool_workspace: '',
   command_allowlist: '',
   command_timeout: 60,
@@ -899,6 +919,8 @@ async function loadSettings() {
     toolsForm.value = {
       advanced_tools_enabled: editable.advanced_tools_enabled !== false,
       agent_subagents_enabled: editable.agent_subagents_enabled !== false,
+      agent_subagent_max_rounds: editable.agent_subagent_max_rounds ?? 2,
+      verify_command: editable.verify_command || '',
       tool_workspace: editable.tool_workspace || '',
       command_allowlist: editable.command_allowlist || '',
       command_timeout: editable.command_timeout ?? 60,
@@ -1048,6 +1070,8 @@ async function saveToolsSettings() {
     await saveSettings({
       advanced_tools_enabled: f.advanced_tools_enabled,
       agent_subagents_enabled: f.agent_subagents_enabled,
+      agent_subagent_max_rounds: f.agent_subagent_max_rounds,
+      verify_command: f.verify_command,
       tool_workspace: f.tool_workspace,
       command_allowlist: f.command_allowlist,
       command_timeout: f.command_timeout,

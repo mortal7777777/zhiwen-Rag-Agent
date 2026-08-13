@@ -47,6 +47,8 @@ EDITABLE_KEYS = {
     # 高级工具（P0：受控执行 / MCP / 技能沙箱 / 思考摘要）
     "advanced_tools_enabled",
     "agent_subagents_enabled",
+    "agent_subagent_max_rounds",
+    "verify_command",
     "tool_workspace",
     "command_allowlist",
     "command_timeout",

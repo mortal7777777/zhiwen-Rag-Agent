@@ -7,6 +7,8 @@ from app.agent.langgraph_agent import (
     _plan_hint,
     _remaining_needs_tools,
     _renumber_subagent_sources,
+    _run_sensitive_subagent_tool,
+    _subagent_tools,
 )
 
 
@@ -63,3 +65,46 @@ def test_remaining_needs_tools():
         [{"step": "运行脚本", "tool_hint": "file_tool/bash"}]
     )
     assert not _remaining_needs_tools([{"text": "整理总结"}])
+
+
+def test_subagent_tools_for_file_hint_include_write():
+    class Settings:
+        tool_workspace = ""
+        command_allowlist = ""
+        command_timeout = 30
+        command_sandbox = "subprocess"
+        sandbox_image = "python:3.11-slim"
+        sandbox_workspace_readonly = False
+
+    class Service:
+        settings = Settings()
+
+    names = {t.name for t in _subagent_tools(Service(), "file_tool/bash", [0])}
+    assert {"list_dir", "read_file", "grep_search", "write_file", "edit_file", "bash"} <= names
+
+
+def test_sensitive_subagent_tool_allow_mode():
+    class Settings:
+        tool_permission_mode = "allow"
+        permission_timeout = 300
+        command_allowlist = ""
+
+    class Service:
+        settings = Settings()
+
+    class FakeTool:
+        def invoke(self, args):
+            return {"summary": "ok"}
+
+    res = _run_sensitive_subagent_tool(
+        Service(),
+        None,
+        "write_file",
+        {"path": "x.txt"},
+        lambda t, a: t.invoke(a),
+        FakeTool(),
+        None,
+        {"conv_id": 1},
+        None,
+    )
+    assert res["summary"] == "ok"

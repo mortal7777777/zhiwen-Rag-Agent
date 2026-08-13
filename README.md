@@ -366,6 +366,8 @@ RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
 | `WEB_SEARCH_MAX_RESULTS` | `6` | 单次联网搜索结果条数 |
 | `AGENT_MAX_ITERATIONS` | `6` | 工具调用循环上限 |
 | `AGENT_SUBAGENTS_ENABLED` | `1` | Send 子代理并行总开关 |
+| `AGENT_SUBAGENT_MAX_ROUNDS` | `2` | 每个子代理最多 LLM 轮数 |
+| `VERIFY_COMMAND` | 空 | 写/改文件后自动运行的验证命令 |
 | `AGENT_MAX_FAILURES` | `3` | 工具失败重试上限（失败不占迭代预算） |
 | `AGENT_RECURSION_LIMIT` | `30` | LangGraph 图执行最大步数 |
 | `CHAT_TEMPERATURE` | `0.5` | 回答温度 |
