@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.agent.tools import _credibility_for
+from app.permissions import describe_tool_call, is_sensitive_tool
 
 
 def test_credibility_high():
@@ -20,3 +21,9 @@ def test_credibility_low():
     assert _credibility_for("https://www.reddit.com/r/tech/")[0] == "low"
     assert _credibility_for("https://t.co/abc")[0] == "low"
     assert _credibility_for("")[0] == "low"
+
+
+def test_add_document_is_sensitive():
+    assert is_sensitive_tool("add_document", {})
+    desc = describe_tool_call("add_document", {"filename": "notes.md"})
+    assert "notes.md" in desc and "知识库" in desc

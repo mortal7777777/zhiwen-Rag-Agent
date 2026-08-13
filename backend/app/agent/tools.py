@@ -240,6 +240,56 @@ def make_knowledge_base_tool(
     return knowledge_base_search
 
 
+def make_add_document_tool(rag_service, settings) -> BaseTool:
+    """把一段文本写入用户知识库并更新索引（敏感操作，走人工确认）。"""
+
+    @tool
+    def add_document(filename: str, content: str, source_note: str = "") -> dict:
+        """把一段文本保存为用户知识库的新文档（写入文件并更新索引）。
+        属敏感操作，系统会请求用户确认；filename 只能是不含路径的纯文件名，
+        支持 .txt/.md/.csv/.json；source_note 可选，用于记录来源说明。
+        """
+        from pathlib import Path
+
+        from ..tools_extra import _atomic_write
+
+        name = (filename or "").strip()
+        if (
+            not name
+            or "/" in name
+            or "\\" in name
+            or ".." in name
+            or Path(name).name != name
+        ):
+            return {
+                "error": "文件名不合法：只允许纯文件名（如 notes.md）",
+                "summary": "写入知识库失败：文件名不合法",
+            }
+        ext = Path(name).suffix.lower()
+        if ext not in (".txt", ".md", ".csv", ".json"):
+            return {
+                "error": f"暂不支持该格式：{ext}",
+                "summary": "写入知识库失败：格式不支持",
+            }
+        try:
+            data_dir = Path(rag_service.settings.data_dir).resolve()
+            data_dir.mkdir(parents=True, exist_ok=True)
+            target = data_dir / name
+            text = str(content or "")
+            if source_note.strip():
+                text = f"{text}\n\n---\n来源说明：{source_note.strip()}"
+            _atomic_write(target, text)
+            rag_service.ensure_index()  # 增量索引：只嵌入新增/变化的文件
+        except Exception as exc:
+            return {"error": str(exc), "summary": "写入知识库失败"}
+        return {
+            "summary": f"已写入知识库文档 {name} 并更新索引",
+            "filename": name,
+        }
+
+    return add_document
+
+
 def make_web_search_tool(
     provider: str,
     tavily_api_key: str,
@@ -368,6 +418,7 @@ def build_tools(
                 allow_web_fallback=use_web_search,
             )
         )
+        tools.append(make_add_document_tool(rag_service, rag_service.settings))
     if use_web_search:
         tools.append(
             make_web_search_tool(provider, tavily_api_key, max_results, counter)

@@ -27,7 +27,14 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # 需要人工确认的工具名（写/改/删/命令）；读类工具不在此列，自动执行
-SENSITIVE_TOOLS = {"write_file", "edit_file", "delete_file", "bash", "command_tool"}
+SENSITIVE_TOOLS = {
+    "write_file",
+    "edit_file",
+    "delete_file",
+    "bash",
+    "command_tool",
+    "add_document",
+}
 
 # 旧版 file_tool 中需要确认的操作（兼容保留）
 SENSITIVE_FILE_OPS = {"write", "append", "edit", "delete", "move", "mkdir"}
@@ -73,6 +80,12 @@ def display_args(name: str, args: dict | None = None) -> dict:
         }
     if name == "delete_file":
         return {"path": str(args.get("path") or "")}
+    if name == "add_document":
+        return {
+            "filename": str(args.get("filename") or ""),
+            "content_preview": _preview(args.get("content")),
+            "source_note": str(args.get("source_note") or ""),
+        }
     if name == "file_tool":
         return {
             "operation": str(args.get("operation") or ""),
@@ -94,6 +107,8 @@ def describe_tool_call(name: str, args: dict | None = None) -> str:
         return f"编辑文件 {path}：替换 {len(str(args.get('old_string') or ''))} 字符"
     if name == "delete_file":
         return f"删除文件 {path}"
+    if name == "add_document":
+        return f"向知识库添加文档 {str(args.get('filename') or '')}"
     if name == "file_tool":
         op = str(args.get("operation") or "")
         return f"{op} {path}"

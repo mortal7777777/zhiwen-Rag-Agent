@@ -46,6 +46,7 @@ EDITABLE_KEYS = {
     "skills_enabled",
     # 高级工具（P0：受控执行 / MCP / 技能沙箱 / 思考摘要）
     "advanced_tools_enabled",
+    "agent_subagents_enabled",
     "tool_workspace",
     "command_allowlist",
     "command_timeout",

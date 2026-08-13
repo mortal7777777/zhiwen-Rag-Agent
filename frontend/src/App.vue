@@ -304,6 +304,10 @@
               <div class="settings-label">通用</div>
               <div class="generic-form">
                 <div class="generic-row">
+                  <span class="generic-label">子代理并行</span>
+                  <el-switch v-model="toolsForm.agent_subagents_enabled" size="small" />
+                </div>
+                <div class="generic-row">
                   <span class="generic-label">回答温度</span>
                   <el-input-number v-model="temperature" :min="0" :max="2" :step="0.1" size="small" />
                 </div>
@@ -551,6 +555,7 @@
                 “Docker 沙箱”把 bash 放进容器执行；“技能沙箱执行”只控制技能命令的
                 执行接口，不影响技能是否加载/注入上下文。“工作目录只读”开启后，
                 项目以只读挂载，写入发生在沙箱内存盘 /scratch。
+                “子代理并行”把计划里的工具型步骤派给独立上下文的子代理同时执行。
                 “自动批准”模式相当于 Claude Code 的 --dangerously-skip-permissions，请谨慎使用。
               </div>
               <div class="tools-test-row">
@@ -828,6 +833,7 @@ const settingsModel = ref(null)
 const providers = ref([])
 const toolsForm = ref({
   advanced_tools_enabled: false,
+  agent_subagents_enabled: true,
   tool_workspace: '',
   command_allowlist: '',
   command_timeout: 60,
@@ -892,6 +898,7 @@ async function loadSettings() {
     const editable = settingsModel.value.editable || {}
     toolsForm.value = {
       advanced_tools_enabled: editable.advanced_tools_enabled !== false,
+      agent_subagents_enabled: editable.agent_subagents_enabled !== false,
       tool_workspace: editable.tool_workspace || '',
       command_allowlist: editable.command_allowlist || '',
       command_timeout: editable.command_timeout ?? 60,
@@ -1040,6 +1047,7 @@ async function saveToolsSettings() {
     const f = toolsForm.value
     await saveSettings({
       advanced_tools_enabled: f.advanced_tools_enabled,
+      agent_subagents_enabled: f.agent_subagents_enabled,
       tool_workspace: f.tool_workspace,
       command_allowlist: f.command_allowlist,
       command_timeout: f.command_timeout,

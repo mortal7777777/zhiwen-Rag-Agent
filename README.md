@@ -33,6 +33,8 @@
   把每个步骤派给独立上下文的子代理（只读/检索类工具）并行执行，
   各分支返回结论摘要后由 merge 节点合并来源与轨迹、同步任务清单；
   主 Agent 只做拆解与汇总，避免重复检索；
+- **知识库写入**：新增 `add_document` 工具（txt/md/csv/json），
+  保存文档并增量建索引；属敏感操作，经人工确认后才执行；
 - **TodoWrite 任务清单（计划硬约束）**：规划后自动播种任务清单（MySQL 持久化、跨轮跟踪），
   Agent 可经 `todo_update` 增删改查（list/add/complete/remove/set，set 支持整体修订），
   前端计划卡片渲染为可勾选清单，切换会话后自动恢复；
@@ -363,6 +365,7 @@ RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
 | `TAVILY_API_KEY` | 空 | 使用 Tavily 时填写 |
 | `WEB_SEARCH_MAX_RESULTS` | `6` | 单次联网搜索结果条数 |
 | `AGENT_MAX_ITERATIONS` | `6` | 工具调用循环上限 |
+| `AGENT_SUBAGENTS_ENABLED` | `1` | Send 子代理并行总开关 |
 | `AGENT_MAX_FAILURES` | `3` | 工具失败重试上限（失败不占迭代预算） |
 | `AGENT_RECURSION_LIMIT` | `30` | LangGraph 图执行最大步数 |
 | `CHAT_TEMPERATURE` | `0.5` | 回答温度 |

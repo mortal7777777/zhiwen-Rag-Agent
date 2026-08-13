@@ -1653,6 +1653,7 @@ def _finalize_node(state: AgentState) -> dict:
                     "memory_hits": (state.get("memory_hits") or [])[:5],
                     "todos": state.get("todos") or [],
                     "plan_done_count": state.get("plan_done_count", 0),
+                    "subagents": len(state.get("subagent_results") or []),
                     "usage": usage_summary(),
                 },
             )
@@ -1719,7 +1720,15 @@ def _finalize_node(state: AgentState) -> dict:
 def _route_after_prepare(state: AgentState) -> str:
     if state.get("stop_event") is not None and state["stop_event"].is_set():
         return "agent"
-    if not state.get("dispatch_done") and _build_subagent_tasks(state):
+    subagents_on = True
+    if state.get("service") is not None:
+        val = effective(state["service"].settings, "agent_subagents_enabled")
+        subagents_on = val is not False
+    if (
+        subagents_on
+        and not state.get("dispatch_done")
+        and _build_subagent_tasks(state)
+    ):
         return "dispatch"
     return "agent"
 

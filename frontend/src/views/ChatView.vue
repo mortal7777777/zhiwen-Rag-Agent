@@ -893,6 +893,8 @@ function toolName(name) {
     command_tool: '执行命令',
     file_tool: '文件操作',
     todo_update: '任务清单',
+    subagent: '子代理',
+    add_document: '添加知识库文档',
   }[name] || name
 }
 
@@ -909,8 +911,13 @@ function onMessagesScroll() {
   scrollFollow.value = atBottom
 }
 
+let scrollRaf = null
 function scrollToBottom(force = false) {
-  nextTick(() => {
+  // 把 24ms 打字机与各事件触发的滚动合并到每帧最多一次，
+  // 避免高频改 scrollTop 造成底部抖动/文字跳动
+  if (scrollRaf) return
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = null
     if (messagesRef.value && (force || scrollFollow.value)) {
       messagesRef.value.scrollTop = messagesRef.value.scrollHeight
     }
@@ -1465,6 +1472,7 @@ async function send(options = {}) {
           currentTool.value = ''
           flushTypewriter()
           streamMsg._streaming = false // 流式结束：切换到完整 Markdown 渲染
+          nextTick(() => scrollToBottom(true)) // 渲染切换后重新对齐底部，避免跳动
           if (!streamMsg.content) {
             streamMsg.content = '（未生成回答内容）'
           }
