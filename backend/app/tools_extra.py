@@ -101,6 +101,9 @@ def _run_command(settings, command: str, cwd: str = "") -> dict:
     """执行命令：默认在工作目录根执行（与文件工具一致），支持子目录 + 超时 + 截断。"""
     workspace = _resolve_workspace(settings)
     workdir = workspace if not cwd else _safe_path(workspace, cwd)
+    sandbox = str(effective(settings, "command_sandbox") or "subprocess").strip().lower()
+    if sandbox == "docker":
+        return _run_docker_command(settings, command, workdir)
     try:
         proc = subprocess.run(
             command,
@@ -130,6 +133,64 @@ def _run_command(settings, command: str, cwd: str = "") -> dict:
 # ============================================================
 # Agent 工具集（类 Claude Code，敏感操作走人工确认）
 # ============================================================
+
+
+def _run_docker_command(settings, command: str, workdir: Path) -> dict:
+    """在 Docker 容器内执行命令（真正的进程/网络沙箱）。
+
+    - 挂载工作目录到容器 /workspace，命令在该目录执行；
+    - 默认 --network=none（沙箱内无外网）、限内存 512m / 1 CPU；
+    - 超时 = command_timeout + 30s（含镜像启动开销）。
+    """
+    image = str(effective(settings, "sandbox_image") or "python:3.11-slim").strip()
+    timeout = max(1, int(effective(settings, "command_timeout") or 60)) + 30
+    host_dir = str(workdir.resolve())
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "--network=none",
+        "--memory=512m",
+        "--cpus=1",
+        "-v",
+        f"{host_dir}:/workspace",
+        "-w",
+        "/workspace",
+        image,
+        "sh",
+        "-c",
+        command,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
+        )
+        output = (proc.stdout or "") + (
+            ("\n[stderr] " + proc.stderr) if proc.stderr else ""
+        )
+        return {
+            "summary": f"沙箱命令执行完成（exit={proc.returncode}）",
+            "exit_code": proc.returncode,
+            "sandbox": "docker",
+            "output": _truncate(output),
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "error": f"沙箱命令超时（>{timeout - 30}s）已终止",
+            "summary": "沙箱命令超时已终止",
+        }
+    except FileNotFoundError:
+        return {
+            "error": "未找到 docker 命令，请确认 Docker Desktop 已启动",
+            "summary": "沙箱执行失败：docker 不可用",
+        }
+    except Exception as exc:
+        return {"error": str(exc), "summary": f"沙箱命令执行失败：{exc}"}
 
 
 def make_agent_tools(settings) -> list[BaseTool]:

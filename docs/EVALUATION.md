@@ -1,48 +1,78 @@
-# 评测方案（当前状态与建议）
+# 评测体系：分难度、分能力、可回归
 
-## 现状
+## 设计原则
 
-- `backend/evaluate_retrieval.py`：8 个手工问题 + 关键词命中率，只验证检索管道通不通；
-- `backend/evaluate_agent.py` + `backend/eval_questions.json`（新增）：14 题种子集，
-  覆盖知识库问答、通用推理、联网、文件工具、安全拒绝、多步规划；
-  逐题调用 `/api/agent/stream`，记录延迟/工具调用/计划/答案长度/运行状态到
-  `backend/eval_report.jsonl`，方便每次改动后对比回归。
+评测不只看“RAG 答得对不对”，要回答三个问题：
+1. 任务是否完成（结果）；
+2. 完成过程是否合理（过程）；
+3. 花的时间和 token 是否可接受（资源）。
 
-## 推荐开源评测集（按用途）
+题库按 **L1 简单 → L2 中等 → L3 复杂真实场景** 分级，并覆盖知识库、
+联网、工具、浏览器、编程、多轮、安全七类能力。
 
-### RAG 检索质量（离线，可自动跑分）
-- **RAGAS**（`ragas` 包）：生成式 RAG 指标 —— faithfulness（忠实度）、
-  answer correctness、context precision/recall；可接本项目的 DeepSeek 打分。
-- **BEIR** / **C-MTEB**：通用/中文检索基准，评测 kNN/BM25/RRF 召回质量
-  （recall@k、MRR、nDCG@k）。
-- 中文阅读理解：**CMRC 2018**、**DuReader**（问答对可直接当 RAG 测试集）。
+## 当前题库（backend/eval_questions.json，19 题）
 
-### Agent 能力（整体任务）
-- **GAIA**：需要联网/工具/推理的通用任务，接近真实使用；
-- **AgentBench** / **τ-bench**：工具调用、多轮任务、越权拒绝；
-- **WebArena**（网页操作）对本项目偏重，暂不建议。
+| 级别 | 能力 | 示例 |
+|---|---|---|
+| L1 | 单轮 KB / 闲聊 / 只读工具 | “实事求是”含义；列目录 |
+| L2 | 多跳检索 / 联网可信度 / HITL / 计划 | 示例书+示例书综合；写文件审批 |
+| L3 | 研究简报 / 编程闭环 / 浏览器 / 多轮状态 / 安全 | 收集资料写简报；浏览器取标题；危险命令拒绝 |
 
-### 自建集（最贴合本项目）
-以 `eval_questions.json` 为骨架，按三个维度扩充：
-1. **知识库**：从用户真实文档（示例选集、示例书等）每本抽 5~10 问，
-   答案以文档原文为准（可先人工标注 20 条 gold answer）；
-2. **行为约束**：安全拒绝、审批流程、任务清单正确性、引用编号正确性；
-3. **体验指标**：首 token 延迟、总延迟、工具调用次数、token 成本。
-
-## 建议的回归门槛（后续接 RAGAS 后）
-
-- 检索：recall@k ≥ 0.8（知识库相关问题上），MRR ≥ 0.75；
-- 生成：faithfulness ≥ 0.85，answer correctness ≥ 0.7；
-- 行为：安全类问题 100% 拒绝；任务清单结束时 100% 全勾；
-- 性能：知识库模式单轮 ≤ 20s（不开联网兜底），联网模式 ≤ 40s。
-
-## 使用方式
+运行：
 
 ```powershell
 cd backend
-python evaluate_retrieval.py        # 检索管道冒烟
-python evaluate_agent.py --limit 5  # Agent 端到端（5 题先试跑）
-python evaluate_agent.py --category kb
+python evaluate_agent.py --category kb          # 只跑一类
+python evaluate_agent.py --limit 5              # 先跑 5 题
+python evaluate_agent.py                        # 全量（支持 session 多轮复用）
 ```
 
-改动前后各跑一遍，对比 `eval_report.jsonl` 中的 latency/tools/status 即可发现回归。
+每题记录：difficulty / category / latency / 工具轨迹 / 计划 / token / 状态，
+追加到 `eval_report.jsonl`（gitignored），改动前后对比即可发现回归。
+
+## 三层评分法（系统化评估 Agent）
+
+### 1. 结果层：任务成功度
+
+每条题带 `expect` 说明“什么样算完成”。评分方式由轻到重：
+
+- 人工抽查：先人工给 20 题打 0/1/2 分，形成 gold 标注；
+- LLM-as-judge：用另一个模型按 rubric 自动打分（每题给
+  `rubric` 字段：正确性、完整性、引用的准确性、是否越权/编造）；
+- ragas 已支持 `AgentGoalAccuracy`（无参考）/ `AnswerCorrectness`（有参考），
+  后续可按此自动化。
+
+### 2. 过程层：行为质量
+
+不只看答案，还看过程是否可靠：
+
+- 计划与任务清单：结束时是否 N/N 全勾、步骤是否按顺序执行；
+- 工具使用：是否有无意义的重复调用、是否先读再改、是否走审批；
+- 引用正确性：`[n]` 编号是否与来源一一对应，是否编造编号；
+- 安全行为：凭据类/危险命令类问题 100% 拒绝；
+- 多轮状态：`session` 复用题目验证上下文不丢失。
+
+这些指标已经记录在 `eval_report.jsonl` 与 `agent_runs` 里，可脚本化统计。
+
+### 3. 资源层：成本与延迟
+
+- 首 token / 总延迟：L1 ≤ 10s，L2 ≤ 25s，L3 ≤ 90s（当前软门槛）；
+- token 成本：每题记录 usage，L1 应显著低于 L3；
+- 失败率：status=ok 比例、重试次数。
+
+## 建议回归门槛
+
+- RAG faithfulness ≥ 0.85（当前基线：4/5 题有效，均值约 0.97）；
+- 检索 recall@k ≥ 0.8、MRR ≥ 0.75（用 evaluate_retrieval.py 扩展标注集）；
+- L1/L2 任务成功率 ≥ 90%，L3 ≥ 70%；
+- 安全类问题拒绝率 100%；
+- 全量题库对比基线时，latency/tokens 回归 ≤ 10%。
+
+## 开源基准怎么用
+
+- RAG 检索质量：BEIR / C-MTEB / CMRC / DuReader（召回类指标）；
+- RAG 生成质量：RAGAS（已接入 faithfulness，下一步加 answer correctness）；
+- Agent 整体能力：GAIA（通用任务）、AgentBench / τ-bench（工具调用与多轮）、
+  WebArena（浏览器任务，可选）；
+- 本项目的自建题库负责“贴合用户真实场景”，开源基准负责“横向可比性”，
+  两者互补，不要用开源集替代自建集。

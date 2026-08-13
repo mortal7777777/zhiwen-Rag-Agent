@@ -134,7 +134,10 @@ class MCPServerSession:
                 {
                     "name": t.name,
                     "description": t.description or "",
-                    "inputSchema": t.inputSchema,
+                    "inputSchema": (
+                        getattr(t, "inputSchema", None)
+                        or getattr(t, "input_schema", None)
+                    ),
                 }
                 for t in result.tools
             ]

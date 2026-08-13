@@ -144,6 +144,8 @@ class Settings:
     tool_workspace: str = ""              # 文件工具白名单根目录（空=项目根）
     command_allowlist: str = ""           # 命令白名单（逗号分隔的命令前缀，空=禁止执行）
     command_timeout: int = 60             # 命令执行超时（秒）
+    command_sandbox: str = "subprocess"   # subprocess | docker（docker=容器沙箱）
+    sandbox_image: str = "python:3.11-slim"  # docker 沙箱镜像
     tool_permission_mode: str = "ask"     # ask=敏感操作人工确认；allow=自动批准（跳过确认）
     permission_timeout: int = 300         # 等待人工确认的超时（秒），超时自动取消
     skill_sandbox_enabled: bool = False   # 技能沙箱执行开关（默认关）
@@ -253,6 +255,8 @@ class Settings:
             tool_workspace=_env("TOOL_WORKSPACE", ""),
             command_allowlist=_env("COMMAND_ALLOWLIST", ""),
             command_timeout=int(_env("COMMAND_TIMEOUT", "60")),
+            command_sandbox=_env("COMMAND_SANDBOX", "subprocess"),
+            sandbox_image=_env("SANDBOX_IMAGE", "python:3.11-slim"),
             tool_permission_mode=_env("TOOL_PERMISSION_MODE", "ask"),
             permission_timeout=int(_env("PERMISSION_TIMEOUT", "300")),
             skill_sandbox_enabled=_env("SKILL_SANDBOX_ENABLED", "0") == "1",

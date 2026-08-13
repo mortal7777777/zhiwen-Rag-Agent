@@ -39,13 +39,13 @@ def _get(path: str):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def stream_question(question: str, tool_mode: str) -> dict:
+def stream_question(question: str, tool_mode: str, conversation_id=None) -> dict:
     req = urllib.request.Request(
         BASE + "/agent/stream",
         data=json.dumps(
             {
                 "question": question,
-                "conversation_id": None,
+                "conversation_id": conversation_id,
                 "tool_mode": tool_mode,
                 "template_id": None,
             },
@@ -118,17 +118,28 @@ def main() -> None:
 
     print(f"评测 {len(questions)} 题，写入 {REPORT.name}\n")
     rows = []
+    sessions: dict[str, int] = {}
     for q in questions:
         qid = q["id"]
-        print(f"[{qid}] {q['question'][:40]}…", flush=True)
+        print(
+            f"[{qid}] L{q.get('difficulty', '-')} {q['question'][:36]}…",
+            flush=True,
+        )
         try:
-            info = stream_question(q["question"], q["tool_mode"])
+            info = stream_question(
+                q["question"],
+                q["tool_mode"],
+                conversation_id=sessions.get(q.get("session") or ""),
+            )
         except Exception as exc:
             info = {"error": str(exc)}
             print(f"  !! 请求失败：{exc}", flush=True)
+        if q.get("session") and info.get("conversation_id"):
+            sessions[q["session"]] = info["conversation_id"]
         row = {
             "ts": datetime.now().isoformat(timespec="seconds"),
             "id": qid,
+            "difficulty": q.get("difficulty"),
             "category": q["category"],
             "question": q["question"],
             "expect": q.get("expect", ""),

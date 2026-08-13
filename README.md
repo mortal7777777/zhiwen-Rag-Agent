@@ -54,6 +54,11 @@
 
 - 工具集：`list_dir` / `read_file` / `grep_search`（只读，自动执行）；
   `write_file` / `edit_file` / `delete_file` / `bash`（敏感，默认人工确认）；
+- **Docker 沙箱**：设置里把“命令沙箱”切到 docker 后，`bash` 在
+  `python:3.11-slim` 容器内执行（挂载工作目录、`--network=none` 隔离外网、
+  限 512M 内存/1 CPU）；`COMMAND_SANDBOX` / `SANDBOX_IMAGE` 可配置；
+- **浏览器工具**：已接入 Playwright MCP（`browser_navigate` / `browser_type` /
+  `browser_screenshot` 等），设置页可启停；
 - **HITL 流程**：Agent 请求敏感操作时，SSE 推送 `permission_request`，
   前端消息卡片内渲染审批框（展示命令/路径/内容预览），用户**批准**或**拒绝**
   （可附备注），提交到 `POST /api/agent/permission/{id}/resolve`；

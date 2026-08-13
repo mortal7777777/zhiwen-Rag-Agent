@@ -49,6 +49,8 @@ EDITABLE_KEYS = {
     "tool_workspace",
     "command_allowlist",
     "command_timeout",
+    "command_sandbox",
+    "sandbox_image",
     "tool_permission_mode",
     "permission_timeout",
     "skill_sandbox_enabled",
