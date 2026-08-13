@@ -25,6 +25,7 @@ import json
 import logging
 import operator
 import re
+import sys
 import threading
 import time
 import uuid
@@ -1279,19 +1280,14 @@ def _pick_verify_command(settings, path: str) -> str | None:
         return None
     ext = Path(path).suffix.lower()
     if ext == ".py":
-        return f'python -m py_compile "{path}"'
+        return f'{sys.executable} -m py_compile "{path}"'
     if ext in (".js", ".mjs", ".cjs"):
         return f'node --check "{path}"'
     if ext == ".json":
         # python -m json.tool：语法错误时非零退出，输出原样捕获，避免嵌套引号
-        return f'python -m json.tool "{path}"'
+        return f'{sys.executable} -m json.tool "{path}"'
     if ext in (".yaml", ".yml"):
-        return (
-            'python -c "import yaml,sys; '
-            "yaml.safe_load(open(sys.argv[1], encoding='utf-8'))"
-            '" '
-            + f'"{path}"'
-        )
+        return f'{sys.executable} -c "import yaml,sys; yaml.safe_load(open(sys.argv[1], encoding=\'utf-8\'))" "{path}"'
     return None
 
 
