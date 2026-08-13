@@ -330,9 +330,12 @@ npm run dev
 ### 终端客户端（类 Claude CLI 体验）
 
 ```powershell
-# 项目根目录一键启动（已内置 Python 解释器路径）
-.\agent.ps1 --tool auto
+# 任意终端直接输入（首次运行 scripts\install-myragagent.ps1 安装）
+myragagent --tool auto
 ```
+
+安装后在任何 cmd / PowerShell 里敲 `myragagent` 即可启动（类似 `claude` 命令）；
+未安装时可用项目根的 `.\agent.ps1` 兜底。
 
 终端内命令：`/new` 新会话、`/tools auto|knowledge|web|none` 切换模式、
 `/todos` 查看任务清单、`/status` 查看状态、`/help` 帮助、`Ctrl+C` 停止生成；

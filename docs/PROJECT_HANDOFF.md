@@ -251,7 +251,8 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
    工具预算 6→24、失败上限 3→6（`AGENT_TASK_MAX_*` 可调）；
    预算用尽时输出进度汇报并保留 todos/checkpoint，回复“继续”接着做；
    普通问答维持原 6 次预算不受影响。
-2. **CLI 优化**：根目录 `.\agent.ps1` 一键启动；新增 `/todos /status` 命令；
+2. **CLI 优化**：全局命令 `myragagent`（安装 `scripts\install-myragagent.ps1`，
+   任意终端直接输入，类似 `claude`）；新增 `/todos /status` 命令；
    流式文本按终端宽度换行；工具耗时、计划进度、任务清单渲染；数字键审批。
 3. 测试增至 55 个（新增 task_mode 识别与预算单测）。
 
