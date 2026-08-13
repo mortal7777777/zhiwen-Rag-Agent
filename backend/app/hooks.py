@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import subprocess
 
 from .db import repository as repo
@@ -53,9 +54,10 @@ def _run_one(
     )
     timeout = max(1, int(hook.get("timeout") or 15))
     try:
+        # 不经过 shell，避免注入/管道副作用；复杂脚本请自行包装成可执行命令
+        parts = shlex.split(str(hook.get("command")), posix=False)
         proc = subprocess.run(
-            str(hook.get("command")),
-            shell=True,
+            parts,
             input=input_json,
             capture_output=True,
             text=True,

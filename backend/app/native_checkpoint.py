@@ -14,7 +14,7 @@ import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -55,3 +55,21 @@ def build_saver(meta_dir: Path):
     saver = SqliteSaver(conn, serde=SafeJsonPlusSerializer())
     saver.setup()
     return saver, conn
+
+
+def messages_to_history_rows(messages: list) -> list[dict]:
+    """把快照消息转成可写回数据库的 user/assistant 历史行。"""
+    rows: list[dict] = []
+    for m in messages or []:
+        if isinstance(m, HumanMessage):
+            role = "user"
+        elif isinstance(m, AIMessage):
+            role = "assistant"
+        else:
+            continue
+        content = m.content
+        if not isinstance(content, str):
+            content = str(content)
+        if content.strip():
+            rows.append({"role": role, "content": content})
+    return rows

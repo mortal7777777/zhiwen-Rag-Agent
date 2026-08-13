@@ -1191,6 +1191,7 @@ def _agent_node(state: AgentState) -> dict:
             int(usage.get("input_tokens") or 0),
             int(usage.get("output_tokens") or 0),
         )
+        get_usage_collector().add_cache_usage(dict(usage))
 
     tool_calls = list(getattr(merged, "tool_calls", None) or [])
     messages.append(
@@ -1282,18 +1283,14 @@ def _pick_verify_command(settings, path: str) -> str | None:
     if ext in (".js", ".mjs", ".cjs"):
         return f'node --check "{path}"'
     if ext == ".json":
-        return (
-            'python -c "import json,sys;'
-            "json.load(open(sys.argv[1],encoding='utf-8'));"
-            'print(\'JSON OK\')" '
-            f'"{path}"'
-        )
+        # python -m json.tool：语法错误时非零退出，输出原样捕获，避免嵌套引号
+        return f'python -m json.tool "{path}"'
     if ext in (".yaml", ".yml"):
         return (
-            'python -c "import yaml,sys;'
-            "yaml.safe_load(open(sys.argv[1],encoding='utf-8'));"
-            'print(\'YAML OK\')" '
-            f'"{path}"'
+            'python -c "import yaml,sys; '
+            "yaml.safe_load(open(sys.argv[1], encoding='utf-8'))"
+            '" '
+            + f'"{path}"'
         )
     return None
 

@@ -187,6 +187,27 @@ def test_run_verify_docker_translates_path(tmp_path, monkeypatch):
     assert calls and "/workspace/app.py" in calls[0]
 
 
+def test_run_verify_json_and_yaml(tmp_path):
+    bad_json = tmp_path / "bad.json"
+    bad_json.write_text("{not valid json", encoding="utf-8")
+    good_json = tmp_path / "good.json"
+    good_json.write_text('{"a": 1}', encoding="utf-8")
+    bad_yaml = tmp_path / "bad.yaml"
+    bad_yaml.write_text("a: [unclosed", encoding="utf-8")
+    good_yaml = tmp_path / "good.yaml"
+    good_yaml.write_text("a: 1\n", encoding="utf-8")
+
+    results = _run_verify(
+        VSettings(),
+        [str(bad_json), str(good_json), str(bad_yaml), str(good_yaml)],
+    )
+    by_path = {r["path"]: r for r in results}
+    assert by_path[str(good_json)]["exit_code"] == 0
+    assert by_path[str(bad_json)]["exit_code"] != 0
+    assert by_path[str(good_yaml)]["exit_code"] == 0
+    assert by_path[str(bad_yaml)]["exit_code"] != 0
+
+
 # ---------------- 系统提示词静态/动态拆分（prompt caching） ----------------
 
 def test_compose_system_prompt_static_dynamic_split():

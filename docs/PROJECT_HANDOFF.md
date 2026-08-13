@@ -238,6 +238,14 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 3. **子代理**：file/bash 子代理带写/编辑/删除/命令工具且走 HITL；
    `agent_subagent_max_rounds` 预算；写后 `verify_command` 自动验证回填。
 
+### 4.8 本轮（缓存指标补全 + 快照回滚 + verify/hooks 加固）
+1. 流式主路径补记缓存命中/未命中 token（兼容 DeepSeek/OpenAI 字段），
+   agent_runs 可见；
+2. 快照回滚：`POST /api/conversations/{id}/timeline/{checkpoint_id}/rollback`
+   重建消息历史与任务清单，下次提问从该状态继续（实测恢复 2 条消息）；
+3. JSON/YAML 验证命令去除嵌套引号（json.tool / 无 print 的 python -c）；
+4. hooks 改为 `shlex.split` + `shell=False`，避免 shell 注入；测试增至 53 个。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。

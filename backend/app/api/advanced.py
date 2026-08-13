@@ -229,6 +229,44 @@ def conversation_timeline_detail(
     }
 
 
+@router.post("/conversations/{conversation_id}/timeline/{checkpoint_id}/rollback")
+def rollback_to_checkpoint(
+    conversation_id: int,
+    checkpoint_id: str,
+    db: Session = Depends(get_db),
+    agent: LangGraphAgentService = Depends(get_agent_service),
+) -> dict:
+    """把会话回滚到某个快照：重建消息历史与任务清单，下一次提问从该状态继续。"""
+    from ..native_checkpoint import messages_to_history_rows
+    from ..todos import save_todos
+
+    saver = getattr(agent, "checkpoint_saver", None)
+    if saver is None:
+        raise HTTPException(status_code=404, detail="原生 checkpointer 未启用")
+    tup = saver.get_tuple(
+        {
+            "configurable": {
+                "thread_id": f"conv:{conversation_id}",
+                "checkpoint_id": checkpoint_id,
+            }
+        }
+    )
+    if tup is None:
+        raise HTTPException(status_code=404, detail="快照不存在")
+    ch = (tup.checkpoint or {}).get("channel_values") or {}
+    rows = messages_to_history_rows(ch.get("messages") or [])
+    repo.clear_messages(db, conversation_id)
+    for row in rows:
+        repo.add_message(db, conversation_id, row["role"], row["content"])
+    save_todos(db, conversation_id, ch.get("todos") or [])
+    return {
+        "ok": True,
+        "checkpoint_id": checkpoint_id,
+        "restored_messages": len(rows),
+        "restored_todos": len(ch.get("todos") or []),
+    }
+
+
 # ---------------- 生命周期 Hooks（PreToolUse / PostToolUse） ----------------
 
 

@@ -72,12 +72,7 @@ class UsageCollector(BaseCallbackHandler):
                 int(usage.get("prompt_tokens") or 0),
                 int(usage.get("completion_tokens") or 0),
             )
-            # DeepSeek 等供应商返回前缀缓存命中/未命中 token，best-effort 采集
-            if usage.get("prompt_cache_hit_tokens") is not None:
-                self.add_cache(
-                    int(usage.get("prompt_cache_hit_tokens") or 0),
-                    int(usage.get("prompt_cache_miss_tokens") or 0),
-                )
+            self.add_cache_usage(usage)
         except Exception:
             pass
 
@@ -94,6 +89,19 @@ class UsageCollector(BaseCallbackHandler):
         with self._lock:
             self._cache_hit_tokens += max(0, hit_tokens)
             self._cache_miss_tokens += max(0, miss_tokens)
+
+    def add_cache_usage(self, usage: dict) -> None:
+        """从 usage_metadata 提取缓存命中/未命中 token（兼容多家字段名）。"""
+        if not usage:
+            return
+        hit = usage.get("prompt_cache_hit_tokens")
+        miss = usage.get("prompt_cache_miss_tokens")
+        if hit is None and isinstance(usage.get("prompt_tokens_details"), dict):
+            details = usage["prompt_tokens_details"]
+            hit = details.get("cached_tokens")
+        if miss is None and hit is None:
+            return
+        self.add_cache(int(hit or 0), int(miss or 0))
 
     def summary(self) -> dict:
         with self._lock:

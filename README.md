@@ -435,6 +435,7 @@ RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
 | GET/PUT | `/api/settings` | 读取（脱敏）/ 保存运行时配置（供应商、温度、联网、技能开关） |
 | GET/PUT | `/api/hooks` | 生命周期 hooks 配置（PreToolUse / PostToolUse 用户脚本回调） |
 | GET | `/api/conversations/{id}/timeline[/{checkpoint_id}]` | 原生 checkpointer 快照时间线 / 快照详情 |
+| POST | `/api/conversations/{id}/timeline/{checkpoint_id}/rollback` | 回滚会话消息与任务清单到该快照，下次提问从该状态继续 |
 | GET | `/api/skills` | 技能列表（含启停/隐藏状态与偏好） |
 | GET | `/api/skills/search` | 按语义/关键词检索技能 |
 | PUT | `/api/skills` | 保存技能偏好（enabled / hidden） |
