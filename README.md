@@ -368,6 +368,7 @@ RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
 | `AGENT_SUBAGENTS_ENABLED` | `1` | Send 子代理并行总开关 |
 | `AGENT_SUBAGENT_MAX_ROUNDS` | `2` | 每个子代理最多 LLM 轮数 |
 | `VERIFY_COMMAND` | 空 | 写/改文件后自动运行的验证命令 |
+| `CHECKPOINT_NATIVE_ENABLED` | `1` | LangGraph 原生 checkpointer（快照时间线） |
 | `AGENT_MAX_FAILURES` | `3` | 工具失败重试上限（失败不占迭代预算） |
 | `AGENT_RECURSION_LIMIT` | `30` | LangGraph 图执行最大步数 |
 | `CHAT_TEMPERATURE` | `0.5` | 回答温度 |
@@ -426,6 +427,8 @@ RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
 | DELETE | `/api/documents/{path}` | 删除文档并重建索引 |
 | POST/GET | `/api/index/rebuild` / `/api/index/status` | 重建索引 / 索引状态 |
 | GET/PUT | `/api/settings` | 读取（脱敏）/ 保存运行时配置（供应商、温度、联网、技能开关） |
+| GET/PUT | `/api/hooks` | 生命周期 hooks 配置（PreToolUse / PostToolUse 用户脚本回调） |
+| GET | `/api/conversations/{id}/timeline[/{checkpoint_id}]` | 原生 checkpointer 快照时间线 / 快照详情 |
 | GET | `/api/skills` | 技能列表（含启停/隐藏状态与偏好） |
 | GET | `/api/skills/search` | 按语义/关键词检索技能 |
 | PUT | `/api/skills` | 保存技能偏好（enabled / hidden） |

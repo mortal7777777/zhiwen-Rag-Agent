@@ -62,6 +62,7 @@ EDITABLE_KEYS = {
     "project_memory_file",
     "mcp_enabled",
     "checkpoint_enabled",
+    "checkpoint_native_enabled",
     "trajectory_compress_enabled",
 }
 

@@ -161,6 +161,117 @@ def test_mcp_server(payload: dict) -> dict:
     return result
 
 
+# ---------------- 原生 checkpointer：时间旅行（快照审计） ----------------
+
+
+@router.get("/conversations/{conversation_id}/timeline")
+def conversation_timeline(
+    conversation_id: int,
+    agent: LangGraphAgentService = Depends(get_agent_service),
+) -> dict:
+    """列出某会话的原生 checkpoint 快照（时间旅行审计）。"""
+    saver = getattr(agent, "checkpoint_saver", None)
+    if saver is None:
+        return {"items": [], "note": "原生 checkpointer 未启用"}
+    items = []
+    for tup in saver.list(
+        {"configurable": {"thread_id": f"conv:{conversation_id}"}}
+    ):
+        cp = tup.checkpoint or {}
+        ch = cp.get("channel_values") or {}
+        msgs = ch.get("messages") or []
+        items.append(
+            {
+                "checkpoint_id": cp.get("id"),
+                "created_at": cp.get("ts"),
+                "messages": len(msgs),
+                "plan": ch.get("plan_steps") or [],
+                "todos": ch.get("todos") or [],
+                "plan_done_count": ch.get("plan_done_count", 0),
+                "sources_count": len(ch.get("sources") or []),
+            }
+        )
+    return {"items": list(reversed(items))[:50]}
+
+
+@router.get("/conversations/{conversation_id}/timeline/{checkpoint_id}")
+def conversation_timeline_detail(
+    conversation_id: int,
+    checkpoint_id: str,
+    agent: LangGraphAgentService = Depends(get_agent_service),
+) -> dict:
+    """查看某个快照的完整内容（消息/计划/任务清单/来源/轨迹）。"""
+    saver = getattr(agent, "checkpoint_saver", None)
+    if saver is None:
+        raise HTTPException(status_code=404, detail="原生 checkpointer 未启用")
+    tup = saver.get_tuple(
+        {
+            "configurable": {
+                "thread_id": f"conv:{conversation_id}",
+                "checkpoint_id": checkpoint_id,
+            }
+        }
+    )
+    if tup is None:
+        raise HTTPException(status_code=404, detail="快照不存在")
+    ch = (tup.checkpoint or {}).get("channel_values") or {}
+    return {
+        "checkpoint_id": (tup.checkpoint or {}).get("id"),
+        "created_at": (tup.checkpoint or {}).get("ts"),
+        "messages": [
+            {"type": type(m).__name__, "content": getattr(m, "content", "")}
+            for m in (ch.get("messages") or [])
+        ],
+        "plan": ch.get("plan_steps") or [],
+        "todos": ch.get("todos") or [],
+        "sources": ch.get("sources") or [],
+        "tool_trace": ch.get("tool_trace") or [],
+    }
+
+
+# ---------------- 生命周期 Hooks（PreToolUse / PostToolUse） ----------------
+
+
+class HooksUpdateRequest(BaseModel):
+    hooks: list[dict] = Field(default_factory=list)
+
+
+@router.get("/hooks")
+def list_hooks(db: Session = Depends(get_db)) -> dict:
+    """读取 hooks 配置。"""
+    from ..hooks import load_hooks
+
+    return {"hooks": load_hooks(db)}
+
+
+@router.put("/hooks")
+def save_hooks(
+    payload: HooksUpdateRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    """保存 hooks 配置（立即生效，无需重启）。"""
+    cleaned = []
+    for h in payload.hooks:
+        command = str(h.get("command") or "").strip()
+        if not command:
+            continue
+        events = [
+            e
+            for e in (h.get("events") or [])
+            if e in ("pre_tool_use", "post_tool_use")
+        ]
+        cleaned.append(
+            {
+                "name": str(h.get("name") or "").strip()[:60] or command[:40],
+                "command": command[:300],
+                "events": events,
+                "timeout": max(1, min(60, int(h.get("timeout") or 15))),
+            }
+        )
+    repo.set_meta(db, "hooks", json.dumps(cleaned, ensure_ascii=False))
+    return {"ok": True, "hooks": cleaned}
+
+
 # ---------------- 受控执行工具（设置页测试用） ----------------
 
 

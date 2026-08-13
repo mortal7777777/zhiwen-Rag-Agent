@@ -27,6 +27,7 @@ import operator
 import re
 import threading
 import time
+import uuid
 from datetime import datetime
 from queue import Queue
 from typing import Annotated, TypedDict
@@ -846,6 +847,7 @@ def _subagent_node(state: AgentState) -> dict:
         is_sensitive_tool,
     )
     from ..tools_extra import command_allowed
+    from ..hooks import run_hooks
     from .tools import extract_sources
 
     service: LangGraphAgentService = state["service"]
@@ -1377,7 +1379,30 @@ def _tools_node(state: AgentState) -> dict:
                 "permission": "denied",
                 "_duration_ms": None,
             }
-        elif not args:
+        # PreToolUse hooks：返回 deny 时拦截工具执行
+        if db is not None:
+            pre = run_hooks(db, "pre_tool_use", name, args)
+            for r in pre:
+                bus.emit(
+                    "hook",
+                    {
+                        "event": "pre_tool_use",
+                        "name": r["name"],
+                        "tool": name,
+                        "decision": r["decision"],
+                        "reason": r["reason"],
+                    },
+                )
+            denied = [r for r in pre if r.get("decision") == "deny"]
+            if denied:
+                reason = "；".join(r.get("reason") or "被 hook 拒绝" for r in denied)
+                return tc, {
+                    "summary": f"工具被 PreToolUse hook 拦截：{reason}",
+                    "permission": "hook_denied",
+                    "error": f"操作被 hook 拒绝：{reason}。请说明影响并询问替代方案。",
+                    "_duration_ms": None,
+                }
+        if not args:
             # 空参数兜底：不浪费一次工具调用，直接提示模型补充参数
             return tc, {
                 "summary": f"{name} 参数缺失，请补充参数后重试",
@@ -1408,6 +1433,7 @@ def _tools_node(state: AgentState) -> dict:
         outcomes = list(pool.map(_execute, tool_calls))
 
     failed_ids: set[str] = set()
+    hook_contexts: list[str] = []
     for tc, result in outcomes:
         if stop_event is not None and stop_event.is_set():
             runtime["status"] = "stopped"
@@ -1459,6 +1485,32 @@ def _tools_node(state: AgentState) -> dict:
                 "duration_ms": entry.get("duration_ms"),
                 "sources": tool_sources,
             },
+        )
+        if db is not None:
+            for r in run_hooks(
+                db,
+                "post_tool_use",
+                name,
+                {"tool_input": tc.get("args") or {}, "tool_result": parsed},
+            ):
+                bus.emit(
+                    "hook",
+                    {
+                        "event": "post_tool_use",
+                        "name": r["name"],
+                        "tool": name,
+                        "decision": r["decision"],
+                        "reason": r["reason"],
+                    },
+                )
+                if r.get("additional_context"):
+                    hook_contexts.append(f"[{r['name']}] {r['additional_context']}")
+
+    if hook_contexts:
+        messages.append(
+            SystemMessage(
+                content="PostToolUse hook 附加信息：\n" + "\n".join(hook_contexts)
+            )
         )
 
     # 失败的工具调用不消耗迭代预算（成功数才累计）：
@@ -1906,7 +1958,7 @@ def _route_after_tools(state: AgentState) -> str:
     return "agent"
 
 
-def build_agent_graph():
+def build_agent_graph(checkpointer=None):
     """构建 LangGraph：prepare -> [dispatch -> subagents -> merge] -> agent -> tools -> finalize。"""
     graph = StateGraph(AgentState)
     graph.add_node("prepare", _prepare_node)
@@ -1937,7 +1989,7 @@ def build_agent_graph():
         {"agent": "agent", "finalize": "finalize"},
     )
     graph.add_edge("finalize", END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 # ============================================================
@@ -1952,13 +2004,33 @@ class LangGraphAgentService(AgentService):
         super().__init__(settings, rag_service)
         self._graph = None
         self._mcp = None
+        self._checkpoint_saver = None
+        self._checkpoint_conn = None
         self.recursion_limit = getattr(settings, "agent_recursion_limit", 30)
 
     @property
     def graph(self):
         if self._graph is None:
-            self._graph = build_agent_graph()
+            saver = self.checkpoint_saver
+            self._graph = build_agent_graph(checkpointer=saver)
         return self._graph
+
+    @property
+    def checkpoint_saver(self):
+        """原生 checkpointer（失败时返回 None，不影响运行）。"""
+        if not effective(self.settings, "checkpoint_native_enabled"):
+            return None
+        if self._checkpoint_saver is None:
+            try:
+                from ..native_checkpoint import build_saver
+
+                self._checkpoint_saver, self._checkpoint_conn = build_saver(
+                    self.settings.meta_dir
+                )
+            except Exception as exc:
+                logger.warning("原生 checkpointer 初始化失败，降级为无快照：%s", exc)
+                self._checkpoint_saver = None
+        return self._checkpoint_saver
 
     def refresh(self) -> None:
         """设置变更后重置懒加载缓存；图结构不变，无需重建。"""
@@ -2038,6 +2110,16 @@ class LangGraphAgentService(AgentService):
             tool_mode, use_web_search, use_knowledge_base
         )
 
+        # 新会话先建号：让原生 checkpointer 的 thread_id 从第一轮就能对齐 conv:id
+        if conversation_id is None and db is not None:
+            try:
+                conv = repo.create_conversation(
+                    db, title="新对话", template_id=template_id or None
+                )
+                conversation_id = conv.id
+            except Exception as exc:
+                logger.warning("提前创建会话失败：%s", exc)
+
         queue: Queue = Queue()
         bus = EventBus(queue)
         runtime: dict = {
@@ -2098,7 +2180,12 @@ class LangGraphAgentService(AgentService):
             try:
                 self.graph.invoke(
                     state,
-                    config={"recursion_limit": self.recursion_limit},
+                    config={
+                        "recursion_limit": self.recursion_limit,
+                        "configurable": {
+                            "thread_id": f"conv:{conversation_id or uuid.uuid4().hex}"
+                        },
+                    },
                 )
                 queue.put(None)
             except Exception as exc:

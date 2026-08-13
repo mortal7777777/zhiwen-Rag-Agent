@@ -149,3 +149,13 @@ graph.add_edge("subagent", "agent")           # 结果合并回父状态后再�
 子代理的要点：独立上下文（避免彼此污染）、只给与任务相关的工具、
 各自有自己的递归上限与 token 预算，返回“结论 + 依据摘要”而不是原始长文；
 父 agent 只做拆解与汇总。这个模式就是我们计划中 fan-out 的下一阶段。
+
+## 更新记录
+
+- **原生 checkpointer**（2026-08-13）：接入 `langgraph-checkpoint-sqlite`
+  与 SafeJsonPlusSerializer，每个 superstep 自动落快照；
+  `GET /api/conversations/{id}/timeline[/{checkpoint_id}]` 提供时间线审计；
+  自写 checkpoint.py 继续负责跨轮中断恢复，完整回滚待下一档。
+- **Hooks**（2026-08-13）：PreToolUse / PostToolUse 用户脚本回调
+  （配置 `GET/PUT /api/hooks`），PreToolUse 可 deny 拦截、PostToolUse 可
+  回填 additional_context，SSE 新增 `hook` 事件。

@@ -69,6 +69,8 @@ export async function streamAgentChat(payload = {}, handlers = {}, options = {})
         handlers.onPermission(data)
       } else if (event === 'permission_resolved' && handlers.onPermissionResolved) {
         handlers.onPermissionResolved(data)
+      } else if (event === 'hook' && handlers.onHook) {
+        handlers.onHook(data)
       } else if (event === 'todos' && handlers.onTodos) {
         handlers.onTodos(data)
       } else if (event === 'token' && handlers.onToken) {

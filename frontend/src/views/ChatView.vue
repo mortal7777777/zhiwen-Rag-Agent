@@ -1393,6 +1393,14 @@ async function send(options = {}) {
             scrollToBottom()
           }
         },
+        onHook: (data) => {
+          // PreToolUse/PostToolUse 生命周期事件：拦截时给出明显提示
+          currentTool.value =
+            data.decision === 'deny'
+              ? `Hook 拦截：${data.name}`
+              : `Hook 触发：${data.name}`
+          scrollToBottom()
+        },
         onPlanProgress: (data) => {
           // 计划按当前进度展示：已完成/进行中/未开始
           streamMsg.planDone = data.done || 0

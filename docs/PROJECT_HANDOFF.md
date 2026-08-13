@@ -227,6 +227,17 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 6. **审批自动化竞态**：`--approve` 改为跑前切 `allow`/跑后恢复 `ask`，
    避免 SSE 审批事件延迟导致的 resolve 404。
 
+### 4.7 本轮（原生 checkpointer 时间线 + hooks + 子代理 HITL/verify）
+1. **LangGraph 原生 checkpointer**：`langgraph-checkpoint-sqlite` +
+   SafeJsonPlusSerializer；每个 superstep 自动落快照，新增
+   `GET /api/conversations/{id}/timeline[/{checkpoint_id}]` 时间线审计；
+   新会话提前建号对齐 thread_id；自写 checkpoint 仍负责跨轮恢复。
+2. **生命周期 Hooks**：`hooks.py` + `GET/PUT /api/hooks`；
+   PreToolUse 可 deny 拦截、PostToolUse 回填 additional_context；
+   SSE 新增 `hook` 事件，前端有状态提示。
+3. **子代理**：file/bash 子代理带写/编辑/删除/命令工具且走 HITL；
+   `agent_subagent_max_rounds` 预算；写后 `verify_command` 自动验证回填。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。

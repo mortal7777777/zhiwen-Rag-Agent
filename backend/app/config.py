@@ -157,6 +157,7 @@ class Settings:
     project_memory_file: str = ""         # 文件型项目记忆（AGENTS.md）路径；空=项目根/AGENTS.md
     mcp_enabled: bool = True              # MCP 工具接入总开关
     checkpoint_enabled: bool = True       # 会话中断 checkpoint 恢复
+    checkpoint_native_enabled: bool = True  # LangGraph 原生 checkpointer（快照审计）
     trajectory_compress_enabled: bool = True  # 长任务轨迹摘要压缩
 
     # ---- CORS（前端开发服务器地址）----
@@ -272,6 +273,7 @@ class Settings:
             project_memory_file=_env("PROJECT_MEMORY_FILE", ""),
             mcp_enabled=_env("MCP_ENABLED", "1") == "1",
             checkpoint_enabled=_env("CHECKPOINT_ENABLED", "1") == "1",
+            checkpoint_native_enabled=_env("CHECKPOINT_NATIVE_ENABLED", "1") == "1",
             trajectory_compress_enabled=_env("TRAJECTORY_COMPRESS_ENABLED", "1") == "1",
             cors_origins=origins,
         )
