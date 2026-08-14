@@ -336,8 +336,18 @@ def make_todo_tool(db: Session | None, conversation_id: int | None):
                 }
             if op in ("complete", "done"):
                 target_text = text.strip()
+                # 支持数字序号：task_id 为纯数字时按清单顺序匹配第 N 项（1-based），
+                # 兼容模型把"步骤 1"写成 task_id="1" 的常见情况
                 for item in items:
                     if item.get("id") == task_id or item.get("text") == target_text:
+                        item["done"] = True
+                        item["completed_at"] = time.time()
+                        save_todos(local, conversation_id, items)
+                        return {"summary": f"已完成任务：{item['text'][:40]}", "todos": items}
+                if str(task_id).strip().isdigit():
+                    idx = int(str(task_id).strip()) - 1
+                    if 0 <= idx < len(items):
+                        item = items[idx]
                         item["done"] = True
                         item["completed_at"] = time.time()
                         save_todos(local, conversation_id, items)
@@ -361,6 +371,15 @@ def make_todo_tool(db: Session | None, conversation_id: int | None):
                 return {"error": f"未找到任务：{task_id or text}", "summary": "标记失败：任务不存在"}
             if op in ("remove", "delete"):
                 before = len(items)
+                if str(task_id).strip().isdigit():
+                    idx = int(str(task_id).strip()) - 1
+                    if 0 <= idx < len(items):
+                        removed = items.pop(idx)
+                        save_todos(local, conversation_id, items)
+                        return {
+                            "summary": f"已删除 1 项任务：{removed.get('text', '')[:40]}（剩余 {len(items)}）",
+                            "todos": items,
+                        }
                 items = [i for i in items if i.get("id") != task_id and i.get("text") != text.strip()]
                 if len(items) == before:
                     return {"error": f"未找到任务：{task_id or text}", "summary": "删除失败：任务不存在"}

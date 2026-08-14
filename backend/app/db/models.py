@@ -28,6 +28,8 @@ class Conversation(Base):
     title = Column(String(200), nullable=False, default="新对话")
     # 会话绑定的提示词模板（跟随会话持久化，切换会话自动恢复）
     template_id = Column(BigInteger, nullable=True)
+    # 会话工作目录（CLI 启动目录）：文件/命令工具的工作根，跟随会话保存
+    project_dir = Column(String(500), nullable=True)
     # 会话级自定义提示词（可选，优先级高于模板）
     system_prompt = Column(Text, nullable=True)
     # 早期对话滚动摘要（会话压缩后老消息的浓缩，仍保留原文供前端展示）

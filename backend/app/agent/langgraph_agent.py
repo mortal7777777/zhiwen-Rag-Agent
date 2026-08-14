@@ -672,7 +672,7 @@ def _prepare_node(state: AgentState) -> dict:
     )
     # 扩展工具：MCP + 受控执行（文件/命令，敏感操作走人工确认）
     tools.extend(service.mcp_tools(db))
-    tools.extend(service.extra_tools())
+    tools.extend(service.extra_tools(project_dir=state.get("project_dir")))
     if db is not None and conv_id is not None:
         try:
             from ..todos import make_todo_tool
@@ -765,7 +765,12 @@ def _remaining_needs_tools(remaining: list[dict]) -> bool:
     )
 
 
-def _subagent_tools(service: "LangGraphAgentService", hint: str, counter: list[int]):
+def _subagent_tools(
+    service: "LangGraphAgentService",
+    hint: str,
+    counter: list[int],
+    project_dir: str | None = None,
+):
     """按工具提示给子代理构建受限工具集（只读/检索类，不含敏感操作）。"""
     from ..tools_extra import (
         make_bash_tool,
@@ -803,13 +808,13 @@ def _subagent_tools(service: "LangGraphAgentService", hint: str, counter: list[i
         ]
     if hint in ("file_tool/bash",):
         return [
-            make_list_dir_tool(settings),
-            make_read_file_tool(settings),
-            make_grep_search_tool(settings),
-            make_write_file_tool(settings),
-            make_edit_file_tool(settings),
-            make_delete_file_tool(settings),
-            make_bash_tool(settings),
+            make_list_dir_tool(settings, project_dir),
+            make_read_file_tool(settings, project_dir),
+            make_grep_search_tool(settings, project_dir),
+            make_write_file_tool(settings, project_dir),
+            make_edit_file_tool(settings, project_dir),
+            make_delete_file_tool(settings, project_dir),
+            make_bash_tool(settings, project_dir),
         ]
     return []
 
@@ -832,6 +837,7 @@ def _dispatch_tasks(state: AgentState):
                 "runtime": state["runtime"],
                 "db": state["db"],
                 "stop_event": state.get("stop_event"),
+                "project_dir": state.get("project_dir"),
             },
         )
         for task in _build_subagent_tasks(state)
@@ -944,7 +950,7 @@ def _subagent_node(state: AgentState) -> dict:
     step = task.get("step") or ""
     hint = task.get("tool_hint") or ""
     counter: list[int] = [0]
-    tools = _subagent_tools(service, hint, counter)
+    tools = _subagent_tools(service, hint, counter, state.get("project_dir"))
 
     messages = [
         SystemMessage(content=SUBAGENT_SYSTEM_PROMPT),
@@ -2275,14 +2281,14 @@ class LangGraphAgentService(AgentService):
             logger.warning("MCP 工具配置失败：%s", exc)
             return []
 
-    def extra_tools(self) -> list:
+    def extra_tools(self, project_dir: str | None = None) -> list:
         """受控执行工具：类 Claude Code 文件/命令工具集（需在设置中开启总开关）。"""
         if not effective(self.settings, "advanced_tools_enabled", True):
             return []
         try:
             from ..tools_extra import make_agent_tools
 
-            return make_agent_tools(self.settings)
+            return make_agent_tools(self.settings, project_dir)
         except Exception as exc:
             logger.warning("受控执行工具加载失败：%s", exc)
             return []
@@ -2335,12 +2341,27 @@ class LangGraphAgentService(AgentService):
         if conversation_id is None and db is not None:
             try:
                 conv = repo.create_conversation(
-                    db, title="新对话", template_id=template_id or None
+                    db,
+                    title="新对话",
+                    template_id=template_id or None,
+                    project_dir=project_dir,
                 )
                 conversation_id = conv.id
                 early_created = True
             except Exception as exc:
                 logger.warning("提前创建会话失败：%s", exc)
+        elif conversation_id is not None and db is not None:
+            # 已有会话：CLI 未传 project_dir 时，恢复会话保存的工作目录
+            try:
+                conv = repo.get_conversation(db, conversation_id)
+                if conv is not None:
+                    if not project_dir and conv.project_dir:
+                        project_dir = conv.project_dir
+                    elif project_dir and project_dir != conv.project_dir:
+                        # 新的启动目录：跟随会话更新，保证 /resume 后目录一致
+                        repo.update_conversation(db, conversation_id, project_dir=project_dir)
+            except Exception as exc:
+                logger.warning("读取会话工作目录失败：%s", exc)
 
         queue: Queue = Queue()
         bus = EventBus(queue)

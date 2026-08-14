@@ -34,11 +34,13 @@ def create_conversation(
     title: str = "新对话",
     system_prompt: str | None = None,
     template_id: int | None = None,
+    project_dir: str | None = None,
 ) -> Conversation:
     conv = Conversation(
         title=title,
         system_prompt=system_prompt,
         template_id=template_id,
+        project_dir=project_dir,
     )
     db.add(conv)
     db.commit()
@@ -92,8 +94,9 @@ def update_conversation(
     *,
     title: str | None = None,
     template_id: int | None = None,
+    project_dir: str | None = None,
 ) -> Conversation | None:
-    """更新会话字段（标题 / 绑定的模板）。template_id=None 表示清空绑定。"""
+    """更新会话字段（标题 / 绑定的模板 / 工作目录）。template_id=None 表示清空绑定。"""
     conv = db.get(Conversation, conversation_id)
     if conv is None:
         return None
@@ -102,6 +105,8 @@ def update_conversation(
     if template_id is not None:
         # 0 = 切回默认模板（清空绑定）；None = 不修改
         conv.template_id = template_id or None
+    if project_dir is not None:
+        conv.project_dir = project_dir.strip()[:500] or None
     db.commit()
     db.refresh(conv)
     return conv

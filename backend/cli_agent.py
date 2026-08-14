@@ -1024,32 +1024,25 @@ def prompt_permission(reader: KeyReader, data: dict, base_url: str) -> None:
             answer = str(key.data)
         else:
             continue
-        print()
-        approve = answer in ("1", "3", "4")
-        remember_session = answer == "3" and is_command
-        remember_forever = answer == "4" and is_command
-        if approve:
-            try:
-                reason = read_line(reader, [], ).strip()
-            except Interrupted:
-                reason = ""
-            ok = resolve_permission(
-                base_url,
-                data.get("id", ""),
-                True,
-                reason,
-                remember_forever=remember_forever,
-                remember_session=remember_session,
-            )
-            print(paint("✔ 已批准，继续执行…", "green") if ok else paint("✘ 提交失败，请检查后端", "red"))
-            return
-        try:
-            reason = read_line(reader, [], ).strip()
-        except Interrupted:
-            reason = ""
-        ok = resolve_permission(base_url, data.get("id", ""), False, reason)
-        print(paint("✘ 已拒绝", "red") if ok else paint("✘ 提交失败，请检查后端", "red"))
+        break  # 数字键/回车/Esc 立即生效，不再等待 reason 输入
+    print()
+    approve = answer in ("1", "3", "4")
+    remember_session = answer == "3" and is_command
+    remember_forever = answer == "4" and is_command
+    if approve:
+        ok = resolve_permission(
+            base_url,
+            data.get("id", ""),
+            True,
+            "",
+            remember_forever=remember_forever,
+            remember_session=remember_session,
+        )
+        print(paint("✔ 已批准，继续执行…", "green") if ok else paint("✘ 提交失败，请检查后端", "red"))
         return
+    ok = resolve_permission(base_url, data.get("id", ""), False, "")
+    print(paint("✘ 已拒绝", "red") if ok else paint("✘ 提交失败，请检查后端", "red"))
+    return
 
 
 # ------------------------------------------------------------------ 流式问答

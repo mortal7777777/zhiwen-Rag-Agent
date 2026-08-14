@@ -32,10 +32,13 @@ from .runtime_config import effective
 logger = logging.getLogger(__name__)
 
 
-def _resolve_workspace(settings) -> Path:
+def _resolve_workspace(settings, project_dir: str | None = None) -> Path:
     root = (effective(settings, "tool_workspace") or "").strip()
     if root:
         p = Path(root).expanduser().resolve()
+    elif project_dir:
+        # 会话工作目录：CLI 从哪个目录启动，文件/命令工具就在哪个目录工作
+        p = Path(project_dir).expanduser().resolve()
     else:
         p = Path(__file__).resolve().parents[2]  # rag_knowledge_base/
     p.mkdir(parents=True, exist_ok=True)
@@ -97,9 +100,11 @@ def command_allowed(settings, command_line: str) -> tuple[bool, str]:
     return False, f"命令不在自动放行白名单内：{line[:80]}"
 
 
-def _run_command(settings, command: str, cwd: str = "") -> dict:
+def _run_command(
+    settings, command: str, cwd: str = "", project_dir: str | None = None
+) -> dict:
     """执行命令：默认在工作目录根执行（与文件工具一致），支持子目录 + 超时 + 截断。"""
-    workspace = _resolve_workspace(settings)
+    workspace = _resolve_workspace(settings, project_dir)
     workdir = workspace if not cwd else _safe_path(workspace, cwd)
     sandbox = str(effective(settings, "command_sandbox") or "subprocess").strip().lower()
     if sandbox == "docker":
@@ -213,21 +218,24 @@ def _docker_run_cmd(settings, command: str, workdir: Path) -> list[str]:
     return options + [image, "sh", "-c", command]
 
 
-def make_agent_tools(settings) -> list[BaseTool]:
-    """Agent 可用的文件/命令工具：读类自动，写/命令类敏感（HITL）。"""
+def make_agent_tools(settings, project_dir: str | None = None) -> list[BaseTool]:
+    """Agent 可用的文件/命令工具：读类自动，写/命令类敏感（HITL）。
+
+    project_dir：会话工作目录（CLI 启动目录），未配置 tool_workspace 时生效。
+    """
     return [
-        make_list_dir_tool(settings),
-        make_read_file_tool(settings),
-        make_grep_search_tool(settings),
-        make_write_file_tool(settings),
-        make_edit_file_tool(settings),
-        make_delete_file_tool(settings),
-        make_bash_tool(settings),
+        make_list_dir_tool(settings, project_dir),
+        make_read_file_tool(settings, project_dir),
+        make_grep_search_tool(settings, project_dir),
+        make_write_file_tool(settings, project_dir),
+        make_edit_file_tool(settings, project_dir),
+        make_delete_file_tool(settings, project_dir),
+        make_bash_tool(settings, project_dir),
     ]
 
 
-def make_list_dir_tool(settings) -> BaseTool:
-    workspace = _resolve_workspace(settings)
+def make_list_dir_tool(settings, project_dir: str | None = None) -> BaseTool:
+    workspace = _resolve_workspace(settings, project_dir)
 
     def _invoke(path: str = ".") -> dict:
         try:
@@ -260,8 +268,8 @@ def make_list_dir_tool(settings) -> BaseTool:
     )
 
 
-def make_read_file_tool(settings) -> BaseTool:
-    workspace = _resolve_workspace(settings)
+def make_read_file_tool(settings, project_dir: str | None = None) -> BaseTool:
+    workspace = _resolve_workspace(settings, project_dir)
 
     def _invoke(path: str, offset: int = 0, limit: int = 200) -> dict:
         try:
@@ -296,8 +304,8 @@ def make_read_file_tool(settings) -> BaseTool:
     )
 
 
-def make_grep_search_tool(settings) -> BaseTool:
-    workspace = _resolve_workspace(settings)
+def make_grep_search_tool(settings, project_dir: str | None = None) -> BaseTool:
+    workspace = _resolve_workspace(settings, project_dir)
     _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".agent_trash"}
 
     def _walk(path: Path, include: str | None, budget: list[int]):
@@ -364,8 +372,8 @@ def make_grep_search_tool(settings) -> BaseTool:
     )
 
 
-def make_write_file_tool(settings) -> BaseTool:
-    workspace = _resolve_workspace(settings)
+def make_write_file_tool(settings, project_dir: str | None = None) -> BaseTool:
+    workspace = _resolve_workspace(settings, project_dir)
 
     def _invoke(path: str, content: str) -> dict:
         try:
@@ -391,8 +399,8 @@ def make_write_file_tool(settings) -> BaseTool:
     )
 
 
-def make_edit_file_tool(settings) -> BaseTool:
-    workspace = _resolve_workspace(settings)
+def make_edit_file_tool(settings, project_dir: str | None = None) -> BaseTool:
+    workspace = _resolve_workspace(settings, project_dir)
 
     def _invoke(
         path: str,
@@ -463,8 +471,8 @@ def _diff_window(target: str, anchor: str) -> str:
     return target[start:end][:400]
 
 
-def make_delete_file_tool(settings) -> BaseTool:
-    workspace = _resolve_workspace(settings)
+def make_delete_file_tool(settings, project_dir: str | None = None) -> BaseTool:
+    workspace = _resolve_workspace(settings, project_dir)
 
     def _invoke(path: str) -> dict:
         try:
@@ -500,9 +508,9 @@ def make_delete_file_tool(settings) -> BaseTool:
     )
 
 
-def make_bash_tool(settings) -> BaseTool:
+def make_bash_tool(settings, project_dir: str | None = None) -> BaseTool:
     def _invoke(command: str, cwd: str = "") -> dict:
-        return _run_command(settings, command, cwd)
+        return _run_command(settings, command, cwd, project_dir)
 
     return StructuredTool.from_function(
         func=_invoke,
@@ -523,7 +531,7 @@ def make_bash_tool(settings) -> BaseTool:
 
 def make_file_tool(settings) -> BaseTool:
     """文件工具：白名单目录内的 list/read/write/append。"""
-    workspace = _resolve_workspace(settings)
+    workspace = _resolve_workspace(settings, project_dir)
 
     def _invoke(operation: str, path: str, content: str = "") -> dict:
         try:
