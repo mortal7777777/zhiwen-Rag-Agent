@@ -138,6 +138,16 @@ def test_complete_tools_argument():
     assert c.complete("普通文本") == ([], "")
 
 
+def test_input_layout_single_line_and_wrap():
+    # 短输入单行：prompt 宽 2 + 内容 4
+    assert c.input_layout("你好", 2, 10) == (1, 0, 6)
+    # 长输入跨行：42 显示宽 / 20 列 → 3 行，光标在最后一行第 3 列（含 ANSI 零宽）
+    rows, row, col = c.input_layout("a" * 40, 40, 20)
+    assert (rows, row, col) == (3, 2, 2)
+    # 光标在中间位置
+    assert c.input_layout("abcdef", 3, 10) == (1, 0, 5)
+
+
 def test_render_tool_args():
     args = {"path": "C:/very/long/path/that/keeps/going", "cmd": "python x.py"}
     out = c.render_tool_args(args)

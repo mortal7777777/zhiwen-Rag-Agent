@@ -31,7 +31,9 @@ $env:SENSENOVA_API_KEY=(从用户环境变量读取)
 $env:DEEPSEEK_API_KEY=(从用户环境变量读取)
 Start-Process D:\conda_envs\pytorch_env\python.exe -ArgumentList '-m','uvicorn','app.main:app','--host','0.0.0.0','--port','8000' -WorkingDirectory '...\backend' -WindowStyle Hidden -RedirectStandardOutput backend\uvicorn.out.log -RedirectStandardError backend\uvicorn.err.log
 ```
-> 沙箱内直接启动会因 `WinError 10013` 失败；用 `Start-Process` + 管理员权限，或用已运行的后端。
+> 沙箱内直接启动会因 `WinError 10013` 失败；即使沙箱内 `Start-Process` 启动成功，
+> 子进程也会**继承沙箱的网络限制**（出站连模型 API 同样报 `WinError 10013`），
+> 因此重启后端务必**脱离沙箱/提权执行**。
 
 **前端**：`cd frontend && npm run dev`（Vite HMR，改前端代码自动生效；`npm run build` 验证构建）。
 
@@ -295,6 +297,18 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 5. **真机验证**：重启后端后实测——session 带 run_id，取消返回 `cancelled:true`，
    `done` 在 2.7s 内到达且 `stopped=True`。
 
+### 4.13 本轮（CLI 输入渲染修复 + 后端网络权限坑）
+1. **输入显示堆叠修复**：长输入超过终端一行时，`\r\033[2K` 只清最后一行，
+   上一行残影每次按键叠加成多行 `› ...`。改为按行布局
+   （新增纯函数 `input_layout`，CJK 宽字符正确计算行/列），重绘时回清上次
+   占用的全部行、清残留行、光标跨行定位；回车前重绘去掉幽灵补全，
+   非终端（管道）输入不回绘防转义污染。
+2. **“Connection error.” 根因**：上一轮从沙箱里重启后端，新进程继承了沙箱
+   网络限制，出站连 DeepSeek 报 `httpx.ConnectError: [WinError 10013]`。
+   已脱离沙箱（提权）重启恢复，实测回答 82 输出 tokens、prompt 3597 正常。
+   CLI 对 Connection error 增加“检查后端日志/网络”提示。
+3. 测试增至 **79 通过**（新增 `input_layout` 布局单测）。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。
@@ -366,5 +380,5 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 ## 7. 给新会话的三条建议
 
 1. **先读 `README.md` + 本文件**，再看 `docs/AGENT_COMPARISON.md`（对比）和 `docs/HERMES_STYLE_AGENT.md`（路线），最后按需读 `langgraph_agent.py` 和 `permissions.py`。
-2. **改动前先确认运行中的后端 PID**（`netstat -ano | findstr :8000`），改完后端必须带环境变量重启（端口绑定需管理员权限）。
+2. **改动前先确认运行中的后端 PID**（`netstat -ano | findstr :8000`），改完后端必须带环境变量重启；**重启务必脱离沙箱/提权**，否则新进程继承沙箱网络限制，连模型 API 会报 `WinError 10013`。
 3. **前端改完跑 `npm run build` 验证**；vite dev server 若仍在运行，HMR 会自动生效。

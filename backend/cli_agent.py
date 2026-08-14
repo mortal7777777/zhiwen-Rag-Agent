@@ -593,6 +593,21 @@ def _common_prefix(strings: list[str]) -> str:
     return prefix
 
 
+def input_layout(buf: str, pos: int, cols: int) -> tuple[int, int, int]:
+    """计算输入行在终端上的布局：返回 (总行数, 光标所在行, 光标所在列)。
+
+    列宽按显示宽度计算（CJK 全角 2、ANSI 零宽），供渲染时光标定位。
+    """
+    cols = max(1, cols)
+    prompt_w = strwidth("› ")
+    total_w = max(1, prompt_w + strwidth(buf))
+    rows = (total_w + cols - 1) // cols
+    prefix_w = prompt_w + strwidth(buf[:pos])
+    pos_row = prefix_w // cols
+    pos_col = prefix_w % cols
+    return rows, pos_row, pos_col
+
+
 def complete(buf: str) -> tuple[list[str], str]:
     """返回 (候选列表, 幽灵补全文本)。"""
     if " " in buf and buf.split(" ", 1)[0] == "/tools":
@@ -610,17 +625,60 @@ def complete(buf: str) -> tuple[list[str], str]:
     return [], ""
 
 
-def _render_input(buf: str, pos: int) -> None:
+_INPUT_ROWS = [1]  # 上次输入块占用的终端行数（含菜单行），用于回清残留
+
+
+def _render_input(buf: str, pos: int, with_ghost: bool = True) -> None:
+    """重绘输入行；支持跨行内容（回清上一次占用的所有行，避免残影堆叠）。"""
+    if not USE_COLOR:
+        return  # 非终端（管道输入）不重绘，避免转义序列污染输出
     matches, ghost = complete(buf)
+    prompt = paint("› ", "green", bold=True)
+    ghost_text = paint(ghost, "dim") if with_ghost and ghost else ""
+    line = prompt + buf + ghost_text
+    cols = term_width()
+    rows, pos_row, pos_col = input_layout(
+        buf + (ghost if with_ghost else ""), pos, cols
+    )
+    old_rows = _INPUT_ROWS[0]
+
+    sys.stdout.write("\033[?25l")  # 隐藏光标，减少闪烁
+    # 1) 光标回到上次输入块顶部，并清掉所有旧行
+    if old_rows > 1:
+        sys.stdout.write(f"\033[{old_rows - 1}A")
     sys.stdout.write("\r\033[2K")
-    sys.stdout.write(paint("› ", "green", bold=True) + buf + paint(ghost, "dim"))
-    col = strwidth("› " + buf[:pos])
-    sys.stdout.write(f"\033[{col + 1}G")
-    if buf.startswith("/") and matches:
-        sys.stdout.write(
-            "\033[1B\r\033[2K  " + "  ".join(clip(m, 26) for m in matches[:6])
-        )
-        sys.stdout.write(f"\033[1A\033[{col + 1}G")
+    # 2) 写出新内容（终端按 cols 自动换行）
+    sys.stdout.write(line)
+    # 3) 新块行数变少时，向下清残留行
+    extra = max(0, old_rows - rows)
+    for _ in range(extra):
+        sys.stdout.write("\033[1B\r\033[2K")
+    # 4) 从行尾回到块顶，再定位到 pos
+    up = (rows - 1) + extra
+    if up:
+        sys.stdout.write(f"\033[{up}A")
+    sys.stdout.write("\r")
+    if pos_row:
+        sys.stdout.write(f"\033[{pos_row}B")
+    if pos_col:
+        sys.stdout.write(f"\033[{pos_col + 1}G")
+    # 5) / 命令候选菜单（画在输入块下方一行，再回到光标处）
+    menu_rows = 0
+    if buf.startswith("/") and matches and with_ghost:
+        down = rows - pos_row
+        if down:
+            sys.stdout.write(f"\033[{down}B")
+        sys.stdout.write("\r\033[2K")
+        menu = "  " + "  ".join(clip(m, 26) for m in matches[:6])
+        sys.stdout.write(clip(menu, cols))
+        menu_rows = 1
+        if down:
+            sys.stdout.write(f"\033[{down}A")
+        sys.stdout.write("\r")
+        if pos_col:
+            sys.stdout.write(f"\033[{pos_col + 1}G")
+    _INPUT_ROWS[0] = rows + menu_rows
+    sys.stdout.write("\033[?25h")
     sys.stdout.flush()
 
 
@@ -630,6 +688,7 @@ def read_line(reader: KeyReader, history: list[str]) -> str:
     pos = 0
     draft = ""
     idx = len(history)
+    _INPUT_ROWS[0] = 1
     sys.stdout.write(paint("› ", "green", bold=True))
     sys.stdout.flush()
     while True:
@@ -685,11 +744,14 @@ def read_line(reader: KeyReader, history: list[str]) -> str:
                     raise QuitRequested()
             elif key.name == "ctrl-l":
                 sys.stdout.write("\033[2J\033[H")
+                _INPUT_ROWS[0] = 1
             elif key.name == "ctrl-r":
                 raise RetryRequested()
             elif key.name == "enter":
+                _render_input(buf, pos, with_ghost=False)
                 sys.stdout.write("\n")
                 sys.stdout.flush()
+                _INPUT_ROWS[0] = 1
                 if buf:
                     if not history or history[-1] != buf:
                         history.append(buf)
@@ -706,6 +768,7 @@ def _clear_screen() -> None:
     if USE_COLOR:
         sys.stdout.write("\033[2J\033[H")
         sys.stdout.flush()
+    _INPUT_ROWS[0] = 1
 
 
 # ------------------------------------------------------------------ 会话/历史
@@ -1205,7 +1268,13 @@ def stream_question(
                 break
             elif name == "error":
                 screen.newline()
-                screen.write(paint(f"✖ {safe_text(data.get('message', '未知错误'))}", "red"))
+                message = safe_text(data.get("message", "未知错误"))
+                hint = (
+                    "（后端与模型供应商的连接失败，请检查后端日志/网络后重试）"
+                    if "connection" in message.lower() or "10013" in message
+                    else ""
+                )
+                screen.write(paint(f"✖ {message}{hint}", "red"))
     except (GenerationInterrupted, KeyboardInterrupt):
         interrupted = True
     finally:
