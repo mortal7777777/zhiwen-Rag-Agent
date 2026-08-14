@@ -24,10 +24,28 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+def _expand_plugin_skill_root(rel_glob: str) -> str | None:
+    """把 ~/.claude/plugins/cache/<glob> 展开为实际存在的技能根目录。
+
+    插件缓存路径含版本号（如 ecc/ecc/2.0.0-rc.1），版本升级会变，
+    返回 None 表示未找到（扫描时跳过）。
+    """
+    import glob
+
+    base = os.path.expanduser("~/.claude/plugins/cache")
+    matches = sorted(glob.glob(os.path.join(base, rel_glob)))
+    return matches[-1] if matches else None
+
+
 # (来源标签, 根目录, 目录布局: flat=一级目录 / nested=分类/技能 两级)
 DEFAULT_ROOTS = [
     ("codex", os.path.expanduser("~/.codex/skills"), "flat"),
     ("claude", os.path.expanduser("~/.claude/skills"), "flat"),
+    # Claude Code 插件市场的技能（ecc=Everything Claude Code 等，装成插件时
+    # 技能在插件缓存目录里，不在 ~/.claude/skills）。版本号会随插件升级变化，
+    # 用 glob 在扫描时动态展开。
+    ("claude", _expand_plugin_skill_root("ecc/*/*/skills"), "flat"),
+    ("claude", _expand_plugin_skill_root("anthropic-agent-skills/*/skills"), "flat"),
     ("hermes", r"D:\agents\hermes\skills", "nested"),
     # Hermes 的可选技能与主技能统一归为 "hermes" 来源，避免界面出现两个 Hermes 选项
     ("hermes", r"D:\agents\hermes\optional-skills", "nested"),
@@ -292,6 +310,8 @@ def scan_skills(force: bool = False) -> list[dict]:
     else:
         by_name: dict[str, dict] = {}
         for source, root_raw, layout in DEFAULT_ROOTS:
+            if not root_raw:
+                continue  # 插件 glob 未命中（目录不存在/版本变化）
             root = Path(root_raw)
             if not root.is_dir():
                 continue
