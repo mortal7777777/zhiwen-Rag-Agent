@@ -408,11 +408,24 @@ class KeyReader:
         self._cond = threading.Condition()
         self._items: collections.deque[Key] = collections.deque()
         self._stop = threading.Event()
+        self._paused = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def pause(self) -> None:
+        """暂停读取（prompt_toolkit 接管 stdin 时调用，避免两个读取者抢键）。"""
+        self._paused.set()
+
+    def resume(self) -> None:
+        """恢复读取。"""
+        self._paused.clear()
+
     def stop(self) -> None:
         self._stop.set()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
 
     def _push(self, key: Key, front: bool = False) -> None:
         with self._cond:
@@ -449,6 +462,9 @@ class KeyReader:
 
         try:
             while not self._stop.is_set():
+                if self._paused.is_set():
+                    time.sleep(0.02)
+                    continue
                 try:
                     if not msvcrt.kbhit():
                         time.sleep(0.015)
@@ -515,6 +531,9 @@ class KeyReader:
             try:
                 tty.setraw(fd)
                 while not self._stop.is_set():
+                    if self._paused.is_set():
+                        time.sleep(0.02)
+                        continue
                     ready, _, _ = select.select([sys.stdin], [], [], 0.05)
                     if not ready:
                         continue
@@ -746,11 +765,18 @@ def read_line(reader: KeyReader, history: list[str]) -> str:
     try:
         session = make_prompt_session(history)
     except Exception:
-        # prompt_toolkit 不可用（极老环境）时回退旧实现
+        # prompt_toolkit 不可用（极老环境/非 Windows 控制台）时回退旧实现
         return _read_line_legacy(reader, history)
+    from prompt_toolkit.styles import Style
+
+    # prompt_toolkit 接管 stdin 期间暂停 KeyReader，避免两个读取者抢键
+    reader.pause()
     try:
+        # prompt_toolkit 的 prompt 参数是纯文本，不能传 ANSI 转义串
+        # （会把 ^[[32m 当字面量显示）。颜色用 prompt_toolkit 样式。
         text = session.prompt(
-            paint("› ", "green", bold=True),
+            "› ",
+            style=Style.from_dict({"prompt": "ansigreen bold"}),
             multiline=False,
             wrap_lines=True,
         )
@@ -760,6 +786,8 @@ def read_line(reader: KeyReader, history: list[str]) -> str:
         raise Interrupted(False)
     except EOFError:
         raise QuitRequested()
+    finally:
+        reader.resume()
     if text and (not history or history[-1] != text):
         history.append(text)
         del history[:-200]
