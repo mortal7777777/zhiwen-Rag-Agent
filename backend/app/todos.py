@@ -36,14 +36,33 @@ def load_todos(db: Session | None, conversation_id: int | None) -> list[dict]:
     if db is None or not conversation_id:
         return []
     try:
+        # 工具在线程池中并行执行时，请求级 Session 非线程安全：
+        # 优先用独立短会话读取（todo_update 也是独立会话写库，天然读到最新），
+        # 避免并发把 MySQL 连接搞坏（Packet sequence number wrong）
+        local = None
+        try:
+            from .db.database import SessionLocal, db_ready
+
+            if db_ready and SessionLocal is not None:
+                local = SessionLocal()
+        except Exception:
+            pass
+        session = local if local is not None else db
         # 请求级 Session 可能缓存了旧 AppMeta 行（todo_update 用独立会话写库），
         # 读前强制过期，保证拿到最新清单
-        if db is not None:
+        if local is None:
             try:
-                db.expire_all()
+                session.expire_all()
             except Exception:
                 pass
-        raw = repo.get_meta(db, _key(conversation_id))
+        try:
+            raw = repo.get_meta(session, _key(conversation_id))
+        finally:
+            if local is not None:
+                try:
+                    local.close()
+                except Exception:
+                    pass
         if not raw:
             return []
         data = json.loads(raw)

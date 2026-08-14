@@ -328,6 +328,22 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
      避免键盘线程被信号打死、之后输入全部失灵。
 3. 测试增至 **82 通过**（新增 2 个 read_line Ctrl+C 单测 + 1 个 run_hooks 回归）。
 
+### 4.15 本轮（同类漏导入清剿 + 工具并行读 DB 的 Session 并发修复）
+1. **同类 NameError 清剿**：实测发现 `_run_sensitive_subagent_tool`（子代理
+   敏感工具 HITL 路径）调用 `describe_tool_call`/`display_args` 但未导入，
+   子代理写文件/命令时同样 `NameError`。修复：补上局部导入。
+   用 pyflakes 全文件扫描确认 **0 个 undefined name**。
+2. **工具并行读 DB 的 Session 并发修复**（复现：多工具并行时后端日志
+   `Packet sequence number wrong` → 请求级 Session 事务损坏 → 后续所有
+   会话/消息/运行记录写入全部失败）：
+   - `hooks.py::load_hooks` 与 `todos.py::load_todos` 改为**优先用独立短会话
+     （SessionLocal）读取**，与 §4.1 todo_update 的独立会话方案一致；
+     工具线程池并行执行时不再共用请求级 Session；
+   - 单线程路径（prepare/finalize 主线程）自动回退请求级 Session，行为不变；
+   - 实测：子代理创建目录+写文件+读回确认全链路 33s 完成，日志零 WARNING。
+3. 测试仍 **82 通过**（新增并发读取不影响现有单测，repo.get_meta 被
+   monkeypatch 时回退传入 db 参数，测试兼容）。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。

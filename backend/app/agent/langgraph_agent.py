@@ -850,6 +850,7 @@ def _run_sensitive_subagent_tool(
     stop_event,
 ) -> dict:
     """子代理执行敏感工具：白名单自动放行，否则走与主 Agent 一致的 HITL。"""
+    from ..permissions import describe_tool_call, display_args
     from ..tools_extra import command_allowed
 
     settings = service.settings

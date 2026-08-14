@@ -23,7 +23,25 @@ def load_hooks(db) -> list[dict]:
     if db is None:
         return []
     try:
-        raw = repo.get_meta(db, "hooks")
+        # 工具在线程池中并行执行时，请求级 Session 非线程安全：
+        # 优先用独立短会话读取，避免并发把 MySQL 连接搞坏
+        # （与 todos.py §4.1 的 todo_update 独立会话方案一致）
+        local = None
+        try:
+            from .db.database import SessionLocal, db_ready
+
+            if db_ready and SessionLocal is not None:
+                local = SessionLocal()
+        except Exception:
+            pass
+        try:
+            raw = repo.get_meta(local if local is not None else db, "hooks")
+        finally:
+            if local is not None:
+                try:
+                    local.close()
+                except Exception:
+                    pass
         data = json.loads(raw) if raw else []
     except Exception as exc:
         logger.warning("读取 hooks 配置失败：%s", exc)
