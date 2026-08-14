@@ -688,8 +688,97 @@ def _render_input(buf: str, pos: int, with_ghost: bool = True) -> None:
     sys.stdout.flush()
 
 
+def make_prompt_session(history: list[str]):
+    """构建 prompt_toolkit PromptSession：历史 + Tab 补全 + 键绑定语义。
+
+    取代手写 KeyReader 行编辑（Windows 终端上末字符不可见/光标错位/
+    Ctrl+C 竞争等 bug），与 Hermes CLI 同款方案。
+    """
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.key_binding import KeyBindings
+
+    class _CmdCompleter(Completer):
+        def get_completions(self, document, complete_event):
+            matches, _ = complete(document.text)
+            word = document.get_word_before_cursor()
+            for m in matches:
+                yield Completion(m, start_position=-len(word))
+
+    kb = KeyBindings()
+
+    @kb.add("escape")
+    def _(event):
+        buf = event.app.current_buffer
+        if buf.text:
+            # Esc：有内容 = 清空输入（与旧行为一致）
+            buf.text = ""
+            buf.cursor_position = 0
+
+    @kb.add("c-d")
+    def _(event):
+        if not event.app.current_buffer.text:
+            raise QuitRequested()
+
+    @kb.add("c-r")
+    def _(event):
+        raise RetryRequested()
+
+    pt_history = InMemoryHistory()
+    for h in history[-200:]:
+        pt_history.append_string(h)
+
+    return PromptSession(
+        history=pt_history,
+        completer=_CmdCompleter(),
+        key_bindings=kb,
+        enable_history_search=True,
+    )
+
+
 def read_line(reader: KeyReader, history: list[str]) -> str:
-    """带历史/光标/补全的行编辑；Ctrl+C/Esc/D/R 抛对应异常。"""
+    """prompt_toolkit 行编辑；Ctrl+C/Esc/D/R 抛对应异常（与旧语义兼容）。"""
+    # 非 TTY（管道/IDE 终端/测试）走 legacy：prompt_toolkit 需要真实终端，
+    # 管道输入下会挂起等待
+    if not sys.stdin.isatty():
+        return _read_line_legacy(reader, history)
+    try:
+        session = make_prompt_session(history)
+    except Exception:
+        # prompt_toolkit 不可用（极老环境）时回退旧实现
+        return _read_line_legacy(reader, history)
+    try:
+        text = session.prompt(
+            paint("› ", "green", bold=True),
+            multiline=False,
+            wrap_lines=True,
+        )
+    except KeyboardInterrupt:
+        # 空输入 Ctrl+C：转 Interrupted(False)（双击退出由主循环处理）；
+        # 有输入时 prompt_toolkit 默认清空并继续，不抛异常
+        raise Interrupted(False)
+    except EOFError:
+        raise QuitRequested()
+    if text and (not history or history[-1] != text):
+        history.append(text)
+        del history[:-200]
+    return text
+
+
+def _read_line_legacy(reader: KeyReader, history: list[str]) -> str:
+    """旧实现：仅当 prompt_toolkit 不可用/非 TTY 时回退（保持 Ctrl+C 语义）。"""
+    if not sys.stdin.isatty():
+        # 管道/IDE 输入：直接行读取（msvcrt 在非 TTY 下 kbhit 恒 False 会死等）
+        try:
+            line = sys.stdin.readline()
+        except KeyboardInterrupt:
+            raise Interrupted(False)
+        line = line.rstrip("\r\n")
+        if line and (not history or history[-1] != line):
+            history.append(line)
+            del history[:-200]
+        return line
     buf = ""
     pos = 0
     draft = ""

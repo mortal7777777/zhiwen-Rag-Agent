@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import cli_agent as c
 
 
@@ -178,18 +180,32 @@ def test_history_roundtrip(tmp_path):
 # ------------------------------------------------------------------ 键盘中断安全
 
 
+def _force_legacy_read_line(monkeypatch, fake_get):
+    """强制 read_line 走 legacy 键处理路径（TTY 模拟）：
+    - sys.stdin.isatty() → True（绕过管道分支）
+    - make_prompt_session → 抛异常（绕过 prompt_toolkit，进入键循环）
+    - KeyReader.get → fake（模拟键盘事件/Ctrl+C 信号路径）
+    """
+    import cli_agent as c_mod
+
+    monkeypatch.setattr(c.KeyReader, "get", fake_get)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+
+    def _boom(_history):
+        raise RuntimeError("prompt_toolkit 不可用（测试强制 legacy）")
+
+    monkeypatch.setattr(c_mod, "make_prompt_session", _boom)
+    return c_mod
+
+
 def test_read_line_ctrl_c_at_empty_prompt_stays_in_cli(monkeypatch):
     """提示符下 Ctrl+C（Windows 信号路径 KeyboardInterrupt）必须转成
     Interrupted 而不是逃逸杀死整个 CLI。"""
-    import cli_agent as c_mod
-
-    calls = []
 
     def fake_get(self, timeout=None):
-        calls.append(timeout)
         raise KeyboardInterrupt()
 
-    monkeypatch.setattr(c.KeyReader, "get", fake_get)
+    c_mod = _force_legacy_read_line(monkeypatch, fake_get)
     try:
         c_mod.read_line(c.KeyReader(), [])
         assert False, "应抛出 Interrupted"
@@ -209,9 +225,9 @@ def test_read_line_ctrl_c_with_text_keeps_input(monkeypatch):
             return c.Key("char", "你")
         raise KeyboardInterrupt()
 
-    monkeypatch.setattr(c.KeyReader, "get", fake_get)
+    c_mod = _force_legacy_read_line(monkeypatch, fake_get)
     try:
-        c.read_line(c.KeyReader(), [])
+        c_mod.read_line(c.KeyReader(), [])
         assert False, "应抛出 Interrupted"
     except c.Interrupted as exc:
         assert exc.had_text is True
