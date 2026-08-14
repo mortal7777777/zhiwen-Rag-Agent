@@ -362,6 +362,18 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
    清单顺序匹配第 N 项（1-based），兼容模型把"步骤 1"写成数字的常见情况。
 4. 测试 **82 通过**；提交 `90b5417`。
 
+### 4.17 沙箱策略切换：默认 subprocess（Claude Code/Codex 同款）
+- **决策**：用户明确要求日常开发用 Claude/Codex 同款策略——bash 直接在
+  宿主环境执行（`subprocess`），继承 `D:\conda_envs\pytorch_env` 全部依赖；
+  docker 隔离沙箱保留为可选（设置 `command_sandbox: docker` 一键切回）。
+- 实现：无需改代码（`config.py` 默认本就是 `subprocess`）——之前是设置页
+  把 `runtime_overrides` 覆盖成了 `docker` + 只读挂载。通过 API 重置：
+  `PUT /api/settings {"updates":{"command_sandbox":"subprocess","sandbox_workspace_readonly":false}}`。
+- 验证：subprocess 下 `python` 解析到 `D:\conda_envs\pytorch_env\python.exe`，
+  `import langchain_core/pymysql/sqlalchemy` 全部可用，cwd 为项目根。
+- 遗留：`command_allowlist=python, dir, echo` 是"自动放行前缀"，未命中命令
+  仍走 HITL 审批；`--network=none` 等 docker 隔离参数只在 docker 模式生效。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。
