@@ -612,7 +612,6 @@ def _prepare_node(state: AgentState) -> dict:
             )
         if dynamic_prompt_text:
             messages.append(SystemMessage(content=dynamic_prompt_text))
-        messages.append(SystemMessage(content=time_context))
         if project_memory_text:
             messages.append(
                 SystemMessage(content="项目记忆（AGENTS.md）：\n" + project_memory_text)
@@ -623,23 +622,15 @@ def _prepare_node(state: AgentState) -> dict:
             )
         if summary_text:
             messages.append(
-                SystemMessage(
-                    content="以下是对本会话早期内容的摘要（供参考）：\n" + summary_text
-                )
+                SystemMessage(content="以下是对本会话早期内容的摘要（供参考）：\n" + summary_text)
             )
         if memory_summary:
             messages.append(
-                SystemMessage(
-                    content="关于用户（长期记忆摘要，通常应作为默认背景）：\n"
-                    + memory_summary
-                )
+                SystemMessage(content="关于用户（长期记忆摘要，通常应作为默认背景）：\n" + memory_summary)
             )
         if memory_hits:
             messages.append(
-                SystemMessage(
-                    content="相关的长期记忆（如与本轮相关可参考）：\n"
-                    + "\n".join(f"- {item}" for item in memory_hits)
-                )
+                SystemMessage(content="相关的长期记忆（如与本轮相关可参考）：\n" + "\n".join(f"- {item}" for item in memory_hits))
             )
         if vision_descriptions:
             messages.append(
@@ -654,6 +645,9 @@ def _prepare_node(state: AgentState) -> dict:
                 )
             )
         messages.extend(history_messages)
+        # 时间戳是纯背景信息（无指令约束力），放历史之后避免破坏
+        # 静态前缀缓存；模型需要时间时可从该消息读取
+        messages.append(SystemMessage(content=time_context))
         messages.append(HumanMessage(content=question))
 
     # ---- 按开关组装工具 ----
@@ -1396,6 +1390,33 @@ def _run_verify(settings, paths: list[str]) -> list[dict]:
     return results
 
 
+def _slim_tool_result(result: dict, content_limit: int = 8000) -> dict:
+    """工具结果进历史前瘦身：大 content 字段保留首尾、中间省略。
+
+    借鉴 Hermes 的 proactive_prune 思路：模型在本轮已看过完整输出，
+    历史里只需要 summary + 关键片段供下一轮决策；小输出原样保留，
+    不破坏 provider 已建立的缓存前缀。返回新 dict，不改原 result。
+    """
+    if not isinstance(result, dict):
+        return result
+    slim = dict(result)
+    for key in ("content", "output", "entries", "matches"):
+        val = slim.get(key)
+        if isinstance(val, str) and len(val) > content_limit:
+            head = val[: int(content_limit * 0.6)]
+            tail = val[-int(content_limit * 0.3) :]
+            slim[key] = (
+                f"{head}\n…（中间省略 {len(val) - len(head) - len(tail)} 字符，"
+                f"共 {len(val)} 字符，如需完整内容请重新调用工具）…\n{tail}"
+            )
+        elif isinstance(val, list) and len(val) > 60:
+            # 超长列表（目录/匹配项）只保留前 60 条 + 计数
+            slim[key] = val[:60] + [
+                {"_omitted": f"… 共 {len(val)} 项，仅显示前 60 项"}
+            ]
+    return slim
+
+
 def _tools_node(state: AgentState) -> dict:
     service: LangGraphAgentService = state["service"]
     bus: EventBus = state["bus"]
@@ -1617,9 +1638,14 @@ def _tools_node(state: AgentState) -> dict:
             },
         )
 
+        # 工具结果进历史前瘦身：content 类字段超过阈值时保留首尾、
+        # 中间省略（Hermes proactive_prune 思路）。模型已在本轮看过完整
+        # 输出，下一轮只需 summary + 关键片段；小输出原样保留，
+        # 不破坏工具已发的缓存前缀。
+        slim_result = _slim_tool_result(result)
         messages.append(
             ToolMessage(
-                content=json.dumps(result, ensure_ascii=False),
+                content=json.dumps(slim_result, ensure_ascii=False),
                 name=name,
                 tool_call_id=tc.get("id") or "",
             )

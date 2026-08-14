@@ -29,6 +29,7 @@
         ref="uploadRef"
         drag
         multiple
+        v-model:file-list="fileList"
         :auto-upload="false"
         accept=".txt,.md,.csv,.doc,.docx,.xlsx,.pdf,.epub"
         :disabled="uploading"
@@ -99,6 +100,7 @@ const uploading = ref(false)
 const rebuilding = ref(false)
 const tableLoading = ref(false)
 const uploadRef = ref(null)
+const fileList = ref([])
 
 function formatSize(size) {
   if (size < 1024) return `${size} B`
@@ -117,9 +119,10 @@ async function refresh() {
 }
 
 async function handleUpload() {
-  // 从 el-upload 组件内部获取已选择的文件
-  const uploadFiles = uploadRef.value?.uploadFiles ?? []
-  const files = uploadFiles.map((item) => item.raw).filter(Boolean)
+  // el-upload 组件实例未暴露 uploadFiles（Element Plus 2.9 只暴露
+  // abort/submit/clearFiles/handleStart/handleRemove），必须用
+  // v-model:file-list 绑定的本地数组读文件
+  const files = fileList.value.map((item) => item.raw).filter(Boolean)
   if (!files.length) {
     ElMessage.warning('请先选择要上传的文件')
     return
@@ -130,6 +133,7 @@ async function handleUpload() {
     ElMessage.success(`已上传 ${files.length} 个文件并更新索引`)
     // 清空上传组件内部的文件列表
     uploadRef.value?.clearFiles()
+    fileList.value = []
     await refresh()
   } catch (error) {
     ElMessage.error(error.response?.data?.detail || '上传失败')
