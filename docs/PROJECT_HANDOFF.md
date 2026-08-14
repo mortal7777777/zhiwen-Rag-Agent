@@ -344,6 +344,24 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 3. 测试仍 **82 通过**（新增并发读取不影响现有单测，repo.get_meta 被
    monkeypatch 时回退传入 db 参数，测试兼容）。
 
+### 4.16 本轮（CLI 体验：会话工作目录 + 审批即时生效 + todo 数字序号）
+1. **会话工作目录跟随 CLI 启动目录**（用户反馈：新目录启动 myragagent 时
+   bash 沙箱目录与文件系统不一致）：
+   - `tools_extra._resolve_workspace` 新增 `project_dir` 参数；所有
+     `make_*_tool` / `make_agent_tools` / `_run_command` / `_subagent_tools`
+     / `_dispatch_tasks` 全链路传递；
+   - **conversations 表新增 `project_dir` 列**（已 ALTER TABLE 落地）：
+     新会话建号时保存启动目录，`/resume` 恢复时读取会话保存的目录，
+     从任意目录恢复会话工作目录都一致；
+   - 优先级：`tool_workspace` 显式配置 > 会话 project_dir > 项目根。
+2. **审批数字键/回车即时生效**（用户反馈：按数字后还要再按回车）：
+   `prompt_permission` 去掉按数字后的 `read_line` reason 输入环节，
+   数字键/回车/Esc 按下立即 resolve 并继续执行。
+3. **todo_update 数字序号匹配**（run 160 里模型用 `task_id="1"` 连续报
+   "标记失败：任务不存在"）：`complete/remove` 支持纯数字 task_id 按
+   清单顺序匹配第 N 项（1-based），兼容模型把"步骤 1"写成数字的常见情况。
+4. 测试 **82 通过**；提交 `90b5417`。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。
