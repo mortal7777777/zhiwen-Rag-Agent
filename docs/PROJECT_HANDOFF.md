@@ -374,6 +374,29 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 - 遗留：`command_allowlist=python, dir, echo` 是"自动放行前缀"，未命中命令
   仍走 HITL 审批；`--network=none` 等 docker 隔离参数只在 docker 模式生效。
 
+### 4.18 CLI 行编辑换 prompt_toolkit（修输入显示/光标/Ctrl+C）
+- **背景**：用户反馈 CLI 输入三个问题——最后一个字符看不到、光标偶尔
+  移动不了/无法回车、Ctrl+C 结束不了。根因：手写 KeyReader 线程 + 手写
+  ANSI 光标控制（`_render_input`/`input_layout`），Windows 终端上宽度计算、
+  光标恢复、信号与读键线程竞争均有 bug。
+- **方案**：`read_line` 换 **prompt_toolkit**（Hermes/Claude Code 同款方案），
+  光标、宽字符、跨行、历史、Tab 补全全部由它接管：
+  - `make_prompt_session()`：PromptSession + InMemoryHistory + 补全适配
+    （复用 `complete()` 的 `/` 命令与 `/tools` 候选）+ 键绑定
+    （Esc 清空 / Ctrl+D 空输入退出 / Ctrl+R 重发）；
+  - Ctrl+C：空输入 → `Interrupted(False)`（主循环双击退出逻辑不变），
+    有输入 → prompt_toolkit 默认清空继续，语义与旧实现一致；
+  - **非 TTY 回退**：`sys.stdin.isatty()==False`（管道/IDE/测试）走
+    `_read_line_legacy`，其中非 TTY 直接 `readline()`（msvcrt 在管道下
+    kbhit 恒 False 会死等，旧实现有此隐患）；
+  - git-bash（xterm）下 prompt_toolkit 抛 NoConsoleScreenBufferError，
+    try/except 自动回退 legacy；cmd.exe/myragagent 走完整 prompt_toolkit。
+- KeyReader 保留：SSE 流式期间的审批弹窗（`prompt_permission`）与
+  Ctrl+C 打断仍用它（单键读取，不需要行编辑）。
+- 测试：82 通过（2 个 Ctrl+C 测试改为强制 legacy 路径 + mock
+  KeyReader.get）；requirements.txt 加 `prompt_toolkit>=3.0.43`。
+- 提交 `896066b`。
+
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。
 3. **修复 run#55**：write_file 绝对路径失败烧光预算导致任务半途而废 → 失败不烧预算 + 重试引导 + 路径容错。
