@@ -1213,15 +1213,40 @@ def _agent_node(state: AgentState) -> dict:
             messages,
             config={"callbacks": [get_usage_collector()]},
         )
+        # deepseek 等推理模型在工具调用轮次会先输出大量过渡思考文本
+        # （"我将调用工具…"），与 tool_calls 同轮出现。这些文本不是最终
+        # 回答，直接展示会污染对话。策略：流式时先缓冲；一旦出现
+        # tool_call_chunks 判定为工具轮，丢弃已缓冲的思考文本；无工具
+        # 调用的纯回答轮次才把缓冲文本作为正式回答发出。
+        # 另外：模型偶尔用 XML 风格工具调用（如 <tool_calls>/<invoke>），
+        # langchain 不识别，同样视为工具轮丢弃文本。
+        buf_parts: list[str] = []
+        tool_mode = False
         for chunk in stream:
             if stopped():
                 runtime["status"] = "stopped"
                 break
             chunks.append(chunk)
+            if getattr(chunk, "tool_call_chunks", None):
+                tool_mode = True
+                buf_parts.clear()  # 工具轮：丢弃已流出的过渡思考文本
             content = getattr(chunk, "content", None)
             if content:
-                runtime["final_text"] += content
-                bus.emit("token", content)
+                if tool_mode:
+                    continue
+                buf_parts.append(content)
+                # 模型偶尔用 XML 风格工具调用，langchain 不解析为
+                # tool_calls；检测到标记视为工具轮，丢弃缓冲文本
+                if any(
+                    m in content
+                    for m in ("<tool_calls", "<invoke", "<tool_use", "<function_calls")
+                ):
+                    tool_mode = True
+                    buf_parts.clear()
+        if not tool_mode and buf_parts:
+            text = "".join(buf_parts)
+            runtime["final_text"] += text
+            bus.emit("token", text)
     finally:
         service.rag.release_llm()
 
@@ -1252,8 +1277,11 @@ def _agent_node(state: AgentState) -> dict:
         get_usage_collector().add_cache_usage(dict(usage))
 
     tool_calls = list(getattr(merged, "tool_calls", None) or [])
+    # 工具轮：content 是过渡思考文本，不写入消息历史（避免下一轮
+    # 重复发送 + 污染上下文）；只保留 tool_calls 供 tools 节点执行
+    stored_content = "" if tool_calls else (merged.content or "")
     messages.append(
-        AIMessage(content=merged.content or "", tool_calls=tool_calls)
+        AIMessage(content=stored_content, tool_calls=tool_calls)
     )
     state["pending_tool_calls"] = tool_calls
 

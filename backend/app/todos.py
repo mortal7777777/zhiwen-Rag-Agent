@@ -130,6 +130,15 @@ def refresh_todos_for_plan(
     has_source = any(i.get("source") == "plan" for i in items)
     plan_items = [i for i in items if i.get("source") == "plan"] if has_source else items
     new_texts = [str(s).strip() for s in plan_steps if str(s).strip()]
+    # 计划步骤去重：模型生成 plan 时可能产出语义重复的步骤，
+    # 去重避免任务清单出现重复项（如"检索知识库"出现两次）
+    seen_texts: set[str] = set()
+    deduped: list[str] = []
+    for t in new_texts:
+        if t not in seen_texts:
+            seen_texts.add(t)
+            deduped.append(t)
+    new_texts = deduped
     if plan_items and [str(i.get("text", "")).strip() for i in plan_items] == new_texts:
         return items  # 同一计划：继续沿用现有进度
 
@@ -285,11 +294,18 @@ def make_todo_tool(db: Session | None, conversation_id: int | None):
             if op == "add":
                 if not text.strip():
                     return {"error": "参数缺失：add 需要 text", "summary": "新增失败：缺少任务内容"}
+                txt = text.strip()[:200]
+                # 与已有任务（含 plan 项）文本相同则不重复添加
+                if any(str(i.get("text", "")).strip() == txt for i in items):
+                    return {
+                        "summary": f"任务已存在，跳过重复添加：{txt[:40]}",
+                        "todos": items,
+                    }
                 now = time.time()
                 items.append(
                     {
                         "id": f"todo_{uuid.uuid4().hex[:8]}",
-                        "text": text.strip()[:200],
+                        "text": txt,
                         "done": False,
                         "source": "manual",
                         "created_at": now,
@@ -297,7 +313,7 @@ def make_todo_tool(db: Session | None, conversation_id: int | None):
                     }
                 )
                 save_todos(local, conversation_id, items)
-                return {"summary": f"已新增任务：{text.strip()[:40]}", "todos": items}
+                return {"summary": f"已新增任务：{txt[:40]}", "todos": items}
             if op == "set":
                 if tasks is None:
                     return {
