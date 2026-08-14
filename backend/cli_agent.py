@@ -1352,6 +1352,7 @@ def main() -> None:
 
     reader = KeyReader()
     screen = Screen()
+    last_ctrl_c = 0.0  # 空提示符下双击 Ctrl+C 退出（Claude Code 风格）
     try:
         has_agents = os.path.exists(os.path.join(cwd, "AGENTS.md"))
         print_banner(model, tool_mode, has_agents)
@@ -1359,8 +1360,16 @@ def main() -> None:
             try:
                 question = read_line(reader, history)
             except Interrupted as exc:
-                # Ctrl+C/Esc：清空当前输入并留在 CLI，绝不退出
                 print()
+                if exc.had_text:
+                    # 输入框有内容：Ctrl+C/Esc 清空输入，留在 CLI
+                    continue
+                # 空提示符：第一次 Ctrl+C 提示，1.5s 内再按一次退出回终端
+                now = time.time()
+                if now - last_ctrl_c <= 1.5:
+                    break
+                last_ctrl_c = now
+                print(paint("再按一次 Ctrl+C 退出 CLI", "dim"))
                 continue
             except QuitRequested:
                 print()

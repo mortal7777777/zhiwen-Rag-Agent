@@ -315,11 +315,13 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
    `NameError`（CLI 报 `✖ name 'run_hooks' is not defined`，正常对话直接断）。
    修复：`_tools_node` 补上同款局部导入；新增回归单测
    （检查 `_tools_node` 源码含该导入，防止再次漏掉）。
-2. **CLI Ctrl+C 加固（三处）**：
+2. **CLI Ctrl+C 加固（Claude Code 风格）**：
    - 提示符下 Ctrl+C（Windows 信号路径 KeyboardInterrupt）此前从
      `reader.get()` 逃逸，直接打到 `main()` 外层 finally 退出整个 CLI；
-     现在 `read_line` 内捕获转成 `Interrupted`，主循环里 Ctrl+C/Esc
-     一律留在 CLI 不退出（退出只走 Ctrl+D 或 /exit /quit）；
+     现在 `read_line` 内捕获转成 `Interrupted`，主循环语义对齐 Claude Code：
+     输入框有内容时 Ctrl+C/Esc 清空输入留在 CLI；**空提示符下第一次 Ctrl+C
+     提示“再按一次退出”，1.5s 内再按一次退出回终端命令行**（双击退出），
+     退出也可走 Ctrl+D 或 /exit /quit；
    - 打断生成的清理期间（`_cancel_run` 最多 3s）再按 Ctrl+C 会二次逃逸退出，
      现在捕获视为“已打断”处理；
    - `_run_windows` 键盘线程捕获 KeyboardInterrupt 转成 ctrl-c 事件塞回队列，
