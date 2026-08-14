@@ -449,10 +449,16 @@ class KeyReader:
 
         try:
             while not self._stop.is_set():
-                if not msvcrt.kbhit():
-                    time.sleep(0.015)
+                try:
+                    if not msvcrt.kbhit():
+                        time.sleep(0.015)
+                        continue
+                    ch = msvcrt.getwch()
+                except KeyboardInterrupt:
+                    # Windows 控制台 Ctrl+C：信号由主线程处理，这里把按键转成
+                    # 标准 ctrl-c 事件塞回队列，避免键盘线程被信号打死
+                    self._push(Key("ctrl-c"))
                     continue
-                ch = msvcrt.getwch()
                 if ch in ("\x00", "\xe0"):
                     nxt = msvcrt.getwch()
                     mapping = {
@@ -692,7 +698,10 @@ def read_line(reader: KeyReader, history: list[str]) -> str:
     sys.stdout.write(paint("› ", "green", bold=True))
     sys.stdout.flush()
     while True:
-        key = reader.get()
+        try:
+            key = reader.get()
+        except KeyboardInterrupt:  # Windows 控制台 Ctrl+C 走信号路径
+            raise Interrupted(bool(buf))
         if key is None:
             continue
         try:
@@ -1280,7 +1289,11 @@ def stream_question(
     finally:
         done_flag.set()
         if interrupted:
-            cancelled = _cancel_run(base_url, run_id)
+            try:
+                cancelled = _cancel_run(base_url, run_id)
+            except KeyboardInterrupt:
+                # 打断清理期间再按 Ctrl+C：不再逃逸，视为已打断即可
+                cancelled = False
             # 立即关闭连接，让后端 SSE 生成器尽快感知断开
             try:
                 for resp in resp_holder:
@@ -1346,10 +1359,9 @@ def main() -> None:
             try:
                 question = read_line(reader, history)
             except Interrupted as exc:
+                # Ctrl+C/Esc：清空当前输入并留在 CLI，绝不退出
                 print()
-                if exc.had_text:
-                    continue
-                break
+                continue
             except QuitRequested:
                 print()
                 break

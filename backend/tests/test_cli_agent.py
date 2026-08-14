@@ -173,3 +173,45 @@ def test_history_roundtrip(tmp_path):
     assert c.load_history(str(tmp_path)) == []
     c.save_history(str(tmp_path), ["问题一", "问题二"])
     assert c.load_history(str(tmp_path)) == ["问题一", "问题二"]
+
+
+# ------------------------------------------------------------------ 键盘中断安全
+
+
+def test_read_line_ctrl_c_at_empty_prompt_stays_in_cli(monkeypatch):
+    """提示符下 Ctrl+C（Windows 信号路径 KeyboardInterrupt）必须转成
+    Interrupted 而不是逃逸杀死整个 CLI。"""
+    import cli_agent as c_mod
+
+    calls = []
+
+    def fake_get(self, timeout=None):
+        calls.append(timeout)
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(c.KeyReader, "get", fake_get)
+    try:
+        c_mod.read_line(c.KeyReader(), [])
+        assert False, "应抛出 Interrupted"
+    except c.Interrupted as exc:
+        assert exc.had_text is False
+
+
+def test_read_line_ctrl_c_with_text_keeps_input(monkeypatch):
+    """输入框里有内容时 Ctrl+C 转 Interrupted(had_text=True)。"""
+
+    def fake_get(self, timeout=None):
+        # 第一次返回一个字符，第二次抛 KeyboardInterrupt（Windows 信号路径）
+        if not hasattr(self, "_n"):
+            self._n = 0
+        if self._n == 0:
+            self._n = 1
+            return c.Key("char", "你")
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(c.KeyReader, "get", fake_get)
+    try:
+        c.read_line(c.KeyReader(), [])
+        assert False, "应抛出 Interrupted"
+    except c.Interrupted as exc:
+        assert exc.had_text is True

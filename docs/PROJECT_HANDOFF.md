@@ -1,6 +1,6 @@
 # 项目交接文档（供新会话快速上手）
 
-> 最后更新：2026-08-12（第二轮：CUDA 容错 + git 版本保护 + pytest，见 §4.2）
+> 最后更新：2026-08-14（第四轮：run_hooks 漏导入致命修复 + CLI Ctrl+C 加固，见 §4.14）
 > 目的：把项目现状、架构、环境、最近改动与待办一次性交底，新会话先读本文件即可工作。
 
 ## 0. 一句话定位
@@ -308,6 +308,23 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
    已脱离沙箱（提权）重启恢复，实测回答 82 输出 tokens、prompt 3597 正常。
    CLI 对 Connection error 增加“检查后端日志/网络”提示。
 3. 测试增至 **79 通过**（新增 `input_layout` 布局单测）。
+
+### 4.14 本轮（run_hooks 漏导入致命修复 + CLI Ctrl+C 加固）
+1. **致命 bug：`_tools_node` 调用 `run_hooks` 但从未导入**。`from ..hooks
+   import run_hooks` 只存在于 `_subagent_node`，主 agent 路径每次调工具都
+   `NameError`（CLI 报 `✖ name 'run_hooks' is not defined`，正常对话直接断）。
+   修复：`_tools_node` 补上同款局部导入；新增回归单测
+   （检查 `_tools_node` 源码含该导入，防止再次漏掉）。
+2. **CLI Ctrl+C 加固（三处）**：
+   - 提示符下 Ctrl+C（Windows 信号路径 KeyboardInterrupt）此前从
+     `reader.get()` 逃逸，直接打到 `main()` 外层 finally 退出整个 CLI；
+     现在 `read_line` 内捕获转成 `Interrupted`，主循环里 Ctrl+C/Esc
+     一律留在 CLI 不退出（退出只走 Ctrl+D 或 /exit /quit）；
+   - 打断生成的清理期间（`_cancel_run` 最多 3s）再按 Ctrl+C 会二次逃逸退出，
+     现在捕获视为“已打断”处理；
+   - `_run_windows` 键盘线程捕获 KeyboardInterrupt 转成 ctrl-c 事件塞回队列，
+     避免键盘线程被信号打死、之后输入全部失灵。
+3. 测试增至 **82 通过**（新增 2 个 read_line Ctrl+C 单测 + 1 个 run_hooks 回归）。
 
 1. **HITL 人工确认**落地：`permissions.py` + tools 节点审批门 + 审批 API + 前端审批卡 + CLI 审批。
 2. **工具集升级**：`tools_extra.py` 重写为 `list_dir/read_file/grep_search/write_file/edit_file/delete_file/bash`；原子写入；删除进 `.agent_trash/`；`edit_file` 返回 `diff.before/after` 供可视化审批。

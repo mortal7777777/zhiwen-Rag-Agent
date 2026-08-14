@@ -1404,6 +1404,7 @@ def _tools_node(state: AgentState) -> dict:
         is_sensitive_tool,
     )
     from ..tools_extra import command_allowed
+    from ..hooks import run_hooks
 
     permission_manager = get_permission_manager()
     try:

@@ -257,3 +257,19 @@ def test_compose_system_prompt_static_dynamic_split():
     assert "你是助手。" not in dynamic
     # 完整 = 静态 + 动态 的信息覆盖（内容不重复，可拼回）
     assert full.count("步骤A") == 1 and static.count("步骤A") == 0
+
+
+# ---------------- 回归：_tools_node 必须能解析 run_hooks ----------------
+
+def test_tools_node_can_resolve_run_hooks():
+    """回归：_tools_node 内调用了 run_hooks 但之前漏掉 import，
+    主 agent 每次调工具都 NameError（CLI 显示 ✖ name 'run_hooks' is not defined）。
+    检查函数源码含局部导入，且模块级不依赖（保持与 _subagent_node 一致）。"""
+    import inspect
+
+    from app.agent.langgraph_agent import _tools_node
+
+    src = inspect.getsource(_tools_node)
+    assert "from ..hooks import run_hooks" in src, (
+        "_tools_node 缺少 run_hooks 局部导入，工具调用会 NameError"
+    )
