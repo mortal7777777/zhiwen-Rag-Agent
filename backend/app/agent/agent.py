@@ -39,7 +39,7 @@ from ..config import Settings
 from ..db import repository as repo
 from ..rag.service import RAGService
 from ..runtime_config import chat_provider_config, effective, vision_provider_config
-from ..tracing import get_usage_collector, reset_usage, usage_summary, write_trace
+from ..tracing import get_aux_usage_collector, get_usage_collector, reset_usage, usage_summary, write_trace
 from .context import ContextService, estimate_tokens, trim_history_for_budget
 from .prompts import compose_system_prompt
 from .tools import build_tools, extract_sources
@@ -891,7 +891,7 @@ class AgentService:
                         )
                     )
                 ],
-                config={"callbacks": [get_usage_collector()]},
+                config={"callbacks": [get_aux_usage_collector()]},
             )
             title = (response.content or "").strip().strip('"“”')
             if title:

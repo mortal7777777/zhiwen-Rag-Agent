@@ -21,6 +21,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 logger = logging.getLogger(__name__)
 
 _local = threading.local()
+_aux_local = threading.local()
 
 
 def get_usage_collector() -> "UsageCollector":
@@ -32,9 +33,25 @@ def get_usage_collector() -> "UsageCollector":
     return collector
 
 
+def get_aux_usage_collector() -> "UsageCollector":
+    """辅助调用的独立用量收集器（线程隔离）。
+
+    标题生成、计划生成、会话摘要、记忆召回、思考摘要等辅助 LLM 调用
+    每次使用独立消息、不共享主循环的前缀缓存，若计入同一收集器会
+    把整体缓存命中率稀释到无意义。单独统计，便于准确评估主循环
+    的缓存命中率与总成本。
+    """
+    collector = getattr(_aux_local, "collector", None)
+    if collector is None:
+        collector = UsageCollector()
+        _aux_local.collector = collector
+    return collector
+
+
 def reset_usage() -> None:
-    """开始一轮 Agent 运行前清零当前线程的用量统计。"""
+    """开始一轮 Agent 运行前清零当前线程的用量统计（含辅助调用收集器）。"""
     get_usage_collector().reset()
+    get_aux_usage_collector().reset()
 
 
 def usage_summary() -> dict:
@@ -135,6 +152,26 @@ class UsageCollector(BaseCallbackHandler):
                 "cache_hit_tokens": self._cache_hit_tokens,
                 "cache_miss_tokens": self._cache_miss_tokens,
             }
+
+
+def usage_summary_with_aux() -> dict:
+    """主循环用量 + 辅助调用用量（合并输出，aux 字段单独标注）。
+
+    主循环（agent 决策/工具循环）共享前缀缓存，命中率才有意义；
+    辅助调用（标题/计划/摘要/记忆/子代理）每次独立请求，命中率为 0。
+    aux 字段单独列出，避免稀释主循环命中率，同时保留真实总成本。
+    """
+    main = get_usage_collector().summary()
+    aux = get_aux_usage_collector().summary()
+    combined = dict(main)
+    combined["aux_llm_calls"] = aux["llm_calls"]
+    combined["aux_prompt_tokens"] = aux["prompt_tokens"]
+    combined["aux_completion_tokens"] = aux["completion_tokens"]
+    combined["aux_total_tokens"] = aux["total_tokens"]
+    combined["total_with_aux"] = (
+        main["total_tokens"] + aux["total_tokens"]
+    )
+    return combined
 
 
 def write_trace(settings, run_id, payload: dict) -> None:

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..db import repository as repo
-from ..tracing import get_usage_collector
+from ..tracing import get_aux_usage_collector
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,14 @@ def estimate_tokens(text: str) -> int:
 
 
 def trim_history_for_budget(rows: list[dict], budget_tokens: int) -> list[dict]:
-    """从最旧的消息开始裁剪，直到总 token 不超过预算（保留最近的消息）。"""
+    """从最旧的消息开始裁剪，直到总 token 不超过预算（保留最近的消息）。
+
+    加最小回收门控（借鉴 Hermes min_reclaim 思路）：只有裁剪确实能
+    回收显著 token 时才动手。裁剪会改写已发送的历史、破坏 provider
+    前缀缓存——每轮小幅裁剪会让缓存前缀几乎每轮都断，命中率崩塌；
+    一次性回收足够多才值得断一次缓存。回收 < 15% 预算时放弃裁剪，
+    让上层压缩（compact_conversation）处理。
+    """
     if budget_tokens <= 0:
         return rows[-1:]
     kept: list[dict] = []
@@ -76,6 +83,11 @@ def trim_history_for_budget(rows: list[dict], budget_tokens: int) -> list[dict]:
         kept.append(row)
         total += tokens
     kept.reverse()
+    # 最小回收门控：裁剪掉的 token 不足预算 15% 时不值得断缓存前缀
+    total_all = sum(estimate_tokens(r["content"]) for r in rows)
+    reclaimed = total_all - total
+    if reclaimed < budget_tokens * 0.15:
+        return rows
     return kept
 
 
@@ -88,10 +100,10 @@ class ContextService:
         self.chat = chat
 
     def _invoke(self, messages):
-        """调用低温模型时按当前线程注入用量收集器。"""
+        """调用低温模型时按当前线程注入辅助用量收集器（与主循环分开统计）。"""
         return self.chat.invoke(
             messages,
-            config={"callbacks": [get_usage_collector()]},
+            config={"callbacks": [get_aux_usage_collector()]},
         )
 
     # ---------------- 会话滚动摘要 ----------------
