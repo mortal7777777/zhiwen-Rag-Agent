@@ -45,7 +45,7 @@ DEFAULT_ROOTS = [
     # 技能在插件缓存目录里，不在 ~/.claude/skills）。版本号会随插件升级变化，
     # 用 glob 在扫描时动态展开。
     ("claude", _expand_plugin_skill_root("ecc/*/*/skills"), "flat"),
-    ("claude", _expand_plugin_skill_root("anthropic-agent-skills/*/skills"), "flat"),
+    ("claude", _expand_plugin_skill_root("anthropic-agent-skills/*/*/skills"), "flat"),
     ("hermes", r"D:\agents\hermes\skills", "nested"),
     # Hermes 的可选技能与主技能统一归为 "hermes" 来源，避免界面出现两个 Hermes 选项
     ("hermes", r"D:\agents\hermes\optional-skills", "nested"),
