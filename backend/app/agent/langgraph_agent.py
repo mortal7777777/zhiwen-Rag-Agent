@@ -1407,7 +1407,16 @@ def _parse_xml_tool_calls(text: str) -> list[dict]:
         ):
             k = pm.group(1).strip()
             v = pm.group(2).strip()
-            if k:
+            if not k:
+                continue
+            # 参数值若为 JSON 数组/对象则自动解析（如 todo_update.tasks），
+            # 避免字符串传递导致工具调用失败
+            if v.startswith(("[", "{")):
+                try:
+                    args[k] = json.loads(v)
+                except Exception:
+                    args[k] = v
+            else:
                 args[k] = v
         # 参数：JSON 内嵌（<arguments>{...}</arguments> 或裸 JSON）
         if not args:

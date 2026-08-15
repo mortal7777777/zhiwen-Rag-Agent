@@ -47,7 +47,7 @@ def test_wrap_styled_indent_and_hard_break():
 
 
 def test_fmt_helpers():
-    assert c.fmt_dur(0.5) == "0.5s"
+    assert c.fmt_dur(0.5) == "500ms"
     assert c.fmt_dur(95.2) == "1m35s"
     assert c.fmt_dur(3725) == "1h02m"
     assert c.fmt_num(999) == "999"

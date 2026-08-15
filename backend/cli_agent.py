@@ -177,6 +177,8 @@ def wrap_styled(
 
 def fmt_dur(seconds: float) -> str:
     seconds = max(0.0, seconds)
+    if seconds < 1.0:
+        return f"{int(seconds * 1000)}ms"
     if seconds < 60:
         return f"{seconds:.1f}s"
     total = int(seconds)
