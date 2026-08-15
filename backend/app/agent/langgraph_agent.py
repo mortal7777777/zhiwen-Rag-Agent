@@ -1286,9 +1286,26 @@ def _agent_node(state: AgentState) -> dict:
         get_usage_collector().add_cache_usage(dict(usage))
 
     tool_calls = list(getattr(merged, "tool_calls", None) or [])
+    merged_text = merged.content or ""
+    # ---- XML 风格工具调用兜底解析 ----
+    # deepseek 等模型偶尔输出 <tool_calls><invoke name="bash">…</invoke></tool_calls>
+    # 的 XML 格式（而非 OpenAI JSON tool_calls）。流式单 chunk 检测容易
+    # 因标签被切分而漏判；这里对合并后的完整文本做兜底：
+    # 1. 检测到 XML 工具调用标记 → 丢弃正文文本（不展示给用户）
+    # 2. 尽力解析出 (工具名, 参数) 转成标准 tool_calls 执行
+    if not tool_calls and (
+        "<tool_calls" in merged_text
+        or "<invoke" in merged_text
+        or "<tool_use" in merged_text
+        or "<function_calls" in merged_text
+    ):
+        parsed_xml_calls = _parse_xml_tool_calls(merged_text)
+        if parsed_xml_calls:
+            tool_calls = parsed_xml_calls
+            logger.info("XML 工具调用兜底解析：%s", [tc.get("name") for tc in parsed_xml_calls])
     # 工具轮：content 是过渡思考文本，不写入消息历史（避免下一轮
     # 重复发送 + 污染上下文）；只保留 tool_calls 供 tools 节点执行
-    stored_content = "" if tool_calls else (merged.content or "")
+    stored_content = "" if tool_calls else merged_text
     messages.append(
         AIMessage(content=stored_content, tool_calls=tool_calls)
     )
@@ -1357,6 +1374,70 @@ def _agent_node(state: AgentState) -> dict:
 # ============================================================
 # 节点：tools（执行工具 + 回填）
 # ============================================================
+
+
+def _parse_xml_tool_calls(text: str) -> list[dict]:
+    """解析 XML 风格工具调用文本（deepseek 等模型的兜底格式）。
+
+    支持两种常见形态：
+      <tool_calls><invoke name="bash"><parameter name="command">ls</parameter></invoke></tool_calls>
+      <tool_use name="bash"><parameter name="command">ls</parameter></tool_use>
+    返回 langchain AIMessage.tool_calls 格式的列表，解析失败返回空列表。
+    """
+    import re as _re
+
+    calls: list[dict] = []
+    # 匹配 <invoke name="X"> 或 <tool_use name="X"> 或 <function name="X">
+    pattern = _re.compile(
+        r"<(?:invoke|tool_use|function|tool)\s+name=[\"']([^\"']+)[\"'][^>]*>"
+        r"(.*?)</(?:invoke|tool_use|function|tool)>",
+        _re.S,
+    )
+    for m in pattern.finditer(text):
+        name = m.group(1).strip()
+        body = m.group(2)
+        if not name:
+            continue
+        args: dict = {}
+        # 参数：<parameter name="k">v</parameter>
+        for pm in _re.finditer(
+            r"<parameter\s+name=[\"']([^\"']+)[\"'][^>]*>(.*?)</parameter>",
+            body,
+            _re.S,
+        ):
+            k = pm.group(1).strip()
+            v = pm.group(2).strip()
+            if k:
+                args[k] = v
+        # 参数：JSON 内嵌（<arguments>{...}</arguments> 或裸 JSON）
+        if not args:
+            for am in _re.finditer(
+                r"<arguments[^>]*>(.*?)</arguments>", body, _re.S
+            ):
+                raw = am.group(1).strip()
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        args = parsed
+                except Exception:
+                    pass
+        if not args:
+            # 裸 JSON 兜底（body 本身就是 JSON）
+            try:
+                parsed = json.loads(body.strip())
+                if isinstance(parsed, dict):
+                    args = parsed
+            except Exception:
+                pass
+        calls.append(
+            {
+                "name": name,
+                "args": args,
+                "id": f"xml_{len(calls)}",
+                "type": "tool_call",
+            }
+        )
+    return calls
 
 
 def _pick_verify_command(settings, path: str) -> str | None:

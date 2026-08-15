@@ -959,6 +959,20 @@ def fetch_conversation_titles(base_url: str) -> dict[int, str]:
         return {}
 
 
+def fetch_conversation_messages(base_url: str, conversation_id: int, limit: int = 6) -> list[dict]:
+    """拉取会话最近的若干条消息（用于 /resume 后展示上下文）。"""
+    try:
+        url = f"{base_url}/api/conversations/{conversation_id}/messages"
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            items = json.loads(resp.read().decode("utf-8"))
+        if not isinstance(items, list):
+            return []
+        # 只取最近的 N 条（消息按 id 升序返回）
+        return items[-limit:]
+    except Exception:
+        return []
+
+
 def fetch_model_label(base_url: str) -> str | None:
     try:
         with urllib.request.urlopen(f"{base_url}/api/settings", timeout=5) as resp:
@@ -1525,9 +1539,13 @@ def main() -> None:
                         print(paint("最近会话（输入序号恢复）：", "cyan", bold=True))
                         for i, h in enumerate(session_history, 1):
                             cid = h.get("conversation_id")
+                            title = titles.get(int(cid), "")
+                            # 有标题优先显示标题；无标题（新会话未生成）显示会话号
+                            label = title if title and title != "新对话" else f"会话 {cid}"
                             print(
                                 paint(
-                                    f"  {i}. 会话 {cid} · {titles.get(int(cid), '')}",
+                                    f"  {i}. {label}"
+                                    + (f" · #{cid}" if title and title != "新对话" else ""),
                                     "dim",
                                 )
                             )
@@ -1541,7 +1559,25 @@ def main() -> None:
                             else 0
                         )
                     conversation_id = int(session_history[index].get("conversation_id"))
-                    print(paint(f"已恢复会话 {conversation_id}。", "dim"))
+                    titles = fetch_conversation_titles(base)
+                    title = titles.get(conversation_id, "")
+                    label = title if title and title != "新对话" else f"会话 {conversation_id}"
+                    print(paint(f"已恢复会话 {conversation_id}（{label}）。", "dim"))
+                    # 加载并显示最近的对话上下文，方便确认从哪继续
+                    recent = fetch_conversation_messages(base, conversation_id)
+                    if recent:
+                        print(paint("── 最近对话 ──", "cyan", bold=True))
+                        for m in recent:
+                            role = m.get("role")
+                            content = safe_text(m.get("content") or "")[:300]
+                            if role == "user":
+                                print(paint(f"  你：{content}", "green"))
+                            elif role == "assistant":
+                                # 工具轮消息可能含大量 XML/JSON，只显示摘要前段
+                                snippet = content[:200]
+                                if "<tool_calls" in content or "<invoke" in content:
+                                    snippet = "（工具调用步骤）"
+                                print(paint(f"  AI：{snippet}", "dim"))
                     continue
                 if cmd == "/init":
                     init_project_memory(cwd)

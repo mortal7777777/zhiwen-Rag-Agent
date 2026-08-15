@@ -9,6 +9,9 @@
       </template>
       <el-table v-loading="loading" :data="runs" stripe>
         <el-table-column prop="id" label="ID" width="70" />
+        <el-table-column label="会话" width="160" show-overflow-tooltip>
+          <template #default="{ row }">{{ convLabel(row) }}</template>
+        </el-table-column>
         <el-table-column prop="question" label="问题" min-width="220" show-overflow-tooltip />
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
@@ -80,7 +83,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getRunTrace, listRuns } from '../api'
+import { getRunTrace, listConversations, listRuns } from '../api'
 
 defineOptions({ name: 'RunsView' })
 
@@ -89,6 +92,7 @@ const loading = ref(false)
 const detailVisible = ref(false)
 const detail = ref(null)
 const traceJson = ref('')
+const convTitles = ref({})
 
 function formatMs(ms) {
   if (ms == null) return '-'
@@ -99,12 +103,27 @@ function formatMs(ms) {
 async function load() {
   loading.value = true
   try {
-    runs.value = await listRuns({ limit: 100 })
+    const [runList, convList] = await Promise.all([
+      listRuns({ limit: 200 }),
+      listConversations().catch(() => []),
+    ])
+    runs.value = runList
+    const map = {}
+    for (const c of convList || []) {
+      map[c.id] = c.title || `会话 ${c.id}`
+    }
+    convTitles.value = map
   } catch (error) {
     ElMessage.error(error.response?.data?.detail || '加载失败')
   } finally {
     loading.value = false
   }
+}
+
+function convLabel(row) {
+  const id = row.conversation_id
+  if (id == null) return '-'
+  return convTitles.value[id] || `会话 ${id}`
 }
 
 async function showDetail(row) {
