@@ -178,17 +178,22 @@ class PermissionManager:
         timeout: int = 300,
         stop_event: threading.Event | None = None,
     ) -> bool:
-        """阻塞等待用户决定；返回 True=批准。支持停止信号与超时自动拒绝。"""
-        deadline = time.time() + max(1, timeout)
-        while time.time() < deadline:
+        """阻塞等待用户决定；返回 True=批准。
+
+        timeout=0 表示无限等待（类 Claude Code 行为），不自动拒绝；
+        timeout>0 表示超时后自动拒绝。
+        支持停止信号中断。
+        """
+        deadline = None if timeout <= 0 else time.time() + max(1, timeout)
+        while True:
             if stop_event is not None and stop_event.is_set():
                 self._mark(req, False, "用户停止了回答")
                 return False
             if req._event.wait(timeout=0.5):
                 break
-        else:
-            self._mark(req, False, "等待确认超时，已自动取消")
-            return False
+            if deadline is not None and time.time() >= deadline:
+                self._mark(req, False, "等待确认超时，已自动取消")
+                return False
         return bool(req.decision)
 
     def resolve(

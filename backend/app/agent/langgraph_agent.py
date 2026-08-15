@@ -898,7 +898,7 @@ def _run_sensitive_subagent_tool(
         )
     approved = permission_manager.wait(
         req,
-        timeout=int(effective(settings, "permission_timeout", 300) or 300),
+        timeout=int(effective(settings, "permission_timeout", 0) or 0),
         stop_event=stop_event,
     )
     if approved:
@@ -1661,7 +1661,7 @@ def _tools_node(state: AgentState) -> dict:
             bus.emit("status", {"phase": "permission", "text": f"等待确认：{summary}"})
             approved = permission_manager.wait(
                 req,
-                timeout=int(effective(settings, "permission_timeout", 300) or 300),
+                timeout=int(effective(settings, "permission_timeout", 0) or 0),
                 stop_event=stop_event,
             )
             if approved:
