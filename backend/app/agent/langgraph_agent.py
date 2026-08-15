@@ -1044,6 +1044,13 @@ def _subagent_node(state: AgentState) -> dict:
     finally:
         service.rag.release_llm()
 
+    # 清洗子代理输出中的 XML 工具调用标记，防止泄漏到主 agent 的 tool_result 摘要
+    if summary:
+        import re as _re
+        summary = _re.sub(r"</?tool_calls[^>]*>|</?invoke[^>]*>|</?parameter[^>]*>|</?tool_use[^>]*>|</?function[^>]*>", "", summary)
+        summary = _re.sub(r"<\|", "<", summary)  # 清理 <user|tool_calls> 等变体
+        summary = summary.strip()[:800]
+
     return {
         "subagent_results": [
             {
@@ -1071,8 +1078,18 @@ def _merge_node(state: AgentState) -> dict:
     blocks: list[str] = []
     merged_sources: list[dict] = _renumber_subagent_sources(results, counter)
     for r in results:
+        # 清洗子代理摘要中的 XML 工具调用标记（兜底输出泄漏）
+        summary_text = str(r.get("summary") or "")
+        if summary_text:
+            import re as _re_merge
+            summary_text = _re_merge.sub(
+                r"</?tool_calls[^>]*>|</?invoke[^>]*>|</?parameter[^>]*>|</?tool_use[^>]*>|</?function[^>]*>|</?arguments[^>]*>",
+                "", summary_text,
+            )
+            summary_text = _re_merge.sub(r"<[|]", "<", summary_text)
+            summary_text = summary_text.strip()
         blocks.append(
-            f"### {r.get('name') or r.get('task', '')}\n{r.get('summary') or ''}"
+            f"### {r.get('name') or r.get('task', '')}\n{summary_text}"
         )
         for t in r.get("tool_trace") or []:
             entry = dict(t)
@@ -1091,7 +1108,7 @@ def _merge_node(state: AgentState) -> dict:
             {
                 "id": f"subagent_{counter[0]}",
                 "name": "subagent",
-                "summary": str(r.get("summary") or "")[:120],
+                "summary": summary_text[:120],
                 "duration_ms": None,
                 "sources": r.get("sources") or [],
             },
@@ -1779,6 +1796,15 @@ def _tools_node(state: AgentState) -> dict:
         )
         parsed = result if isinstance(result, dict) else {"summary": str(result)}
         entry["summary"] = parsed.get("summary", "")
+        # 清洗工具结果摘要中的 XML 工具调用标记（deepseek 等模型的兜底输出）
+        if entry["summary"]:
+            import re as _re_summary
+            entry["summary"] = _re_summary.sub(
+                r"</?tool_calls[^>]*>|</?invoke[^>]*>|</?parameter[^>]*>|</?tool_use[^>]*>|</?function[^>]*>|</?arguments[^>]*>",
+                "", entry["summary"],
+            )
+            entry["summary"] = _re_summary.sub(r"<[|]", "<", entry["summary"])
+            entry["summary"] = entry["summary"].strip()[:400]
         if parsed.get("permission"):
             entry["permission"] = parsed.pop("permission")
         # 失败判定：显式 error 或命令非零退出码（exit_code 非 None 且非 0）
