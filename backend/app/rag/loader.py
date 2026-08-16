@@ -114,6 +114,10 @@ def load_documents(
                 loaded = load_xlsx(file_path)
             else:
                 continue
+            # 统一补相对路径元数据：检索结果据此定位原文（子目录重名文档不混淆）
+            rel_path = file_path.relative_to(data_dir).as_posix()
+            for doc in loaded:
+                doc.metadata.setdefault("relative_path", rel_path)
             docs.extend(loaded)
         except ImportError as exc:
             print(f"  跳过 {file_path.name}：缺少依赖 {exc.name}")
@@ -376,7 +380,3 @@ def load_epub(file_path: Path | str) -> list[Document]:
     else:
         print(f"  已加载 ePub：{file_path.name}，共 {len(docs)} 个章节")
     return docs
-"""多格式文档加载：把 data/ 下的文件统一转成 LangChain Document。
-
-支持格式：txt / md / csv / docx / xlsx / pdf / epub
-"""

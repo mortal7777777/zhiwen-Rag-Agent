@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 
 from ..db import get_db
 from ..db import repository as repo
@@ -15,6 +18,24 @@ router = APIRouter(tags=["documents"])
 
 # 预览内容上限：超长截断（完整内容走下载/本地打开）
 PREVIEW_MAX_CHARS = 200_000
+
+# 专业查看器格式的 MIME 类型（Windows 注册表猜测不可靠，显式指定）
+FILE_MEDIA_TYPES = {
+    ".pdf": "application/pdf",
+    ".epub": "application/epub+zip",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+
+def _resolve_document(service: RAGService, path: str) -> Path:
+    """校验相对路径并把文档解析为 data_dir 内的绝对路径（拒绝穿越）。"""
+    data_dir = service.settings.data_dir.resolve()
+    target = (service.settings.data_dir / path).resolve()
+    if target != data_dir and data_dir not in target.parents:
+        raise HTTPException(status_code=400, detail="非法路径：超出知识库目录")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return target
 
 
 @router.get("/documents", response_model=list[DocumentInfo])
@@ -46,11 +67,7 @@ def preview_document(
     超过 20 万字符截断并标记 truncated。
     """
     data_dir = service.settings.data_dir.resolve()
-    target = (service.settings.data_dir / path).resolve()
-    if target != data_dir and data_dir not in target.parents:
-        raise HTTPException(status_code=400, detail="非法路径：超出知识库目录")
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="文件不存在")
+    target = _resolve_document(service, path)
     suffix = target.suffix.lower()
     try:
         if suffix in TEXT_SUFFIXES:
@@ -60,7 +77,7 @@ def preview_document(
             # 复用索引加载器提取文本（pdf 不走布局模式，预览要快）
             from ..rag.loader import load_documents
 
-            rel = target.relative_to(service.settings.data_dir).as_posix()
+            rel = target.relative_to(data_dir).as_posix()
             docs = load_documents(
                 service.settings.data_dir, {rel}, layout_pdf=False
             )
@@ -80,6 +97,24 @@ def preview_document(
         "char_count": len(content),
         "truncated": truncated,
     }
+
+
+@router.get("/documents/file/{relative_path:path}")
+def get_document_file(
+    relative_path: str,
+    service: RAGService = Depends(get_service),
+) -> FileResponse:
+    """返回文档原始字节（pdf.js / epub.js / docx-preview 等专业查看器用）。
+
+    只读，复用预览端点的路径校验（拒绝穿越、限 data_dir 内）。
+    """
+    target = _resolve_document(service, relative_path)
+    suffix = target.suffix.lower()
+    media_type = FILE_MEDIA_TYPES.get(suffix)
+    if media_type is None and suffix not in TEXT_SUFFIXES | {".csv", ".doc"}:
+        # 非查看器目标格式也允许下载（列表里能看到的都算），但显式二进制流
+        media_type = "application/octet-stream"
+    return FileResponse(target, media_type=media_type, filename=target.name)
 
 
 @router.get("/documents/meta")

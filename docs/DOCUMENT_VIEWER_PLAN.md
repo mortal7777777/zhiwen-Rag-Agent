@@ -78,13 +78,26 @@
 | 位置记忆（三类格式） | 低 | ~1h |
 | epub.js / docx-preview | 中高 / 低-中 | 各 ~1 天 / ~半天（可后置，先降级文本渲染） |
 
-**验收清单**：
-- [ ] PDF 打开显示原始排版，目录可跳章节，屏外页不渲染（滚动流畅）；
-- [ ] EPUB 按章节目录跳转（若本轮做）；
-- [ ] 聊天中点 KB 来源卡「查看原文」→ 打开该文档并定位到引用处/对应页，有高亮；
-- [ ] 同一文档关闭再打开回到上次位置（文档更新后失效）；
-- [ ] 知识库页与聊天页共用同一查看器；
-- [ ] `npm run build` 通过；后端 pytest 全过；路径穿越仍被拒绝。
+**验收清单**（2026-08-16 实施完成，实测情况见各项备注）：
+- [x] PDF 打开显示原始排版，目录可跳章节，屏外页不渲染（滚动流畅）；
+  实测：示例文集 297 页，outline 目录 97 项，点第 40 项跳到 93 页；懒渲染=IO 可视页±1，屏外清空画布
+- [x] EPUB 按章节目录跳转；实测：示例书 15.7MB，目录 140 项（CFI 位置记忆已接 relocated 事件）
+- [x] 聊天中点 KB 来源卡「查看原文」→ 打开该文档并定位到引用处/对应页，有高亮；
+  实测：旧索引来源（无 relative_path）走文件名反查兜底打开 34.8MB doc，锚点定位到引用段
+- [x] 同一文档关闭再打开回到上次位置（文档更新后失效）；实测：PDF 关闭重开回到 94 页（之前在 93/94）
+- [x] 知识库页与聊天页共用同一查看器（components/DocumentViewer.vue，两处挂载）
+- [x] `npm run build` 通过；后端 pytest 88 全过（含新增 6 例）；路径穿越仍被拒绝（400 非法路径）
+
+实施说明（与计划的差异）：
+- PDF 未用 vue-pdf-embed，直接用 pdfjs-dist 自管懒渲染（vue-pdf-embed 默认全页渲染，
+  大 PDF 内存风险即计划中提到的主风险点），worker 用 `?url` 导入由 Vite 产出独立资源；
+- 三个重组件（Pdf/Epub/Docx Viewer）在 DocumentViewer 内 defineAsyncComponent 按需分包
+  （DocumentViewer 壳 84KB，pdf 371KB/epub 354KB/docx 177KB 懒加载）；
+- `relative_path` 写入点在 `loader.load_documents`（一处覆盖全格式，新索引生效）；
+  旧索引来源前端按文件名反查 `/api/documents` 兜底（重名文档需重建索引才能精确）；
+- 引用定位顺序：page（PDF，并用引用文本在 ±2 页校验修偏）→ anchorText（压平文本 DOM 检索）
+  → 上次记住的位置；
+- PDF 来源页码来自 pymupdf4llm（1 基）；文本校验兜住了 PyPDFLoader 0 基的 off-by-one。
 
 ## 6. 注意事项（前几轮踩过的坑）
 

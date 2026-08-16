@@ -55,6 +55,7 @@ def execute_knowledge_search(
                 ),
                 "source": doc.metadata.get("source"),
                 "page": doc.metadata.get("page"),
+                "relative_path": doc.metadata.get("relative_path"),
             }
         )
     return {
@@ -480,6 +481,7 @@ def extract_sources(result: dict) -> list[dict]:
                     "score": item.get("score"),
                     "source": item.get("source"),
                     "page": item.get("page"),
+                    "relative_path": item.get("relative_path"),
                 }
             )
     return sources

@@ -187,6 +187,13 @@ export const previewDocument = (relativePath) =>
     .get('/documents/preview', { params: { path: relativePath } })
     .then((res) => res.data)
 
+/** 文档原始字节地址（pdf.js / epub.js / docx-preview 专业查看器用） */
+export const getDocumentFileUrl = (relativePath) =>
+  `/api/documents/file/${relativePath
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/')}`
+
 /** 全部文档的自定义分类元数据 */
 export const getDocumentMeta = () =>
   client.get('/documents/meta').then((res) => res.data)

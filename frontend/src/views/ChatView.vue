@@ -420,6 +420,9 @@ wo<template>
                       <span v-if="src.page != null">｜第 {{ src.page }} 页</span>
                     </div>
                     <div class="source-content">{{ src.content }}</div>
+                    <a class="source-link" @click.prevent="openSourceDoc(src)">
+                      查看原文 {{ src.page != null ? `· 第 ${src.page} 页` : '' }} ↗
+                    </a>
                   </template>
                 </div>
               </div>
@@ -722,6 +725,9 @@ wo<template>
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 引用「查看原文」文档查看器 -->
+    <DocumentViewer ref="docViewerRef" />
   </div>
 </template>
 
@@ -757,6 +763,7 @@ import {
   WarningFilled,
 } from '@element-plus/icons-vue'
 import MarkdownContent from '../components/MarkdownContent.vue'
+import DocumentViewer from '../components/DocumentViewer.vue'
 
 // keep-alive 按组件名匹配，显式声明
 defineOptions({ name: 'ChatView' })
@@ -773,6 +780,7 @@ import {
   getSuggestions,
   getTodos,
   listConversations,
+  listDocuments,
   listMemories,
   listTemplates,
   renameConversation,
@@ -1312,6 +1320,36 @@ async function handleCompact() {
 }
 
 // ---------------- 引用溯源 ----------------
+
+// 知识库文档列表缓存（旧索引来源无 relative_path 时按文件名反查）
+let kbDocCache = { at: 0, list: [] }
+
+const docViewerRef = ref(null)
+
+async function openSourceDoc(src) {
+  let path = src.relative_path
+  if (!path) {
+    try {
+      if (Date.now() - kbDocCache.at > 60_000) {
+        kbDocCache.list = await listDocuments()
+        kbDocCache.at = Date.now()
+      }
+      const match = kbDocCache.list.find((d) => d.name === src.source)
+      if (!match) {
+        ElMessage.warning('未在知识库找到该文档（可能已删除；重建索引后可带精确路径）')
+        return
+      }
+      path = match.relative_path
+    } catch {
+      ElMessage.error('获取知识库文档列表失败')
+      return
+    }
+  }
+  docViewerRef.value?.open(path, {
+    page: src.page ?? null,
+    anchorText: (src.content || '').slice(0, 120),
+  })
+}
 
 function handleMessageClick(event) {
   const citeEl = event.target.closest('[data-cite]')

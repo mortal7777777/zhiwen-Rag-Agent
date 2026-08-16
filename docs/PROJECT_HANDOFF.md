@@ -464,6 +464,45 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 content-velocity 方案）+ 引用「查看原文」定位 + 位置记忆——完整方案见
 **`docs/DOCUMENT_VIEWER_PLAN.md`**（新会话直接按它开工）。
 
+### 4.20 本轮（2026-08-16：文档查看器升级落地——按 DOCUMENT_VIEWER_PLAN.md 实施）
+
+**后端**（3 处小改）：
+1. `GET /api/documents/file/{path}` 只读文件服务（FileResponse + 显式 MIME：
+   pdf/epub/docx），路径校验抽 `_resolve_document()`（与 preview 共用，穿越 400）；
+   冒烟实测 15MB PDF 200 + `%PDF-1.7`。
+2. `loader.load_documents()` 统一写入 `metadata.relative_path`（一处覆盖全格式），
+   `tools.execute_knowledge_search`/`extract_sources` 透出 → 新索引来源带精确路径。
+3. 顺手清了 loader.py 末尾上次编辑遗留的重复 docstring。
+
+**前端**（新增 `components/DocumentViewer.vue` + `components/viewer/` 六个模块）：
+1. **DocumentViewer**：抽屉外壳，按扩展名分发四查看器（pdf/epub/docx/其余文本），
+   统一目录侧栏（getToc/jumpTo 接口）+ 位置记忆调度（定位优先级：
+   page→anchorText→记忆位置）；**忘记 defineExpose 曾导致按钮点击无反应，已修**。
+2. **PdfViewer**：直接用 pdfjs-dist（未用 vue-pdf-embed——它默认全页渲染，
+   大 PDF 内存正是计划中的风险点）；IO 可视页±1 懒渲染，屏外取消任务清空画布；
+   worker 用 `?url` 导入（Vite 产出独立资源）；outline→页码目录；跳页后文本校验
+   （引用文本在 ±2 页找匹配，兜 pymupdf4llm/PyPDFLoader 页码基差）。
+3. **TextViewer**：标题分节（md 标题/中文章节正则，跳过代码围栏）+
+   `content-visibility:auto` 按需渲染；锚点定位 = 压平文本（去空白标点）DOM 检索。
+4. **EpubViewer**：epub.js（TOC 140 项目录 + relocated CFI 位置记忆）；
+   引用定位 = spine 逐章扫描。**DocxViewer**：docx-preview + 页级 content-visibility +
+   h1-h6 目录。
+5. **位置记忆**：`viewer/positionMemory.js`（localStorage 按 relative_path 存
+   {mtime,position}，文档更新即失效；500ms 防抖）。
+6. 三个重查看器 defineAsyncComponent 懒加载（壳 84KB；pdf 371KB/epub 354KB/
+   docx 177KB 分包）。ChatView 来源卡加「查看原文」（旧索引来源无 relative_path
+   时按文件名反查 /api/documents 兜底）；KnowledgeView 预览换用公共查看器。
+
+**验证**：pytest 88 全过（新增 test_documents_file.py 6 例：file 端点/穿越拒绝/
+loader relative_path/extract_sources 透传）；npm run build 过；浏览器实测：
+PDF 目录跳页（40 项→93 页）、关闭重开回到 94 页（位置记忆）、epub 目录、
+旧来源「查看原文」兜底打开 34.8MB doc 并定位到引用段。
+新增 `backend/restart_backend.ps1`（杀 8000 + 注入环境变量重启，脱离沙箱执行）。
+
+**注意**：现有索引是改动前建的，来源无 relative_path（前端兜底按文件名反查，
+子目录重名文档需**重建索引**才精确）；PDF 书签乱码是示例文集.pdf 自身
+GBK 编码问题 + 试用版水印，非代码 bug。
+
 ### 本会话遗留的小事
 - 桌面 `C:\Users\user\Desktop\practice2` 是测试产物（内容已清空），删除被 Windows 拒绝（疑似占用/权限），**用户手动删除即可**。
 - `docs/` 下还有 `AGENT_COMPARISON.md`（与主流 agent 对比）、`HERMES_STYLE_AGENT.md`（终端/ACP 路线），写文档前先读，避免重复。

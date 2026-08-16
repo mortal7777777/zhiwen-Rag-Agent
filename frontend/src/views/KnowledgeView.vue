@@ -108,31 +108,8 @@
       </el-table>
     </el-card>
 
-    <!-- 文档预览抽屉：md 渲染 Markdown，其余按文本展示 -->
-    <el-drawer
-      v-model="previewVisible"
-      :title="previewData?.name || '文档预览'"
-      size="55%"
-      :destroy-on-close="true"
-    >
-      <div v-loading="previewLoading" class="preview-body">
-        <div v-if="previewData" class="preview-meta">
-          <el-tag size="small">{{ previewData.suffix }}</el-tag>
-          <span class="preview-count">
-            {{ previewData.char_count?.toLocaleString() }} 字符
-          </span>
-          <el-tag v-if="previewData.truncated" size="small" type="warning">
-            内容过长已截断（仅前 20 万字符）
-          </el-tag>
-        </div>
-        <MarkdownContent
-          v-if="previewData?.kind === 'markdown'"
-          :content="previewData.content"
-        />
-        <pre v-else-if="previewData" class="preview-text">{{ previewData.content }}</pre>
-        <div v-if="previewError" class="preview-error">{{ previewError }}</div>
-      </div>
-    </el-drawer>
+    <!-- 文档预览：专业查看器（pdf/epub/docx/文本 按格式分发 + 目录 + 位置记忆） -->
+    <DocumentViewer ref="docViewerRef" />
 
     <!-- 分类编辑对话框 -->
     <el-dialog v-model="metaEditVisible" title="文档分类" width="440px" append-to-body>
@@ -180,13 +157,12 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled, Loading } from '@element-plus/icons-vue'
-import MarkdownContent from '../components/MarkdownContent.vue'
+import DocumentViewer from '../components/DocumentViewer.vue'
 import {
   deleteDocument,
   getIndexStatus,
   getDocumentMeta,
   listDocuments,
-  previewDocument,
   rebuildIndex,
   saveDocumentMeta,
   uploadDocuments,
@@ -204,11 +180,8 @@ const fileList = ref([])
 const categoryFilter = ref('')
 const categories = ref([])
 
-// 文档预览
-const previewVisible = ref(false)
-const previewLoading = ref(false)
-const previewData = ref(null)
-const previewError = ref('')
+// 文档预览（公共查看器）
+const docViewerRef = ref(null)
 
 // 分类编辑
 const metaEditVisible = ref(false)
@@ -302,18 +275,8 @@ async function handleRebuild() {
   }
 }
 
-async function handlePreview(row) {
-  previewVisible.value = true
-  previewLoading.value = true
-  previewData.value = null
-  previewError.value = ''
-  try {
-    previewData.value = await previewDocument(row.relative_path)
-  } catch (error) {
-    previewError.value = error.response?.data?.detail || '文档解析失败'
-  } finally {
-    previewLoading.value = false
-  }
+function handlePreview(row) {
+  docViewerRef.value?.open(row.relative_path)
 }
 
 async function openMetaEdit(row) {
@@ -426,40 +389,6 @@ onMounted(() => {
 .doc-tags {
   color: var(--text-3);
   font-size: 12px;
-}
-
-/* 预览抽屉 */
-.preview-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-height: 200px;
-}
-
-.preview-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--text-3);
-}
-
-.preview-text {
-  margin: 0;
-  padding: 12px;
-  border-radius: 8px;
-  background: var(--bg-card-2, rgba(128, 128, 128, 0.06));
-  font-size: 12.5px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: calc(100vh - 160px);
-  overflow: auto;
-}
-
-.preview-error {
-  color: var(--el-color-danger);
-  font-size: 13px;
 }
 
 .meta-file {
