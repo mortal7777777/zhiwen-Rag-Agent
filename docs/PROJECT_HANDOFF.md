@@ -508,6 +508,20 @@ epub.js `flow:'paginated'` 分页模式本身无滚动条且不响应滚轮，�
 `flow:'scrolled-doc'` 章内滚动模式；浏览器真滚轮实测三查看器全部可滚
 （epub 13→3378、PDF 81568→85606、文本 0→4038），epub 目录跳转正常。
 
+**第二轮修复（提交 `f1b4f39`，用户反馈四项）**：
+1. 「查看原文」落在开头 → 根因：content-visibility 跳过渲染的节内元素
+   rect 全 0，rect 数学滚动失效；改两段式（先滚到节触发渲染，150ms 后
+   精确定位），TextViewer/DocxViewer 都改；另预览上限 20万→100万字符
+   （大书引用不再落在截断区外）。实测 .doc 引用定位 scrollTop 0→13310。
+2. 收起目录文本不居中 → 文本/epub 加 880px 居中阅读栏。
+3. .doc 仍是纯文本视图 → 正常（docx-preview 只支持 OOXML；.doc 是
+   97-2003 二进制，浏览器无法还原排版图片）；纯文本视图顶部加了
+   「另存为 .docx 重新上传」提示条。
+4. 视觉主题化：目录侧栏/工具栏/PDF 舞台（深色压暗、页面白纸）、
+   字号 15px/行距 1.85、banner/提示条按主题变量。
+注意：Vite dev watcher 本轮又漏了一次文件写事件（curl 模块源码可见旧代码），
+`touch` 文件即恢复；前端改完不生效时先 curl 模块源码确认再排查。
+
 ### 本会话遗留的小事
 - 桌面 `C:\Users\user\Desktop\practice2` 是测试产物（内容已清空），删除被 Windows 拒绝（疑似占用/权限），**用户手动删除即可**。
 - `docs/` 下还有 `AGENT_COMPARISON.md`（与主流 agent 对比）、`HERMES_STYLE_AGENT.md`（终端/ACP 路线），写文档前先读，避免重复。
