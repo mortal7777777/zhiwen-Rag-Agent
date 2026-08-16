@@ -522,6 +522,14 @@ epub.js `flow:'paginated'` 分页模式本身无滚动条且不响应滚轮，�
 注意：Vite dev watcher 本轮又漏了一次文件写事件（curl 模块源码可见旧代码），
 `touch` 文件即恢复；前端改完不生效时先 curl 模块源码确认再排查。
 
+**第三轮修复（提交 `d1fee25`）**：① 大 PDF 加载慢——load() 里 await 全量
+逐页 getPage 取尺寸（示例选集 3246 页数秒且阻塞首屏），改首屏先渲染、后台
+采样估高（前 5 页+每 40 页，未采样页用最近样本宽高比）；书签 dest 解析
+并行化。实测示例选集首屏 1.2s。② 书签乱码——这批 PDF 书签是 GBK 字节被
+pdf.js 按 Latin-1 解码，`repairOutlineTitle()` 检测 Latin-1 扩展区字符后
+TextDecoder('gbk') 解回中文 + 剥 [Trial version] 水印。示例选集/示例文集
+书签全部恢复正常中文。
+
 ### 本会话遗留的小事
 - 桌面 `C:\Users\user\Desktop\practice2` 是测试产物（内容已清空），删除被 Windows 拒绝（疑似占用/权限），**用户手动删除即可**。
 - `docs/` 下还有 `AGENT_COMPARISON.md`（与主流 agent 对比）、`HERMES_STYLE_AGENT.md`（终端/ACP 路线），写文档前先读，避免重复。
