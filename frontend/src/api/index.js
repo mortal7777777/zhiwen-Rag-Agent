@@ -266,6 +266,20 @@ export const resolvePermission = (
 export const listPendingPermissions = () =>
   client.get('/agent/permissions').then((res) => res.data)
 
+/** 上下文占用统计：消息条数 / token 预算 / 滚动摘要进度 */
+export const getAgentContext = (conversationId) =>
+  client.get(`/agent/context/${conversationId}`).then((res) => res.data)
+
+/** 手动压缩会话历史：保留近期消息，更早的并入滚动摘要 */
+export const compactConversation = (conversationId) =>
+  client.post(`/agent/compact/${conversationId}`).then((res) => res.data)
+
+/** 消息级回退：删除该消息及其之后的全部消息（类 Claude Code rewind） */
+export const rewindConversation = (conversationId, messageId) =>
+  client
+    .post(`/conversations/${conversationId}/rewind`, { message_id: messageId })
+    .then((res) => res.data)
+
 /** TodoWrite 任务清单：读取/保存某会话的任务 */
 export const getTodos = (conversationId) =>
   client.get(`/todos/${conversationId}`).then((res) => res.data)

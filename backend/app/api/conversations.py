@@ -1,10 +1,12 @@
-"""会话接口：列表、新建、重命名、删除、消息历史。"""
+"""会话接口：列表、新建、重命名、删除、消息历史、消息级回退。"""
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from ..checkpoint import get_store
+from ..config import get_settings
 from ..db import get_db
 from ..db import repository as repo
 from ..schemas import (
@@ -12,7 +14,9 @@ from ..schemas import (
     ConversationOut,
     ConversationRename,
     MessageOut,
+    RewindRequest,
 )
+from ..todos import save_todos
 
 router = APIRouter(tags=["conversations"])
 
@@ -86,3 +90,42 @@ def list_messages(conversation_id: int, db: Session = Depends(get_db)) -> list[d
     if repo.get_conversation(db, conversation_id) is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     return repo.list_messages(db, conversation_id)
+
+
+@router.post("/conversations/{conversation_id}/rewind")
+def rewind_conversation(
+    conversation_id: int,
+    payload: RewindRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    """消息级回退：删除该消息及其之后的全部消息（类 Claude Code rewind）。
+
+    同时清理附属状态，保证回退干净：
+    - 滚动摘要若覆盖了被删消息 → 重置（防摘要残留旧内容）；
+    - 该会话的任务清单（todos）清空；
+    - 自写 checkpoint 的 pending 快照清除（防止恢复到已回退的状态）。
+    """
+    conv = repo.get_conversation(db, conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    rows = repo.list_messages_with_id(db, conversation_id, limit=1000)
+    target = next((r for r in rows if r["id"] == payload.message_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="消息不存在或不属于该会话")
+    removed = repo.delete_messages_from(db, conversation_id, payload.message_id)
+    summary_reset = repo.reset_summary_if_stale(db, conversation_id, payload.message_id)
+    try:
+        save_todos(db, conversation_id, [])
+    except Exception:
+        pass
+    try:
+        get_store(get_settings()).clear(conversation_id)
+    except Exception:
+        pass
+    return {
+        "conversation_id": conversation_id,
+        "message_id": payload.message_id,
+        "removed": removed,
+        "summary_reset": summary_reset,
+        "rewound_content": target.get("content") or "",
+    }

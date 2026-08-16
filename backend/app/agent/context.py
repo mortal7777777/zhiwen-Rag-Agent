@@ -147,6 +147,64 @@ class ContextService:
             return summary, rows[cutoff:]
         return old_summary, rows[cutoff:]
 
+    def context_stats(self, db: Session, conversation_id: int) -> dict:
+        """上下文占用统计（/context 命令与 Web 上下文面板共用）。"""
+        rows = repo.list_messages_with_id(db, conversation_id, limit=500)
+        total_tokens = sum(estimate_tokens(r["content"]) for r in rows)
+        budget = self._history_budget_for(db, conversation_id)
+        max_messages = self.settings.history_max_messages
+        summary, up_to = repo.get_summary_state(db, conversation_id)
+        covered = sum(1 for r in rows if r["id"] <= up_to)
+        return {
+            "conversation_id": conversation_id,
+            "message_count": len(rows),
+            "history_max_messages": max_messages,
+            "estimated_tokens": total_tokens,
+            "token_budget": budget,
+            "summary_chars": len(summary or ""),
+            "summary_up_to_id": up_to,
+            "summary_covered_messages": covered,
+            "compaction_would_trigger": len(rows) > max_messages or total_tokens > budget,
+        }
+
+    def compact_now(self, db: Session, conversation_id: int) -> dict:
+        """手动强制压缩（/compact）：保留最近一段原始消息，其余并入滚动摘要。
+
+        与 compact_conversation 的区别：不看软窗口条件，立即压缩；
+        保留条数取 max(4, 总数/4)，上限 history_max_messages——
+        类 Claude Code /compact 的"保留近期轮次、总结更早内容"语义。
+        """
+        rows = repo.list_messages_with_id(db, conversation_id, limit=500)
+        if len(rows) <= 4:
+            return {
+                "compacted": False,
+                "reason": "消息太少，无需压缩",
+                "kept_messages": len(rows),
+                "summarized_messages": 0,
+                "summary_chars": 0,
+            }
+        keep = max(4, min(self.settings.history_max_messages, len(rows) // 4))
+        cutoff = len(rows) - keep
+        cutoff_id = rows[cutoff - 1]["id"]
+        old_summary, up_to = repo.get_summary_state(db, conversation_id)
+        batch = [r for r in rows if up_to < r["id"] <= cutoff_id]
+        summary = self._summarize(batch, old_summary) if batch else old_summary
+        if not summary:
+            return {
+                "compacted": False,
+                "reason": "摘要生成失败，已保留原始消息",
+                "kept_messages": len(rows),
+                "summarized_messages": 0,
+                "summary_chars": 0,
+            }
+        repo.save_summary(db, conversation_id, summary, cutoff_id)
+        return {
+            "compacted": True,
+            "kept_messages": keep,
+            "summarized_messages": len(batch),
+            "summary_chars": len(summary),
+        }
+
     def _history_budget_for(self, db: Session, conversation_id: int) -> int:
         """按会话绑定的模板类别返回历史上下文预算。"""
         default = self.settings.history_max_tokens

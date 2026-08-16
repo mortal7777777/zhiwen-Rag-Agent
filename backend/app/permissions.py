@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import difflib
 import logging
 import threading
 import time
@@ -47,6 +48,26 @@ def _preview(text: Any, limit: int = 200) -> str:
     return s[:limit] + f"…（共 {len(s)} 字符）"
 
 
+def build_diff_lines(old: str, new: str, max_lines: int = 80) -> list[dict]:
+    """生成 edit_file 审批用的行级 diff（op: "-" 删除 / "+" 新增），超限截断。
+
+    只对比 old_string 与 new_string 本身，不需要读文件内容；
+    供 CLI 弹窗与 Web 审批卡渲染同一份数据（红删绿增）。
+    """
+    old_lines = old.splitlines()
+    new_lines = new.splitlines()
+    out: list[dict] = []
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "delete"):
+            out.extend({"op": "-", "text": line} for line in old_lines[i1:i2])
+        if tag in ("replace", "insert"):
+            out.extend({"op": "+", "text": line} for line in new_lines[j1:j2])
+        if len(out) >= max_lines:
+            return out[:max_lines] + [{"op": "…", "text": "（diff 过长已截断）"}]
+    return out
+
+
 def is_sensitive_tool(name: str, args: dict | None = None) -> bool:
     """判断该工具调用是否属于敏感操作（需要人工确认）。"""
     if name in SENSITIVE_TOOLS:
@@ -72,11 +93,16 @@ def display_args(name: str, args: dict | None = None) -> dict:
             "content_preview": _preview(args.get("content")),
         }
     if name == "edit_file":
+        old_text = str(args.get("old_string") or "")
+        new_text = str(args.get("new_string") or "")
         return {
             "path": str(args.get("path") or ""),
-            "old_string": _preview(args.get("old_string"), 120),
-            "new_string": _preview(args.get("new_string"), 120),
+            # 预览放宽到 800 字符：整块替换的兜底展示仍可读
+            "old_string": _preview(old_text, 800),
+            "new_string": _preview(new_text, 800),
             "replace_all": bool(args.get("replace_all", False)),
+            # 行级 diff（红删绿增）：CLI/Web 审批界面的首选渲染数据
+            "diff_lines": build_diff_lines(old_text, new_text),
         }
     if name == "delete_file":
         return {"path": str(args.get("path") or "")}

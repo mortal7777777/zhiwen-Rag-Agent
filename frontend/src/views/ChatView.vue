@@ -84,6 +84,16 @@ wo<template>
           <el-icon><DataAnalysis /></el-icon>
           运行记录
         </el-button>
+        <el-button
+          text
+          type="primary"
+          class="memory-btn"
+          :disabled="!activeId"
+          @click="openContextDialog"
+        >
+          <el-icon><Histogram /></el-icon>
+          上下文
+        </el-button>
       </header>
 
       <div
@@ -129,17 +139,28 @@ wo<template>
           </div>
 
           <div class="msg-body">
-            <div v-if="msg.role === 'user'" class="user-bubble">
-              <div v-if="msg.images && msg.images.length" class="user-images">
-                <img
-                  v-for="(img, i) in msg.images"
-                  :key="i"
-                  :src="img"
-                  class="user-img"
-                  alt="上传图片"
-                />
+            <div v-if="msg.role === 'user'" class="user-msg-group">
+              <div class="user-bubble">
+                <div v-if="msg.images && msg.images.length" class="user-images">
+                  <img
+                    v-for="(img, i) in msg.images"
+                    :key="i"
+                    :src="img"
+                    class="user-img"
+                    alt="上传图片"
+                  />
+                </div>
+                <span v-if="msg.content">{{ msg.content }}</span>
               </div>
-              <span v-if="msg.content">{{ msg.content }}</span>
+              <!-- 消息级回退：删除此消息及之后的对话，内容放回输入框重新编辑 -->
+              <div v-if="msg.id && !loading" class="user-rewind">
+                <el-tooltip content="回退到此消息（删除其后对话并重新编辑）" placement="top">
+                  <span class="rewind-btn" @click="rewindTo(msg)">
+                    <el-icon :size="12"><RefreshLeft /></el-icon>
+                    回退
+                  </span>
+                </el-tooltip>
+              </div>
             </div>
 
             <template v-else>
@@ -238,14 +259,23 @@ wo<template>
               </div>
             </template>
 
-            <!-- 工具调用轨迹 -->
+            <!-- 工具调用轨迹：有完整输出（detail）时可点击展开 -->
             <div v-if="msg.tool_trace && msg.tool_trace.length" class="tool-trace">
-              <div v-for="(t, i) in msg.tool_trace" :key="i" class="tool-chip">
-                <el-icon :size="13"><component :is="toolIcon(t.name)" /></el-icon>
-                <span class="tool-name">{{ toolName(t.name) }}</span>
-                <span class="tool-summary">
-                  {{ t.summary || (t.arguments && t.arguments.query) || '执行中…' }}
-                </span>
+              <div v-for="(t, i) in msg.tool_trace" :key="i" class="tool-item">
+                <div
+                  :class="['tool-chip', { expandable: !!t.detail }]"
+                  @click="t.detail && (t._open = !t._open)"
+                >
+                  <el-icon :size="13"><component :is="toolIcon(t.name)" /></el-icon>
+                  <span class="tool-name">{{ toolName(t.name) }}</span>
+                  <span class="tool-summary">
+                    {{ t.summary || (t.arguments && t.arguments.query) || '执行中…' }}
+                  </span>
+                  <el-icon v-if="t.detail" :size="12" class="tool-expand-icon">
+                    <ArrowDown :class="{ open: t._open }" />
+                  </el-icon>
+                </div>
+                <pre v-if="t._open && t.detail" class="tool-detail">{{ t.detail }}</pre>
               </div>
             </div>
 
@@ -264,7 +294,27 @@ wo<template>
                   </div>
                   <div class="permission-body">
                     <div class="permission-summary">{{ p.summary }}</div>
-                    <div v-if="p.tool === 'edit_file' && p.args?.old_string != null" class="perm-diff">
+                    <div
+                      v-if="p.tool === 'edit_file' && p.args?.diff_lines?.length"
+                      class="perm-diff"
+                    >
+                      <div class="perm-diff-head">变更预览（红删绿增）</div>
+                      <div
+                        v-for="(d, di) in p.args.diff_lines"
+                        :key="di"
+                        :class="[
+                          'perm-diff-line',
+                          d.op === '-' ? 'del' : d.op === '+' ? 'add' : '',
+                        ]"
+                      >
+                        <span class="perm-diff-sign">{{ d.op === '-' ? '−' : d.op === '+' ? '+' : '·' }}</span>
+                        <span class="perm-diff-text">{{ d.text }}</span>
+                      </div>
+                    </div>
+                    <div
+                      v-else-if="p.tool === 'edit_file' && p.args?.old_string != null"
+                      class="perm-diff"
+                    >
                       <div class="perm-diff-head">变更预览（红删绿增）</div>
                       <div class="perm-diff-line del">
                         <span class="perm-diff-sign">−</span>
@@ -616,6 +666,62 @@ wo<template>
         </template>
       </el-dialog>
     </el-dialog>
+
+    <!-- 上下文占用面板（/context + /compact 的 Web 入口） -->
+    <el-dialog v-model="contextVisible" title="上下文占用" width="480px">
+      <div v-if="contextStats" class="ctx-stats">
+        <div class="ctx-row">
+          <span class="ctx-label">历史消息</span>
+          <span class="ctx-value">
+            {{ contextStats.message_count }} / {{ contextStats.history_max_messages }} 条
+          </span>
+        </div>
+        <div class="ctx-bar">
+          <i
+            :style="{
+              width: barPct(contextStats.message_count, contextStats.history_max_messages),
+            }"
+          />
+        </div>
+        <div class="ctx-row">
+          <span class="ctx-label">估算 token</span>
+          <span class="ctx-value">
+            {{ contextStats.estimated_tokens }} / {{ contextStats.token_budget }}
+          </span>
+        </div>
+        <div class="ctx-bar">
+          <i
+            :style="{ width: barPct(contextStats.estimated_tokens, contextStats.token_budget) }"
+          />
+        </div>
+        <div class="ctx-row">
+          <span class="ctx-label">滚动摘要</span>
+          <span class="ctx-value">
+            {{
+              contextStats.summary_chars
+                ? `${contextStats.summary_chars} 字 · 覆盖 ${contextStats.summary_covered_messages} 条早期消息`
+                : '未生成'
+            }}
+          </span>
+        </div>
+        <div class="ctx-note">
+          超出软窗口（条数或 token 预算）时下一轮自动压缩；也可以手动压缩——
+          保留近期消息原文，更早的对话并入滚动摘要。
+        </div>
+      </div>
+      <div v-else class="ctx-stats">加载中…</div>
+      <template #footer>
+        <el-button @click="contextVisible = false">关闭</el-button>
+        <el-button
+          type="primary"
+          :loading="compacting"
+          :disabled="!contextStats"
+          @click="handleCompact"
+        >
+          立即压缩
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -633,6 +739,7 @@ import {
   EditPen,
   Expand,
   Fold,
+  Histogram,
   Lock,
   Link,
   List,
@@ -643,6 +750,7 @@ import {
   Plus,
   Position,
   Promotion,
+  RefreshLeft,
   RefreshRight,
   User,
   VideoPause,
@@ -654,11 +762,13 @@ import MarkdownContent from '../components/MarkdownContent.vue'
 defineOptions({ name: 'ChatView' })
 import {
   addMemory,
+  compactConversation,
   consolidateMemories,
   createTemplate,
   deleteConversation,
   deleteMemory,
   deleteTemplate,
+  getAgentContext,
   getConversationMessages,
   getSuggestions,
   getTodos,
@@ -667,6 +777,7 @@ import {
   listTemplates,
   renameConversation,
   resolvePermission,
+  rewindConversation,
   streamAgentChat,
   updateMemory,
   updateTemplate,
@@ -1049,18 +1160,7 @@ async function switchSession(session) {
   restoringTemplate = false
   try {
     const history = await getConversationMessages(session.id)
-    messages.value = history.map((m) => ({
-      role: m.role,
-      content: m.content,
-      tool_trace: m.tool_trace || [],
-      sources: m.sources || [],
-      permissions: [],
-      todos: [],
-      plan: [],
-      planTotal: 0,
-      _sourcesOpen: false,
-      _streaming: false,
-    }))
+    messages.value = history.map(mapHistoryMessage)
     // 恢复 TodoWrite 任务清单，挂到最近一条助手消息（若有）
     try {
       const todoRes = await getTodos(session.id)
@@ -1123,6 +1223,91 @@ function upsertSession(data) {
     if (data.title) sessions.value[index].title = data.title
   } else if (data.conversation_id) {
     sessions.value.unshift(item)
+  }
+}
+
+/** 后端历史消息 → 前端消息对象（含 id：消息级回退要用） */
+function mapHistoryMessage(m) {
+  return {
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    tool_trace: (m.tool_trace || []).map((t) => ({ ...t, _open: false })),
+    sources: m.sources || [],
+    permissions: [],
+    todos: [],
+    plan: [],
+    planTotal: 0,
+    _sourcesOpen: false,
+    _streaming: false,
+  }
+}
+
+/** 消息级回退：删除该消息及其之后的所有对话，内容放回输入框重新编辑 */
+async function rewindTo(msg) {
+  if (loading.value || !activeId.value || !msg.id) return
+  try {
+    await ElMessageBox.confirm(
+      '将删除这条消息及其之后的所有对话记录，并把内容放回输入框，确定回退？',
+      '回退确认',
+      { type: 'warning', confirmButtonText: '回退', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const result = await rewindConversation(activeId.value, msg.id)
+    const history = await getConversationMessages(activeId.value)
+    messages.value = history.map(mapHistoryMessage)
+    question.value = msg.content || ''
+    const extra = result.summary_reset ? '，滚动摘要已重置' : ''
+    ElMessage.success(`已回退（删除 ${result.removed} 条消息${extra}），内容已放回输入框`)
+    nextTick(() => questionInput.value?.focus())
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '回退失败')
+  }
+}
+
+// ---------------- 上下文占用面板（/context · /compact） ----------------
+
+const contextVisible = ref(false)
+const contextStats = ref(null)
+const compacting = ref(false)
+
+function barPct(cur, cap) {
+  if (!cap) return '0%'
+  return `${Math.min(100, Math.round((cur / cap) * 100))}%`
+}
+
+async function openContextDialog() {
+  if (!activeId.value) return
+  contextVisible.value = true
+  contextStats.value = null
+  try {
+    contextStats.value = await getAgentContext(activeId.value)
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '读取上下文统计失败')
+    contextVisible.value = false
+  }
+}
+
+async function handleCompact() {
+  if (!activeId.value || compacting.value) return
+  compacting.value = true
+  try {
+    const result = await compactConversation(activeId.value)
+    if (result.compacted) {
+      ElMessage.success(
+        `已压缩：保留最近 ${result.kept_messages} 条，${result.summarized_messages} 条并入摘要`,
+      )
+    } else {
+      ElMessage.info(result.reason || '无需压缩')
+    }
+    contextStats.value = await getAgentContext(activeId.value)
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '压缩失败')
+  } finally {
+    compacting.value = false
   }
 }
 
@@ -1434,7 +1619,11 @@ async function send(options = {}) {
         onToolResult: (data) => {
           currentTool.value = ''
           const trace = streamMsg.tool_trace.find((t) => t.name === data.name && !t.summary)
-          if (trace) trace.summary = data.summary
+          if (trace) {
+            trace.summary = data.summary
+            // 完整输出（截断版）：工具卡可展开查看
+            if (data.detail) trace.detail = data.detail
+          }
           if (data.sources && data.sources.length) {
             streamMsg.sources.push(...data.sources)
           }
@@ -1989,6 +2178,82 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(22, 119, 255, 0.18);
 }
 
+/* 消息级回退：悬停用户消息出现"回退"入口 */
+.user-msg-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.user-rewind {
+  margin-top: 3px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.msg.user:hover .user-rewind {
+  opacity: 1;
+}
+
+.rewind-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  cursor: pointer;
+  user-select: none;
+}
+
+.rewind-btn:hover {
+  color: var(--primary);
+}
+
+/* 上下文占用面板 */
+.ctx-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ctx-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 13px;
+}
+
+.ctx-label {
+  color: var(--text-3);
+}
+
+.ctx-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ctx-bar {
+  height: 6px;
+  border-radius: 4px;
+  background: var(--bg-card-3, rgba(128, 128, 128, 0.12));
+  overflow: hidden;
+}
+
+.ctx-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--primary), #67c23a);
+  transition: width 0.3s;
+}
+
+.ctx-note {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+
 .assistant-content {
   position: relative;
   padding: 14px 18px;
@@ -2233,6 +2498,12 @@ onBeforeUnmount(() => {
   margin-top: 8px;
 }
 
+.tool-item {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .tool-chip {
   display: inline-flex;
   align-items: center;
@@ -2243,6 +2514,40 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border);
   color: var(--text-2);
   font-size: 12px;
+}
+
+.tool-chip.expandable {
+  cursor: pointer;
+}
+
+.tool-chip.expandable:hover {
+  border-color: var(--primary);
+}
+
+.tool-expand-icon {
+  color: var(--text-3);
+  transition: transform 0.15s;
+}
+
+.tool-expand-icon :deep(.open),
+.tool-expand-icon.open {
+  transform: rotate(180deg);
+}
+
+.tool-detail {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  max-width: 560px;
+  max-height: 260px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--bg-card-2);
+  border: 1px dashed var(--border);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-3);
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .tool-chip .el-icon {
@@ -2362,6 +2667,8 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 .perm-diff-head {

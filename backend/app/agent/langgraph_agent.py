@@ -1561,6 +1561,30 @@ def _slim_tool_result(result: dict, content_limit: int = 8000) -> dict:
     return slim
 
 
+def _tool_detail(result: dict, limit: int = 3500) -> str:
+    """生成工具完整输出的展示文本（供 CLI /output 与 Web 工具卡展开查看）。
+
+    只影响展示层：模型历史仍走 _slim_tool_result 的瘦身路径。
+    优先取信息量最大的字段（error/output/content/diff/matches/entries），
+    都没有时序列化整个结果。
+    """
+    if not isinstance(result, dict):
+        return str(result)[:limit]
+    for key in ("error", "output", "content", "diff", "matches", "entries", "result"):
+        val = result.get(key)
+        if val in (None, "", []):
+            continue
+        text = val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
+        text = text[:limit]
+        if len(val if isinstance(val, str) else "") > limit:
+            text += f"\n…（共 {len(str(val))} 字符，已截断）"
+        return text
+    try:
+        return json.dumps(result, ensure_ascii=False)[:limit]
+    except Exception:
+        return str(result)[:limit]
+
+
 def _tools_node(state: AgentState) -> dict:
     service: LangGraphAgentService = state["service"]
     bus: EventBus = state["bus"]
@@ -1796,6 +1820,8 @@ def _tools_node(state: AgentState) -> dict:
         )
         parsed = result if isinstance(result, dict) else {"summary": str(result)}
         entry["summary"] = parsed.get("summary", "")
+        # 完整输出（截断版）随轨迹持久化：CLI /output 与 Web 展开复看
+        entry["detail"] = _tool_detail(parsed)
         # 清洗工具结果摘要中的 XML 工具调用标记（deepseek 等模型的兜底输出）
         if entry["summary"]:
             import re as _re_summary
@@ -1824,6 +1850,7 @@ def _tools_node(state: AgentState) -> dict:
                 "summary": parsed.get("summary", ""),
                 "duration_ms": entry.get("duration_ms"),
                 "sources": tool_sources,
+                "detail": entry.get("detail", ""),
             },
         )
         if db is not None:

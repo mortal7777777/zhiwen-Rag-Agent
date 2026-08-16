@@ -253,6 +253,46 @@ def clear_messages(db: Session, conversation_id: int) -> None:
     db.commit()
 
 
+def delete_messages_from(
+    db: Session,
+    conversation_id: int,
+    message_id: int,
+    inclusive: bool = True,
+) -> int:
+    """删除会话中 id >=（inclusive=True）或 > 该 id 的全部消息（消息级回退）。
+
+    返回删除条数；顺带刷新会话 updated_at 保持列表排序正确。
+    """
+    cond = Message.id >= message_id if inclusive else Message.id > message_id
+    result = db.execute(
+        delete(Message).where(Message.conversation_id == conversation_id, cond)
+    )
+    conv = db.get(Conversation, conversation_id)
+    if conv is not None:
+        conv.updated_at = datetime.now()
+    db.commit()
+    return int(result.rowcount or 0)
+
+
+def reset_summary_if_stale(
+    db: Session, conversation_id: int, boundary_id: int
+) -> bool:
+    """回退边界早于摘要进度时重置滚动摘要（防止摘要残留已删除消息的内容）。
+
+    摘要覆盖到 summary_up_to_id，若该进度超过回退边界，说明摘要里
+    含有被删除消息的内容——直接清空，下次压缩时重新生成。
+    """
+    conv = db.get(Conversation, conversation_id)
+    if conv is None:
+        return False
+    if (conv.summary_up_to_id or 0) >= boundary_id and conv.summary:
+        conv.summary = None
+        conv.summary_up_to_id = 0
+        db.commit()
+        return True
+    return False
+
+
 # ---------------- Agent 运行记录（决策可观测性）----------------
 
 def create_agent_run(

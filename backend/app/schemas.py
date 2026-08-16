@@ -176,6 +176,11 @@ class MessageOut(BaseModel):
     created_at: datetime
 
 
+class RewindRequest(BaseModel):
+    """消息级回退：删除该消息及其之后的全部消息（类 Claude Code rewind）。"""
+    message_id: int
+
+
 # ---------------- 提示词模板 ----------------
 
 

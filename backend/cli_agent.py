@@ -508,6 +508,8 @@ class KeyReader:
             name = "ctrl-d"
         elif ch == "\x0c":
             name = "ctrl-l"
+        elif ch == "\x0f":
+            name = "ctrl-o"
         elif ch == "\x12":
             name = "ctrl-r"
         elif ch == "\t":
@@ -594,6 +596,11 @@ class RetryRequested(Exception):
     pass
 
 
+class OutputRequested(Exception):
+    """Ctrl+O：展开最近一次工具调用的完整输出。"""
+    pass
+
+
 COMMANDS = [
     "/exit",
     "/quit",
@@ -602,6 +609,10 @@ COMMANDS = [
     "/todos",
     "/status",
     "/cost",
+    "/context",
+    "/compact",
+    "/rewind",
+    "/output",
     "/clear",
     "/init",
     "/resume",
@@ -709,11 +720,48 @@ def _render_input(buf: str, pos: int, with_ghost: bool = True) -> None:
     sys.stdout.flush()
 
 
+def _toolbar_text():
+    """底部工具栏：常驻快捷键提示；? 展开完整命令面板（类 Claude Code）。"""
+    key = lambda s: ("class:tbkey", s)
+    txt = lambda s: ("class:tb", s)
+    if not HELP_OPEN["on"]:
+        return [
+            key(" ? "),
+            txt("命令帮助   "),
+            key(" / "),
+            txt("命令补全   "),
+            key("Ctrl+O "),
+            txt("展开输出   "),
+            key("Ctrl+R "),
+            txt("重发   "),
+            key("Ctrl+C "),
+            txt("打断 / 双击退出"),
+        ]
+    return [
+        key(" /context "), txt("上下文占用   "),
+        key(" /compact "), txt("手动压缩   "),
+        key(" /rewind "), txt("消息回退   "),
+        key(" /output [n] "), txt("展开工具输出\n"),
+        key(" /todos "), txt("任务清单   "),
+        key(" /cost "), txt("用量   "),
+        key(" /status "), txt("状态   "),
+        key(" /tools auto|knowledge|web|none\n"),
+        key(" /new "), txt("新会话   "),
+        key(" /resume "), txt("恢复会话   "),
+        key(" /init "), txt("创建 AGENTS.md   "),
+        key(" /memory "), txt("项目记忆\n"),
+        key(" /clear "), txt("清屏   "),
+        key(" /exit "), txt("退出   "),
+        key(" ? "), txt("收起面板"),
+    ]
+
+
 def make_prompt_session(history: list[str]):
     """构建 prompt_toolkit PromptSession：历史 + Tab 补全 + 键绑定语义。
 
     取代手写 KeyReader 行编辑（Windows 终端上末字符不可见/光标错位/
     Ctrl+C 竞争等 bug），与 Hermes CLI 同款方案。
+    底部工具栏常驻快捷键提示，空输入按 ? 展开/收起完整命令面板。
     """
     from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import Completer, Completion
@@ -736,6 +784,10 @@ def make_prompt_session(history: list[str]):
             # Esc：有内容 = 清空输入（与旧行为一致）
             buf.text = ""
             buf.cursor_position = 0
+        elif HELP_OPEN["on"]:
+            # Esc：空输入且面板开着 = 收起帮助面板
+            HELP_OPEN["on"] = False
+            event.app.invalidate()
 
     @kb.add("c-d")
     def _(event):
@@ -746,6 +798,20 @@ def make_prompt_session(history: list[str]):
     def _(event):
         raise RetryRequested()
 
+    @kb.add("c-o")
+    def _(event):
+        raise OutputRequested()
+
+    @kb.add("?")
+    def _(event):
+        buf = event.app.current_buffer
+        if buf.text:
+            buf.insert_text("?")
+        else:
+            # 空输入按 ?：展开/收起命令帮助面板（Claude Code 式）
+            HELP_OPEN["on"] = not HELP_OPEN["on"]
+            event.app.invalidate()
+
     pt_history = InMemoryHistory()
     for h in history[-200:]:
         pt_history.append_string(h)
@@ -755,32 +821,59 @@ def make_prompt_session(history: list[str]):
         completer=_CmdCompleter(),
         key_bindings=kb,
         enable_history_search=True,
+        bottom_toolbar=_toolbar_text,
     )
 
 
-def read_line(reader: KeyReader, history: list[str]) -> str:
-    """prompt_toolkit 行编辑；Ctrl+C/Esc/D/R 抛对应异常（与旧语义兼容）。"""
+def read_line(reader: KeyReader, history: list[str], default: str = "", status: str = "") -> str:
+    """prompt_toolkit 行编辑；Ctrl+C/Esc/D/R/O 抛对应异常（与旧语义兼容）。
+
+    default：预填文本（/rewind 后把被回退的用户消息放回输入框）。
+    status：输入区状态行（模型/工具/会话/上下文），空串则只显示提示符；
+    与对话历史之间用全宽分隔线隔开（类 Claude Code 输入框分区）。
+    """
     # 非 TTY（管道/IDE 终端/测试）走 legacy：prompt_toolkit 需要真实终端，
     # 管道输入下会挂起等待
     if not sys.stdin.isatty():
-        return _read_line_legacy(reader, history)
+        return _read_line_legacy(reader, history, default)
     try:
         session = make_prompt_session(history)
     except Exception:
         # prompt_toolkit 不可用（极老环境/非 Windows 控制台）时回退旧实现
-        return _read_line_legacy(reader, history)
+        return _read_line_legacy(reader, history, default, status)
+    from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.styles import Style
+
+    # prompt 消息是多行富文本：分隔线 + 状态行 + 提示符
+    # （prompt_toolkit 的 message 不能带 ANSI 转义串，颜色走样式类）
+    message = FormattedText([("class:prompt", "› ")])
+    if status:
+        cols = term_width()
+        message = FormattedText(
+            [
+                ("class:status", "─" * cols + "\n"),
+                ("class:status", " " + status + "\n"),
+                ("class:prompt", "› "),
+            ]
+        )
 
     # prompt_toolkit 接管 stdin 期间暂停 KeyReader，避免两个读取者抢键
     reader.pause()
     try:
-        # prompt_toolkit 的 prompt 参数是纯文本，不能传 ANSI 转义串
-        # （会把 ^[[32m 当字面量显示）。颜色用 prompt_toolkit 样式。
         text = session.prompt(
-            "› ",
-            style=Style.from_dict({"prompt": "ansigreen bold"}),
+            message,
+            style=Style.from_dict(
+                {
+                    "prompt": "ansigreen bold",
+                    "status": "ansibrightblack",
+                    "bottom-toolbar": "noreverse bg:#262626 fg:#9e9e9e",
+                    ".tbkey": "fg:ansicyan bold",
+                    ".tb": "fg:#c8c8c8",
+                }
+            ),
             multiline=False,
             wrap_lines=True,
+            default=default or "",
         )
     except KeyboardInterrupt:
         # 空输入 Ctrl+C：转 Interrupted(False)（双击退出由主循环处理）；
@@ -790,13 +883,16 @@ def read_line(reader: KeyReader, history: list[str]) -> str:
         raise QuitRequested()
     finally:
         reader.resume()
+        HELP_OPEN["on"] = False  # 提交后收起帮助面板
     if text and (not history or history[-1] != text):
         history.append(text)
         del history[:-200]
     return text
 
 
-def _read_line_legacy(reader: KeyReader, history: list[str]) -> str:
+def _read_line_legacy(
+    reader: KeyReader, history: list[str], default: str = "", status: str = ""
+) -> str:
     """旧实现：仅当 prompt_toolkit 不可用/非 TTY 时回退（保持 Ctrl+C 语义）。"""
     if not sys.stdin.isatty():
         # 管道/IDE 输入：直接行读取（msvcrt 在非 TTY 下 kbhit 恒 False 会死等）
@@ -809,13 +905,18 @@ def _read_line_legacy(reader: KeyReader, history: list[str]) -> str:
             history.append(line)
             del history[:-200]
         return line
-    buf = ""
-    pos = 0
+    buf = default
+    pos = len(buf)
     draft = ""
     idx = len(history)
+    if status:
+        sys.stdout.write(paint("─" * term_width(), "dim") + "\n")
+        sys.stdout.write(paint(f" {status}", "dim") + "\n")
     _INPUT_ROWS[0] = 1
     sys.stdout.write(paint("› ", "green", bold=True))
     sys.stdout.flush()
+    if buf:
+        _render_input(buf, pos)
     while True:
         try:
             key = reader.get()
@@ -873,6 +974,8 @@ def _read_line_legacy(reader: KeyReader, history: list[str]) -> str:
             elif key.name == "ctrl-l":
                 sys.stdout.write("\033[2J\033[H")
                 _INPUT_ROWS[0] = 1
+            elif key.name == "ctrl-o":
+                raise OutputRequested()
             elif key.name == "ctrl-r":
                 raise RetryRequested()
             elif key.name == "enter":
@@ -1039,6 +1142,218 @@ def show_cost(base_url: str, conversation_id: int | None) -> None:
     print(paint(f"本会话 tokens：{text}", "dim"))
 
 
+def http_json(base_url: str, method: str, path: str, body: dict | None = None, timeout: int = 120) -> dict | list:
+    """通用 JSON 请求辅助（/context /compact /rewind 等新命令共用）。"""
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(
+        f"{base_url}{path}",
+        data=data if method == "POST" else None,
+        headers={"Content-Type": "application/json"} if data else {},
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+# ---------------- 输入区状态（模型/上下文 meter，Claude Code 式底栏） ----------------
+
+# 最近一次上下文统计：done 事件后与 /context /compact /rewind 命令后刷新
+LAST_CONTEXT: dict = {"stats": None}
+
+# ? 键展开的命令帮助面板开关（prompt_toolkit 底部工具栏用）
+HELP_OPEN: dict = {"on": False}
+
+
+def fetch_context_stats(base_url: str, conversation_id: int | None) -> dict | None:
+    """拉取上下文占用统计；失败静默（状态行缺上下文不影响使用）。"""
+    if not conversation_id:
+        return None
+    try:
+        stats = http_json(base_url, "GET", f"/api/agent/context/{conversation_id}", timeout=8)
+        LAST_CONTEXT["stats"] = stats
+        return stats
+    except Exception:
+        return None
+
+
+def context_pct(stats: dict | None) -> int:
+    if not stats:
+        return 0
+    try:
+        tokens = int(stats.get("estimated_tokens") or 0)
+        budget = int(stats.get("token_budget") or 0)
+        return min(100, round(100 * tokens / budget)) if budget else 0
+    except Exception:
+        return 0
+
+
+def ctx_meter(stats: dict | None, width: int = 10) -> str:
+    """紧凑上下文表：上下文 [██░░░░░░░░] 12%（token 占预算比例）。"""
+    if not stats:
+        return ""
+    pct = context_pct(stats)
+    filled = int(width * pct / 100)
+    return f"上下文 {'█' * filled}{'░' * (width - filled)} {pct}%"
+
+
+def build_status_line(model: str | None, tool_mode: str, conversation_id: int | None) -> str:
+    """输入框上方的状态行：模型 · 工具模式 · 会话 · 上下文 meter。"""
+    bits = [f"模型 {model or '未知'}", f"工具 {tool_mode}"]
+    bits.append(f"会话 {conversation_id}" if conversation_id else "会话 新")
+    meter = ctx_meter(LAST_CONTEXT.get("stats"))
+    if meter:
+        bits.append(meter)
+    return " · ".join(bits)
+
+
+# 本会话的工具完整输出（供 Ctrl+O / /output 展开查看）：最新在前访问
+TOOL_OUTPUTS: collections.deque = collections.deque(maxlen=30)
+
+
+def record_tool_output(name: str, summary: str, detail: str) -> None:
+    TOOL_OUTPUTS.append({"name": name, "summary": summary, "detail": detail or summary or ""})
+
+
+def show_tool_output(n: int = 1) -> None:
+    """展开最近第 n 次（默认 1）工具调用的完整输出。"""
+    if not TOOL_OUTPUTS:
+        print(paint("本会话还没有工具输出。", "yellow"))
+        return
+    if not 1 <= n <= len(TOOL_OUTPUTS):
+        print(paint(f"只有 {len(TOOL_OUTPUTS)} 条工具输出，序号需在 1~{len(TOOL_OUTPUTS)} 之间。", "yellow"))
+        return
+    item = list(TOOL_OUTPUTS)[-n]
+    idx = len(TOOL_OUTPUTS) - n + 1
+    print(
+        paint(f"⏺ {item['name']}（第 {idx}/{len(TOOL_OUTPUTS)} 条）", "cyan", bold=True)
+        + paint(f"  {clip(item['summary'] or '', term_width() - 20)}", "dim")
+    )
+    width = term_width()
+    for line in item["detail"].splitlines()[:200]:
+        print(paint(clip(safe_text(line), width), "dim"))
+    total = len(item["detail"].splitlines())
+    if total > 200:
+        print(paint(f"…（共 {total} 行，已截断）", "dim"))
+
+
+def show_context(base_url: str, conversation_id: int | None) -> None:
+    """上下文占用统计：消息条数 / token 预算 / 滚动摘要进度。"""
+    if not conversation_id:
+        print(paint("还没有会话，先提问。", "yellow"))
+        return
+    stats = fetch_context_stats(base_url, conversation_id)
+    if stats is None:
+        print(paint("读取上下文统计失败（后端未启动或接口异常）。", "red"))
+        return
+
+    def _bar(cur: int, cap: int, width: int = 24) -> str:
+        filled = int(width * min(1.0, cur / max(1, cap)))
+        return "█" * filled + "░" * (width - filled)
+
+    count = int(stats.get("message_count") or 0)
+    max_msgs = int(stats.get("history_max_messages") or 1)
+    tokens = int(stats.get("estimated_tokens") or 0)
+    budget = int(stats.get("token_budget") or 1)
+    print(paint("上下文占用", "cyan", bold=True))
+    print(paint(f"   消息   {_bar(count, max_msgs)} {count}/{max_msgs} 条", "dim"))
+    print(paint(f"   tokens {_bar(tokens, budget)} {fmt_num(tokens)}/{fmt_num(budget)}（估算）", "dim"))
+    if stats.get("summary_chars"):
+        print(
+            paint(
+                f"   摘要   {stats['summary_chars']} 字 · 已覆盖 "
+                f"{stats.get('summary_covered_messages', 0)} 条早期消息",
+                "dim",
+            )
+        )
+    else:
+        print(paint("   摘要   未生成", "dim"))
+    if stats.get("compaction_would_trigger"):
+        print(paint("   超出软窗口，下一轮将自动压缩（也可 /compact 立即压缩）。", "yellow"))
+    else:
+        print(paint("   未超预算，暂不需要压缩。", "dim"))
+
+
+def run_compact(base_url: str, conversation_id: int | None) -> None:
+    """手动压缩：保留近期消息，更早的并入滚动摘要。"""
+    if not conversation_id:
+        print(paint("还没有会话，先提问。", "yellow"))
+        return
+    print(paint("压缩中…（需要一次模型调用，稍等）", "dim"))
+    try:
+        result = http_json(base_url, "POST", f"/api/agent/compact/{conversation_id}", timeout=180)
+    except Exception as exc:
+        print(paint(f"压缩失败：{exc}", "red"))
+        return
+    fetch_context_stats(base_url, conversation_id)  # 摘要进度变了，meter 同步
+    if result.get("compacted"):
+        print(
+            paint(
+                f"✔ 已压缩：保留最近 {result.get('kept_messages')} 条，"
+                f"{result.get('summarized_messages')} 条并入摘要"
+                f"（{result.get('summary_chars')} 字）。",
+                "green",
+            )
+        )
+    else:
+        print(paint(f"未压缩：{result.get('reason') or '无需压缩'}", "yellow"))
+
+
+def run_rewind(base_url: str, conversation_id: int | None, reader: KeyReader, arg: str) -> str | None:
+    """消息级回退：选一条历史用户消息，删除其后全部对话并放回输入框。
+
+    返回预填文本（被回退消息的内容），None 表示未执行。
+    """
+    if not conversation_id:
+        print(paint("还没有会话，先提问。", "yellow"))
+        return None
+    try:
+        msgs = http_json(
+            base_url, "GET", f"/api/conversations/{conversation_id}/messages", timeout=15
+        )
+    except Exception as exc:
+        print(paint(f"读取会话消息失败：{exc}", "red"))
+        return None
+    if not isinstance(msgs, list):
+        msgs = []
+    user_msgs = [m for m in msgs if m.get("role") == "user"][-8:]
+    if not user_msgs:
+        print(paint("本会话还没有可回退的用户消息。", "yellow"))
+        return None
+    index = -1
+    if arg.isdigit() and 1 <= int(arg) <= len(user_msgs):
+        index = int(arg) - 1
+    else:
+        print(paint("最近的用户消息（输入序号回退，回车取消）：", "cyan", bold=True))
+        for i, m in enumerate(user_msgs, 1):
+            print(paint(f"  {i}. {clip(safe_text(m.get('content') or ''), term_width() - 6)}", "dim"))
+        try:
+            sel = read_line(reader, []).strip()
+        except (Interrupted, QuitRequested):
+            sel = ""
+        except OutputRequested:
+            sel = ""
+        index = int(sel) - 1 if sel.isdigit() and 1 <= int(sel) <= len(user_msgs) else -1
+    if index < 0:
+        print(paint("已取消回退。", "dim"))
+        return None
+    target = user_msgs[index]
+    try:
+        result = http_json(
+            base_url,
+            "POST",
+            f"/api/conversations/{conversation_id}/rewind",
+            {"message_id": target.get("id")},
+            timeout=30,
+        )
+    except Exception as exc:
+        print(paint(f"回退失败：{exc}", "red"))
+        return None
+    removed = result.get("removed")
+    extra = "，滚动摘要已重置" if result.get("summary_reset") else ""
+    print(paint(f"✔ 已回退：删除 {removed} 条消息{extra}。原消息已放回输入框，可直接编辑重发。", "green"))
+    return str(target.get("content") or "")
+
+
 def init_project_memory(cwd: str) -> None:
     path = os.path.join(cwd, "AGENTS.md")
     if os.path.exists(path):
@@ -1133,11 +1448,52 @@ def _boxed(rows: list[str], title: str, color: str) -> None:
     print(paint("└" + "─" * max(0, width - 1) + "┘", color, bold=True))
 
 
+def _permission_rows(data: dict) -> list[str]:
+    """按工具类型构造审批弹窗内容：edit_file 渲染行级 diff（红删绿增），
+    write_file 渲染内容预览，其余原样展示参数。"""
+    args = data.get("arguments") or {}
+    if not isinstance(args, dict):
+        args = {}
+    name = data.get("name")
+    rows: list[str] = []
+    width = term_width()
+    if name == "edit_file" and args.get("diff_lines"):
+        rows.append(clip(f"文件：{safe_text(args.get('path') or '')}", width - 6))
+        if args.get("replace_all"):
+            rows.append(paint("替换全部匹配处", "yellow"))
+        rows.append(paint("──── 变更预览 ────", "dim"))
+        for d in args["diff_lines"][:60]:
+            op = str(d.get("op") or "")
+            text = clip(safe_text(str(d.get("text") or "")), width - 6)
+            if op == "-":
+                rows.append(paint(f"− {text}", "red"))
+            elif op == "+":
+                rows.append(paint(f"+ {text}", "green"))
+            else:
+                rows.append(paint(f"  {text}", "dim"))
+        if len(args["diff_lines"]) > 60:
+            rows.append(paint(f"  …（共 {len(args['diff_lines'])} 行 diff，已截断）", "dim"))
+        return rows
+    if name == "write_file":
+        rows.append(clip(f"文件：{safe_text(args.get('path') or '')}", width - 6))
+        preview = str(args.get("content_preview") or "")
+        if preview:
+            rows.append(paint("──── 内容预览 ────", "dim"))
+            for line in preview.splitlines()[:12]:
+                rows.append(paint(clip(safe_text(line), width - 6), "dim"))
+            if len(preview.splitlines()) > 12:
+                rows.append(paint("  …（预览截断）", "dim"))
+        return rows
+    # 其余工具（bash 等）：逐参数展示
+    for k, v in args.items():
+        rows.append(clip(f"{k}: {safe_text(json.dumps(v, ensure_ascii=False))}", width - 6))
+    return rows
+
+
 def prompt_permission(reader: KeyReader, data: dict, base_url: str) -> None:
     """渲染审批弹窗并等待数字键决定（回车=批准，Esc=拒绝）。"""
     print()
-    args = data.get("arguments") or {}
-    rows = [clip(f"{k}: {safe_text(json.dumps(v, ensure_ascii=False))}", term_width() - 6) for k, v in (args.items() if isinstance(args, dict) else [])]
+    rows = _permission_rows(data)
     is_command = data.get("name") in ("bash", "command_tool")
     opts = ["1) 批准", "2) 拒绝"]
     if is_command:
@@ -1349,10 +1705,9 @@ def stream_question(
                 tid = data.get("id") or data.get("name")
                 active_tools[str(tid)] = (safe_text(data.get("name", "tool")), time.time())
                 screen.write(
-                    paint(
-                        f"⏺ {safe_text(data.get('name', 'tool'))}({render_tool_args(data.get('arguments'))})",
-                        "dim",
-                    )
+                    paint("⏺ ", "cyan")
+                    + paint(safe_text(data.get("name", "tool")), "cyan", bold=True)
+                    + paint(f"({render_tool_args(data.get('arguments'))})", "dim")
                 )
             elif name == "tool_result":
                 tid = str(data.get("id") or "")
@@ -1365,6 +1720,12 @@ def stream_question(
                 summary = clip(safe_text(data.get("summary") or ""), term_width() - 8)
                 suffix = f"  ({dur})" if dur else ""
                 color = "red" if data.get("error") else "green"
+                # 完整输出留档：Ctrl+O / /output n 可展开查看
+                record_tool_output(
+                    safe_text(data.get("name", "tool")),
+                    safe_text(data.get("summary") or ""),
+                    safe_text(data.get("detail") or ""),
+                )
                 screen.write(paint(f"⎿ {summary}{suffix}", color))
                 if not active_tools:
                     busy_text = None
@@ -1394,11 +1755,15 @@ def stream_question(
                 screen.write_stream(rest)
                 screen.newline()
                 usage = fetch_usage(base_url, conv_id)
+                # 回答完成后刷新上下文占用（输入区状态行的 meter 数据源）
+                stats = fetch_context_stats(base_url, conv_id)
                 elapsed = fmt_dur(time.time() - t0)
                 bits = [f"会话 {conv_id}", tool_mode, f"耗时 {elapsed}"]
                 tok = fmt_tokens(usage)
                 if tok:
                     bits.append(tok)
+                if stats:
+                    bits.append(f"上下文 {context_pct(stats)}%")
                 screen.write(paint("─ " + " · ".join(bits) + " ─", "dim"))
                 break
             elif name == "error":
@@ -1436,17 +1801,25 @@ def stream_question(
 
 
 def print_banner(model: str | None, tool_mode: str, has_agents: bool) -> None:
-    print(paint("个人知识库 RAG 智能助手 · 终端版", "cyan", bold=True))
-    print(paint(f"模型：{model or '未知'} · 工具模式：{tool_mode}", "dim"))
+    """盒式欢迎横幅 + 命令/快捷键总览（类 Claude Code 启动页）。"""
+    _boxed(
+        [
+            f"模型 {model or '未知'} · 工具模式 {tool_mode}"
+            + (" · 已加载 AGENTS.md" if has_agents else "")
+        ],
+        "个人知识库 RAG 智能助手 · 终端版",
+        "cyan",
+    )
     print(
         paint(
-            "↑/↓ 历史 · Ctrl+C 打断 · Ctrl+L 清屏 · Ctrl+R 重发 · /help 命令",
+            "命令：/context 上下文 · /compact 压缩 · /rewind 回退 · /output [n] 展开输出\n"
+            "      /todos 任务 · /cost 用量 · /status 状态 · /tools 切换 · /new 新会话 · /resume 恢复\n"
+            "      /init 创建 AGENTS.md · /memory 项目记忆 · /clear 清屏 · /exit 退出\n"
+            "快捷：? 帮助面板 · Ctrl+O 展开输出 · Ctrl+R 重发 · Ctrl+L 清屏 · ↑/↓ 历史 · Ctrl+C 打断",
             "dim",
         )
     )
-    if has_agents:
-        print(paint("已加载本目录 AGENTS.md（/memory 查看加载链）", "dim"))
-    else:
+    if not has_agents:
         print(paint("提示：/init 创建 AGENTS.md（项目记忆）", "dim"))
 
 
@@ -1479,14 +1852,23 @@ def main() -> None:
     reader = KeyReader()
     screen = Screen()
     last_ctrl_c = 0.0  # 空提示符下双击 Ctrl+C 退出（Claude Code 风格）
+    pending_prefill = ""  # /rewind 后放回输入框的预填文本
     try:
         has_agents = os.path.exists(os.path.join(cwd, "AGENTS.md"))
         print_banner(model, tool_mode, has_agents)
         while True:
             try:
-                question = read_line(reader, history)
+                # 输入区状态行：模型/工具/会话/上下文 meter（对话历史与输入框之间有分隔线）
+                question = read_line(
+                    reader,
+                    history,
+                    default=pending_prefill,
+                    status=build_status_line(model, tool_mode, conversation_id),
+                )
+                pending_prefill = ""
             except Interrupted as exc:
                 print()
+                pending_prefill = ""
                 if exc.had_text:
                     # 输入框有内容：Ctrl+C/Esc 清空输入，留在 CLI
                     continue
@@ -1500,6 +1882,10 @@ def main() -> None:
             except QuitRequested:
                 print()
                 break
+            except OutputRequested:
+                # Ctrl+O：展开最近一次工具调用的完整输出
+                show_tool_output(1)
+                continue
             except RetryRequested:
                 if not last_question:
                     print(paint("还没有上一条问题。", "yellow"))
@@ -1522,6 +1908,7 @@ def main() -> None:
                     continue
                 if cmd == "/new":
                     conversation_id = None
+                    LAST_CONTEXT["stats"] = None
                     try:
                         os.remove(os.path.join(cwd, SESSION_FILE))
                     except OSError:
@@ -1565,6 +1952,7 @@ def main() -> None:
                     title = titles.get(conversation_id, "")
                     label = title if title and title != "新对话" else f"会话 {conversation_id}"
                     print(paint(f"已恢复会话 {conversation_id}（{label}）。", "dim"))
+                    fetch_context_stats(base, conversation_id)  # 状态行 meter 换源
                     # 加载并显示最近的对话上下文，方便确认从哪继续
                     recent = fetch_conversation_messages(base, conversation_id)
                     if recent:
@@ -1601,21 +1989,42 @@ def main() -> None:
                 if cmd == "/cost":
                     show_cost(base, conversation_id)
                     continue
+                if cmd == "/context":
+                    show_context(base, conversation_id)
+                    continue
+                if cmd == "/compact":
+                    run_compact(base, conversation_id)
+                    continue
+                if cmd == "/rewind":
+                    prefill = run_rewind(base, conversation_id, reader, arg)
+                    if prefill:
+                        pending_prefill = prefill
+                    fetch_context_stats(base, conversation_id)  # 消息变少，meter 同步
+                    continue
+                if cmd == "/output":
+                    n = int(arg) if arg.isdigit() else 1
+                    show_tool_output(n)
+                    continue
                 if cmd == "/status":
-                    print(
-                        paint(
-                            f"模式={tool_mode} · 会话={conversation_id or '新会话'} · 模型={model or '未知'}",
-                            "dim",
-                        )
-                    )
+                    bits = [
+                        f"模式={tool_mode}",
+                        f"会话={conversation_id or '新会话'}",
+                        f"模型={model or '未知'}",
+                    ]
+                    meter = ctx_meter(LAST_CONTEXT.get("stats"))
+                    if meter:
+                        bits.append(meter)
+                    print(paint(" · ".join(bits), "dim"))
                     continue
                 if cmd == "/help":
                     print(
                         paint(
                             "/exit /quit 退出 · /new 新会话 · /tools auto|knowledge|web|none\n"
                             "/todos 任务清单 · /status 状态 · /cost 用量 · /clear 清屏\n"
-                            "/init 创建 AGENTS.md · /memory 项目记忆 · /resume 恢复会话\n"
-                            "Ctrl+C/Esc 打断生成 · Ctrl+L 清屏 · Ctrl+R 重发 · ↑/↓ 历史",
+                            "/context 上下文占用 · /compact 手动压缩 · /rewind 消息回退\n"
+                            "/output [n] 展开工具输出 · /init 创建 AGENTS.md\n"
+                            "/memory 项目记忆 · /resume 恢复会话\n"
+                            "Ctrl+C/Esc 打断 · Ctrl+L 清屏 · Ctrl+R 重发 · Ctrl+O 展开输出 · ↑/↓ 历史",
                             "dim",
                         )
                     )

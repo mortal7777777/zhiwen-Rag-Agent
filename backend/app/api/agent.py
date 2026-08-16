@@ -14,6 +14,8 @@ from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..agent.agent import AgentService
+from ..db import get_db
+from ..db import repository as repo
 from ..schemas import AgentChatRequest, AgentChatResponse
 from .deps import get_agent_service
 
@@ -166,3 +168,35 @@ async def agent_cancel(run_id: str) -> dict:
     """主动取消某次正在进行的流式生成（CLI 按 Ctrl+C 时调用）。"""
     cancelled, reason = request_cancel(run_id)
     return {"run_id": run_id, "cancelled": cancelled, "reason": reason}
+
+
+@router.get("/agent/context/{conversation_id}")
+def agent_context(
+    conversation_id: int,
+    service: AgentService = Depends(get_agent_service),
+    db=Depends(get_db),
+) -> dict:
+    """上下文占用统计：消息条数 / token 预算 / 滚动摘要进度（/context 命令）。"""
+    if repo.get_conversation(db, conversation_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    try:
+        return service.context.context_stats(db, conversation_id)
+    except Exception as exc:
+        logger.exception("上下文统计失败")
+        raise HTTPException(status_code=500, detail=f"统计失败：{exc}")
+
+
+@router.post("/agent/compact/{conversation_id}")
+def agent_compact(
+    conversation_id: int,
+    service: AgentService = Depends(get_agent_service),
+    db=Depends(get_db),
+) -> dict:
+    """手动压缩会话历史（/compact）：保留近期消息，更早的并入滚动摘要。"""
+    if repo.get_conversation(db, conversation_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    try:
+        return service.context.compact_now(db, conversation_id)
+    except Exception as exc:
+        logger.exception("手动压缩失败")
+        raise HTTPException(status_code=500, detail=f"压缩失败：{exc}")
