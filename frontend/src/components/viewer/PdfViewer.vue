@@ -109,9 +109,11 @@ async function load() {
     pdfDoc = await task.promise
     pageCount.value = pdfDoc.numPages
     await observePages()
-    await prefetchViewports()
+    // 首屏先渲染（不等后台任务），避免大书"取尺寸"阻塞首次出图
     renderVisible()
     emit('ready')
+    // 后台采样占位高度（修正滚动条长度），不阻塞交互
+    prefetchViewports()
   } catch (e) {
     error.value = e?.message || 'PDF 加载失败'
     emit('error', error.value)
@@ -148,9 +150,16 @@ async function observePages() {
   if (scrollEl.value) resizeObserver.observe(scrollEl.value)
 }
 
-// 后台逐页取基础尺寸，设置占位高度（滚动条长度接近真实）
+// 后台采样页面基础尺寸：前 5 页 + 每 40 页一页（getPage 不免费，
+// 千页大书逐页取尺寸要数秒且阻塞首屏；未采样页用最近样本的宽高比估高，
+// 渲染到该页时自然修正）
 async function prefetchViewports() {
-  for (let n = 1; n <= pageCount.value; n++) {
+  const total = pageCount.value
+  if (!pdfDoc || !total) return
+  const samples = []
+  for (let n = 1; n <= Math.min(total, 5); n++) samples.push(n)
+  for (let n = 10; n <= total; n += 40) samples.push(n)
+  for (const n of samples) {
     if (!pdfDoc) return
     try {
       const page = await getPage(n)
@@ -162,7 +171,20 @@ async function prefetchViewports() {
     } catch {
       return
     }
-    if (n % 20 === 0) await new Promise((r) => setTimeout(r, 0))
+    if (n % 5 === 0) await new Promise((r) => setTimeout(r, 0))
+  }
+  // 其余页按最近样本的宽高比估占位高度
+  let si = 0
+  for (let n = 1; n <= total; n++) {
+    if (!pdfDoc) return
+    if (si < samples.length - 1 && n === samples[si + 1]) si++
+    if (info(n).baseW) continue
+    const s = info(samples[si])
+    if (!s.baseW) continue
+    const p = info(n)
+    p.baseW = s.baseW
+    p.baseH = s.baseH
+    setWrapperHeight(n)
   }
 }
 
@@ -304,25 +326,52 @@ async function resolveDestPage(item) {
   return null
 }
 
+// 书签标题修复：这批 PDF 的书签是 GBK 字节被 pdf.js 按 Latin-1 解码
+// （显示成 "Ê×Ò³" 式乱码），重编码回字节再按 GBK 解出中文；
+// 顺手剥掉试用版工具写进书签的水印前缀
+function repairOutlineTitle(t) {
+  if (!t) return '（无标题）'
+  const s = t.split('[Trial version]').join('').trim()
+  if (/[\u00C0-\u00FF]/.test(s)) {
+    try {
+      const bytes = new Uint8Array(s.length)
+      for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i) & 0xff
+      const fixed = new TextDecoder('gbk').decode(bytes)
+      if (!fixed.includes('\uFFFD') && /[\u4e00-\u9fff]/.test(fixed)) {
+        return fixed
+      }
+    } catch {
+      // TextDecoder 不支持 gbk 时原样返回
+    }
+  }
+  return s || '（无标题）'
+}
+
 async function getToc() {
   if (!pdfDoc) return []
   try {
     const outline = await pdfDoc.getOutline()
     if (!outline?.length) return []
     const flat = []
-    const walk = async (items, depth) => {
+    const walk = (items, depth) => {
       for (const it of items) {
         if (flat.length >= 400) return
-        flat.push({
-          label: (it.title || '').trim() || '（无标题）',
-          page: await resolveDestPage(it),
-          indent: depth,
-        })
-        if (it.items?.length && depth < 3) await walk(it.items, depth + 1)
+        flat.push({ item: it, depth })
+        if (it.items?.length && depth < 3) walk(it.items, depth + 1)
       }
     }
-    await walk(outline, 0)
-    return flat
+    walk(outline, 0)
+    // dest → 页码并行解析（串行时几百条书签要秒级）
+    await Promise.all(
+      flat.map(async (e) => {
+        e.page = await resolveDestPage(e.item)
+      }),
+    )
+    return flat.map((e) => ({
+      label: repairOutlineTitle(e.item.title),
+      page: e.page,
+      indent: e.depth,
+    }))
   } catch {
     return []
   }
