@@ -73,6 +73,25 @@ class Message(Base):
     conversation = relationship("Conversation", back_populates="messages")
 
 
+class DocumentMeta(Base):
+    """知识库文档的自定义元数据：分类 / 标签 / 备注（按相对路径唯一）。
+
+    分类由用户在知识库管理页维护，用于前端筛选与后续定向检索；
+    文档本体仍在 data/ 目录，删除文档时对应元数据残留无害（按需清理）。
+    """
+
+    __tablename__ = "document_meta"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    relative_path = Column(String(500), nullable=False, unique=True, index=True)
+    category = Column(String(100), default="", nullable=False)
+    tags = Column(String(500), default="", nullable=False)
+    notes = Column(Text, nullable=True)
+    updated_at = Column(
+        DateTime, default=datetime.now, onupdate=datetime.now, nullable=False
+    )
+
+
 class AgentRun(Base):
     """Agent 决策运行记录：问题、计划、工具轨迹（含耗时）、状态、延迟。"""
 

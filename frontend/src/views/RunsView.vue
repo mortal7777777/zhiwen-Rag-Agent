@@ -1,10 +1,54 @@
 <template>
   <div class="runs-page">
+    <!-- 用量统计卡：tokens / 估算成本 / 缓存命中率 / 每日趋势 -->
+    <el-card v-if="stats" shadow="never" class="stats-card">
+      <template #header>
+        <div class="header-row">
+          <span class="card-title">用量统计（近 {{ stats.days }} 天）</span>
+          <el-button size="small" @click="load">刷新</el-button>
+        </div>
+      </template>
+      <div class="stats-grid">
+        <div class="stat-cell">
+          <div class="stat-value">{{ fmtTokens(stats.input_tokens + stats.output_tokens) }}</div>
+          <div class="stat-label">总 tokens（入 {{ fmtTokens(stats.input_tokens) }} / 出 {{ fmtTokens(stats.output_tokens) }}）</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-value">¥{{ stats.estimated_cost_yuan?.toFixed(2) ?? '0.00' }}</div>
+          <div class="stat-label">估算成本（非账单）</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-value">
+            {{ stats.cache_hit_rate != null ? (stats.cache_hit_rate * 100).toFixed(0) + '%' : '-' }}
+          </div>
+          <div class="stat-label">缓存命中率</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-value">{{ formatMs(stats.avg_latency_ms) }}</div>
+          <div class="stat-label">平均耗时 · {{ stats.runs }} 次</div>
+        </div>
+      </div>
+      <!-- 每日 tokens 趋势（纯 CSS 条形） -->
+      <div v-if="stats.daily && stats.daily.length" class="daily-trend">
+        <div
+          v-for="d in stats.daily"
+          :key="d.date"
+          class="daily-col"
+          :title="`${d.date}：${d.runs} 次 · ${fmtTokens(d.input_tokens + d.output_tokens)} tokens`"
+        >
+          <div class="daily-bar-wrap">
+            <div class="daily-bar" :style="{ height: dailyBarPct(d) }" />
+          </div>
+          <div class="daily-label">{{ d.date }}</div>
+        </div>
+      </div>
+    </el-card>
+
     <el-card shadow="never" class="runs-card">
       <template #header>
         <div class="header-row">
           <span class="card-title">Agent 运行记录</span>
-          <el-button size="small" @click="load">刷新</el-button>
+          <el-button v-if="!stats" size="small" @click="load">刷新</el-button>
         </div>
       </template>
       <el-table v-loading="loading" :data="runs" stripe>
@@ -102,16 +146,33 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getRunTrace, listConversations, listRuns } from '../api'
+import { getRunTrace, getRunStats, listConversations, listRuns } from '../api'
 
 defineOptions({ name: 'RunsView' })
 
 const runs = ref([])
 const loading = ref(false)
+const stats = ref(null)
 const detailVisible = ref(false)
 const detail = ref(null)
 const traceJson = ref('')
 const convTitles = ref({})
+
+function fmtTokens(n) {
+  if (n == null) return '-'
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
+
+function dailyBarPct(d) {
+  const max = Math.max(
+    ...stats.value.daily.map((x) => x.input_tokens + x.output_tokens),
+    1,
+  )
+  const pct = ((d.input_tokens + d.output_tokens) / max) * 100
+  return `${Math.max(4, pct)}%`
+}
 
 // 分阶段耗时的展示顺序与中文名（token_usage.timings，旧数据无此字段则不显示）
 const TIMING_LABELS = [
@@ -154,11 +215,13 @@ function formatMs(ms) {
 async function load() {
   loading.value = true
   try {
-    const [runList, convList] = await Promise.all([
+    const [runList, convList, runStats] = await Promise.all([
       listRuns({ limit: 200 }),
       listConversations().catch(() => []),
+      getRunStats(7).catch(() => null),
     ])
     runs.value = runList
+    stats.value = runStats
     const map = {}
     for (const c of convList || []) {
       map[c.id] = c.title || `会话 ${c.id}`
@@ -196,6 +259,75 @@ onMounted(load)
 .runs-page {
   height: calc(100vh - 32px);
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 用量统计卡 */
+.stats-card {
+  margin-bottom: 0;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.stat-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.stat-value {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.daily-trend {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+  height: 64px;
+}
+
+.daily-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+
+.daily-bar-wrap {
+  height: 44px;
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
+}
+
+.daily-bar {
+  width: 100%;
+  max-width: 36px;
+  border-radius: 4px 4px 0 0;
+  background: linear-gradient(180deg, var(--el-color-primary, #409eff), rgba(64, 158, 255, 0.35));
+}
+
+.daily-label {
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
 }
 
 .runs-card :deep(.el-card) {

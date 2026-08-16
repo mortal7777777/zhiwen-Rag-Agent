@@ -1781,6 +1781,13 @@ def stream_question(
                 if stats:
                     bits.append(f"上下文 {context_pct(stats)}%")
                 screen.write(paint("─ " + " · ".join(bits) + " ─", "dim"))
+                # 长任务完成提示音（>10s）：切走窗口也能知道回答完了
+                if time.time() - t0 > 10:
+                    try:
+                        sys.stdout.write("\a")
+                        sys.stdout.flush()
+                    except Exception:
+                        pass
                 break
             elif name == "error":
                 screen.newline()
@@ -1814,6 +1821,104 @@ def stream_question(
 
 
 # ------------------------------------------------------------------ 主流程
+
+
+def run_headless(
+    base_url: str,
+    question: str,
+    tool_mode: str,
+    conversation_id: int | None,
+    sandbox: str | None,
+    output_format: str,
+) -> int:
+    """headless 一次性问答（类 claude -p）：无交互 UI，收集事件后输出退出。
+
+    text 输出回答正文；json 输出 {answer, conversation_id, sources,
+    tool_trace, token_usage, timings}；出错时错误进 stderr 并返回 1。
+    """
+    body = json.dumps(
+        {
+            "question": question,
+            "conversation_id": conversation_id,
+            "tool_mode": tool_mode,
+            "template_id": None,
+            "project_dir": os.getcwd(),
+            "command_sandbox": sandbox,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url}/api/agent/stream",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    answer: list[str] = []
+    sources: list[dict] = []
+    tool_trace: list[dict] = []
+    conv_id: int | None = conversation_id
+    error: str | None = None
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    event = json.loads(line[6:])
+                except Exception:
+                    continue
+                name, data = event.get("event"), event.get("data") or {}
+                if name == "session":
+                    conv_id = data.get("conversation_id") or conv_id
+                elif name == "token":
+                    answer.append(data if isinstance(data, str) else str(data))
+                elif name == "tool_result":
+                    tool_trace.append(
+                        {"name": data.get("name"), "summary": data.get("summary")}
+                    )
+                    if data.get("sources"):
+                        sources.extend(data["sources"])
+                elif name == "error":
+                    error = str(data.get("message") or "未知错误")
+    except Exception as exc:
+        error = str(exc)
+    if error:
+        msg = (
+            json.dumps({"error": error}, ensure_ascii=False)
+            if output_format == "json"
+            else f"✖ {error}"
+        )
+        print(msg, file=sys.stderr)
+        return 1
+    text = "".join(answer)
+    if output_format == "json":
+        usage, timings = {}, {}
+        try:
+            runs = http_json(
+                base_url, "GET", f"/api/runs?conversation_id={conv_id}&limit=1", timeout=10
+            )
+            if isinstance(runs, list) and runs:
+                usage = (runs[0].get("token_usage") or {}) if isinstance(runs[0], dict) else {}
+                timings = usage.get("timings") or {}
+        except Exception:
+            pass
+        print(
+            json.dumps(
+                {
+                    "conversation_id": conv_id,
+                    "answer": text,
+                    "sources": sources,
+                    "tool_trace": tool_trace,
+                    "token_usage": usage,
+                    "timings": timings,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        print(text)
+    return 0
 
 
 def print_banner(model: str | None, tool_mode: str, has_agents: bool) -> None:
@@ -1861,6 +1966,19 @@ def main() -> None:
         help="命令沙箱：docker=容器沙箱（无网络/只读根/限资源），subprocess=宿主执行；不传跟随设置页",
     )
     parser.add_argument("--conversation", type=int, default=None)
+    parser.add_argument(
+        "-p",
+        "--print",
+        dest="print_query",
+        default=None,
+        help="headless 模式：执行一次问答后退出（类 claude -p），不进入交互界面",
+    )
+    parser.add_argument(
+        "--output-format",
+        default="text",
+        choices=["text", "json"],
+        help="headless 输出格式：text=回答正文，json=完整结构（answer/sources/usage/timings）",
+    )
     args = parser.parse_args()
 
     base = f"http://{args.host}:{args.port}"
@@ -1871,6 +1989,19 @@ def main() -> None:
     history = load_history(cwd)
     last_question = ""
     model = fetch_model_label(base)
+
+    # headless：一次性问答后退出（可接脚本/CI/管道组合）
+    if args.print_query:
+        sys.exit(
+            run_headless(
+                base,
+                args.print_query,
+                tool_mode,
+                conversation_id,
+                sandbox_mode,
+                args.output_format,
+            )
+        )
 
     reader = KeyReader()
     screen = Screen()

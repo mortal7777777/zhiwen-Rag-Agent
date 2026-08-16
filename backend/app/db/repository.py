@@ -9,7 +9,15 @@ from datetime import datetime
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from .models import AgentRun, AppMeta, Conversation, Memory, Message, PromptTemplate
+from .models import (
+    AgentRun,
+    AppMeta,
+    Conversation,
+    DocumentMeta,
+    Memory,
+    Message,
+    PromptTemplate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +299,51 @@ def reset_summary_if_stale(
         db.commit()
         return True
     return False
+
+
+# ---------------- 知识库文档元数据（自定义分类） ----------------
+
+def list_document_meta(db: Session) -> dict[str, dict]:
+    """全部文档元数据：{relative_path: {category, tags, notes}}。"""
+    rows = db.execute(select(DocumentMeta)).scalars().all()
+    return {
+        row.relative_path: {
+            "category": row.category or "",
+            "tags": row.tags or "",
+            "notes": row.notes or "",
+        }
+        for row in rows
+    }
+
+
+def upsert_document_meta(
+    db: Session,
+    relative_path: str,
+    category: str = "",
+    tags: str = "",
+    notes: str | None = None,
+) -> None:
+    """保存某个文档的分类/标签/备注（存在则更新）。"""
+    row = (
+        db.execute(
+            select(DocumentMeta).where(DocumentMeta.relative_path == relative_path)
+        )
+        .scalar_one_or_none()
+    )
+    if row is None:
+        row = DocumentMeta(
+            relative_path=relative_path,
+            category=category,
+            tags=tags,
+            notes=notes,
+        )
+        db.add(row)
+    else:
+        row.category = category
+        row.tags = tags
+        if notes is not None:
+            row.notes = notes
+    db.commit()
 
 
 # ---------------- Agent 运行记录（决策可观测性）----------------

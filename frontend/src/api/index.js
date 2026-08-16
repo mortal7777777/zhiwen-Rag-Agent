@@ -181,6 +181,24 @@ export const rebuildIndex = () =>
 export const getIndexStatus = () =>
   client.get('/index/status').then((res) => res.data)
 
+/** 预览知识库文档（md 按原文，pdf/docx/epub 等提取文本） */
+export const previewDocument = (relativePath) =>
+  client
+    .get('/documents/preview', { params: { path: relativePath } })
+    .then((res) => res.data)
+
+/** 全部文档的自定义分类元数据 */
+export const getDocumentMeta = () =>
+  client.get('/documents/meta').then((res) => res.data)
+
+/** 保存某个文档的分类/标签/备注 */
+export const saveDocumentMeta = (payload) =>
+  client.put('/documents/meta', payload).then((res) => res.data)
+
+/** 运行统计：tokens / 缓存命中率 / 估算成本 / 每日趋势 */
+export const getRunStats = (days = 7) =>
+  client.get('/runs/stats', { params: { days } }).then((res) => res.data)
+
 // ---------------- 设置与技能 ----------------
 
 /** 读取运行时配置（API Key 已脱敏） */

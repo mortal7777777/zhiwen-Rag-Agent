@@ -64,33 +64,131 @@
     <!-- 文件列表 -->
     <el-card shadow="never">
       <template #header>
-        <span class="card-title">已有文档（{{ documents.length }}）</span>
+        <div class="header-row">
+          <span class="card-title">已有文档（{{ filteredDocuments.length }}）</span>
+          <el-select
+            v-model="categoryFilter"
+            clearable
+            placeholder="按分类筛选"
+            size="small"
+            class="category-filter"
+          >
+            <el-option v-for="c in categories" :key="c" :label="c" :value="c" />
+          </el-select>
+        </div>
       </template>
-      <el-table v-loading="tableLoading" :data="documents" stripe>
-        <el-table-column prop="name" label="文件名" min-width="240" />
-        <el-table-column prop="size" label="大小" width="120">
+      <el-table v-loading="tableLoading" :data="filteredDocuments" stripe>
+        <el-table-column label="文件名" min-width="220">
+          <template #default="{ row }">
+            <span class="doc-name" @click="handlePreview(row)">{{ row.name }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="分类" width="120">
+          <template #default="{ row }">
+            <el-tag v-if="row.category" size="small" type="info">{{ row.category }}</el-tag>
+            <span v-else class="no-category">未分类</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="标签" min-width="140" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="doc-tags">{{ row.tags || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="size" label="大小" width="100">
           <template #default="{ row }">{{ formatSize(row.size) }}</template>
         </el-table-column>
-        <el-table-column prop="modified" label="修改时间" width="180" />
-        <el-table-column label="操作" width="100" align="center">
+        <el-table-column prop="modified" label="修改时间" width="170" />
+        <el-table-column label="操作" width="180" align="center">
           <template #default="{ row }">
+            <el-button type="primary" link @click="handlePreview(row)">预览</el-button>
+            <el-button type="primary" link @click="openMetaEdit(row)">分类</el-button>
             <el-button type="danger" link @click="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
     </el-card>
+
+    <!-- 文档预览抽屉：md 渲染 Markdown，其余按文本展示 -->
+    <el-drawer
+      v-model="previewVisible"
+      :title="previewData?.name || '文档预览'"
+      size="55%"
+      :destroy-on-close="true"
+    >
+      <div v-loading="previewLoading" class="preview-body">
+        <div v-if="previewData" class="preview-meta">
+          <el-tag size="small">{{ previewData.suffix }}</el-tag>
+          <span class="preview-count">
+            {{ previewData.char_count?.toLocaleString() }} 字符
+          </span>
+          <el-tag v-if="previewData.truncated" size="small" type="warning">
+            内容过长已截断（仅前 20 万字符）
+          </el-tag>
+        </div>
+        <MarkdownContent
+          v-if="previewData?.kind === 'markdown'"
+          :content="previewData.content"
+        />
+        <pre v-else-if="previewData" class="preview-text">{{ previewData.content }}</pre>
+        <div v-if="previewError" class="preview-error">{{ previewError }}</div>
+      </div>
+    </el-drawer>
+
+    <!-- 分类编辑对话框 -->
+    <el-dialog v-model="metaEditVisible" title="文档分类" width="440px" append-to-body>
+      <el-form label-width="60px">
+        <el-form-item label="文件">
+          <span class="meta-file">{{ metaForm.name }}</span>
+        </el-form-item>
+        <el-form-item label="分类">
+          <el-select
+            v-model="metaForm.category"
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            placeholder="选择已有分类或输入新分类"
+            style="width: 100%"
+          >
+            <el-option v-for="c in categories" :key="c" :label="c" :value="c" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="标签">
+          <el-input
+            v-model="metaForm.tags"
+            placeholder="多个标签用逗号分隔，如：RAG, 教程"
+          />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input
+            v-model="metaForm.notes"
+            type="textarea"
+            :rows="3"
+            placeholder="可选：这篇文档是什么、适合什么时候查"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="metaEditVisible = false">取消</el-button>
+        <el-button type="primary" :loading="metaSaving" @click="saveMeta">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled, Loading } from '@element-plus/icons-vue'
+import MarkdownContent from '../components/MarkdownContent.vue'
 import {
   deleteDocument,
   getIndexStatus,
+  getDocumentMeta,
   listDocuments,
+  previewDocument,
   rebuildIndex,
+  saveDocumentMeta,
   uploadDocuments,
 } from '../api'
 
@@ -101,6 +199,27 @@ const rebuilding = ref(false)
 const tableLoading = ref(false)
 const uploadRef = ref(null)
 const fileList = ref([])
+
+// 分类筛选：'' = 全部
+const categoryFilter = ref('')
+const categories = ref([])
+
+// 文档预览
+const previewVisible = ref(false)
+const previewLoading = ref(false)
+const previewData = ref(null)
+const previewError = ref('')
+
+// 分类编辑
+const metaEditVisible = ref(false)
+const metaSaving = ref(false)
+const metaForm = ref({ relative_path: '', name: '', category: '', tags: '', notes: '' })
+
+const filteredDocuments = computed(() =>
+  categoryFilter.value
+    ? documents.value.filter((d) => d.category === categoryFilter.value)
+    : documents.value,
+)
 
 function formatSize(size) {
   if (size < 1024) return `${size} B`
@@ -113,6 +232,8 @@ async function refresh() {
     const [docs, indexStatus] = await Promise.all([listDocuments(), getIndexStatus()])
     documents.value = docs
     status.value = indexStatus
+    // 分类选项 = 当前使用的分类（含"未分类"文档不列出）
+    categories.value = [...new Set(docs.map((d) => d.category).filter(Boolean))]
   } catch (error) {
     ElMessage.error(error.response?.data?.detail || '获取数据失败，请确认后端已启动')
   }
@@ -181,6 +302,59 @@ async function handleRebuild() {
   }
 }
 
+async function handlePreview(row) {
+  previewVisible.value = true
+  previewLoading.value = true
+  previewData.value = null
+  previewError.value = ''
+  try {
+    previewData.value = await previewDocument(row.relative_path)
+  } catch (error) {
+    previewError.value = error.response?.data?.detail || '文档解析失败'
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+async function openMetaEdit(row) {
+  // 已有元数据（备注等）先读全量，避免只有列表里的 category/tags
+  let notes = ''
+  try {
+    const metas = await getDocumentMeta()
+    notes = metas?.[row.relative_path]?.notes || ''
+  } catch {
+    // 读取失败不阻塞编辑
+  }
+  metaForm.value = {
+    relative_path: row.relative_path,
+    name: row.name,
+    category: row.category || '',
+    tags: row.tags || '',
+    notes,
+  }
+  metaEditVisible.value = true
+}
+
+async function saveMeta() {
+  const form = metaForm.value
+  metaSaving.value = true
+  try {
+    await saveDocumentMeta({
+      relative_path: form.relative_path,
+      category: (form.category || '').trim(),
+      tags: (form.tags || '').trim(),
+      notes: form.notes || null,
+    })
+    metaEditVisible.value = false
+    ElMessage.success('分类已保存')
+    await refresh()
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '保存失败')
+  } finally {
+    metaSaving.value = false
+  }
+}
+
 onMounted(() => {
   tableLoading.value = true
   refresh().finally(() => {
@@ -228,5 +402,69 @@ onMounted(() => {
 
 .upload-button {
   margin-top: 12px;
+}
+
+.category-filter {
+  width: 160px;
+}
+
+/* 文件名可点击预览 */
+.doc-name {
+  color: var(--el-color-primary);
+  cursor: pointer;
+}
+
+.doc-name:hover {
+  text-decoration: underline;
+}
+
+.no-category {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.doc-tags {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+/* 预览抽屉 */
+.preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 200px;
+}
+
+.preview-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.preview-text {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-card-2, rgba(128, 128, 128, 0.06));
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: calc(100vh - 160px);
+  overflow: auto;
+}
+
+.preview-error {
+  color: var(--el-color-danger);
+  font-size: 13px;
+}
+
+.meta-file {
+  font-size: 13px;
+  color: var(--text-2);
+  word-break: break-all;
 }
 </style>

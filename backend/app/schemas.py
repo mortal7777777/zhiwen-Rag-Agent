@@ -44,6 +44,17 @@ class DocumentInfo(BaseModel):
     relative_path: str
     size: int
     modified: str
+    category: str = ""
+    tags: str = ""
+
+
+class DocumentMetaIn(BaseModel):
+    """保存文档自定义分类/标签/备注。"""
+
+    relative_path: str = Field(..., min_length=1, max_length=500)
+    category: str = Field(default="", max_length=100)
+    tags: str = Field(default="", max_length=500)
+    notes: str | None = Field(default=None, max_length=4000)
 
 
 class IndexStatus(BaseModel):
