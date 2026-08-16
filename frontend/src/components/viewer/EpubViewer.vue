@@ -45,8 +45,9 @@ async function load() {
     rendition = book.renderTo(containerEl.value, {
       width: '100%',
       height: '100%',
-      spread: 'none',
-      flow: 'paginated',
+      // 滚动模式：分页模式（paginated）没有滚动条且滚轮不翻页，
+      // 桌面阅读场景用每章滚动（章内滚轮/滚动条原生可用）
+      flow: 'scrolled-doc',
       allowScriptedContent: false,
     })
     // 章内高亮样式（注入到 iframe）
