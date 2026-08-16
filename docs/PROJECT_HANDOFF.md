@@ -503,6 +503,11 @@ PDF 目录跳页（40 项→93 页）、关闭重开回到 94 页（位置记忆
 子目录重名文档需**重建索引**才精确）；PDF 书签乱码是示例文集.pdf 自身
 GBK 编码问题 + 试用版水印，非代码 bug。
 
+**修复（提交 `a173c6b`）**：用户实测 EPUB「无滚动条、滚轮不动」——根因是
+epub.js `flow:'paginated'` 分页模式本身无滚动条且不响应滚轮，改
+`flow:'scrolled-doc'` 章内滚动模式；浏览器真滚轮实测三查看器全部可滚
+（epub 13→3378、PDF 81568→85606、文本 0→4038），epub 目录跳转正常。
+
 ### 本会话遗留的小事
 - 桌面 `C:\Users\user\Desktop\practice2` 是测试产物（内容已清空），删除被 Windows 拒绝（疑似占用/权限），**用户手动删除即可**。
 - `docs/` 下还有 `AGENT_COMPARISON.md`（与主流 agent 对比）、`HERMES_STYLE_AGENT.md`（终端/ACP 路线），写文档前先读，避免重复。
