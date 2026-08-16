@@ -112,11 +112,18 @@ function reportScroll() {
   }
 }
 
-function applyLocator(locator) {
+// 两段式：先滚到命中元素所在 Word 分节（section.docx 总有布局）触发渲染，
+// 再精确定位——content-visibility 跳过渲染的节内 rect 不可靠
+async function applyLocator(locator) {
   const sc = containerEl.value
   if (!sc || !locator?.anchorText) return false
   const hit = findTextInElement(sc, locator.anchorText)
   if (!hit?.element) return false
+  const section = hit.element.closest('section.docx')
+  if (section) {
+    sc.scrollTop = section.offsetTop - 8
+    await new Promise((r) => setTimeout(r, 150))
+  }
   scrollToAndFlash(hit.element, sc)
   return true
 }
@@ -156,7 +163,7 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
   flex: 1;
   position: relative; /* offsetTop 相对本容器计算 */
   overflow-y: auto;
-  background: var(--bg-card-2, rgba(128, 128, 128, 0.06));
+  background: var(--bg-app, #f3f4f8);
 }
 
 /* docx-preview 输出 .docx-wrapper > section.docx（Word 分节 = 页），

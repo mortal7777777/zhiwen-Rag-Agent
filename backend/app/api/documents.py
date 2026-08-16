@@ -16,8 +16,10 @@ from .deps import get_service
 
 router = APIRouter(tags=["documents"])
 
-# 预览内容上限：超长截断（完整内容走下载/本地打开）
-PREVIEW_MAX_CHARS = 200_000
+# 预览内容上限：超长截断（完整内容走下载/本地打开）。
+# 2026-08-16 20万→100万：引用「查看原文」要在预览文本里定位，大书截断会让
+# 引用定位失效（配合前端 content-visibility 按需渲染，长文本不卡）
+PREVIEW_MAX_CHARS = 1_000_000
 
 # 专业查看器格式的 MIME 类型（Windows 注册表猜测不可靠，显式指定）
 FILE_MEDIA_TYPES = {

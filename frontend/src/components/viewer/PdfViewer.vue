@@ -405,8 +405,9 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--border, #dcdfe6);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border, #e8ebf1);
+  background: var(--bg-panel, #fbfcfe);
   flex: none;
 }
 
@@ -441,16 +442,22 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
   flex: 1;
   position: relative; /* offsetTop 相对本容器计算 */
   overflow-y: auto;
-  padding: 16px;
+  padding: 20px;
+  background: #e9ecf1;
+}
+
+/* 深色主题下阅读舞台压暗（页面画布仍为白纸） */
+html.dark .pv-scroll {
+  background: #23262d;
 }
 
 .pv-page {
   position: relative;
-  margin: 0 auto 14px;
+  margin: 0 auto 18px;
   width: fit-content;
   min-height: 200px;
-  background: var(--bg-card, #fff);
-  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.22);
   border-radius: 4px;
   overflow: hidden;
 }

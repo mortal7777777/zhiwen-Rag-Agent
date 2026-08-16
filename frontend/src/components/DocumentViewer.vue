@@ -196,6 +196,93 @@ defineExpose({ open })
   height: 100%;
   min-height: 0;
 }
+
+.dv-toc {
+  width: 236px;
+  flex: none;
+  border-right: 1px solid var(--border, #e8ebf1);
+  background: var(--bg-panel, #fbfcfe);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dv-toc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1, #23262d);
+  border-bottom: 1px solid var(--border, #e8ebf1);
+  flex: none;
+}
+
+.dv-toc-toggle,
+.dv-toc-expand {
+  cursor: pointer;
+  color: var(--text-3, #8b909b);
+}
+
+.dv-toc-toggle:hover,
+.dv-toc-expand:hover {
+  color: var(--primary, #1677ff);
+}
+
+.dv-toc-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0 24px;
+}
+
+.dv-toc-item {
+  padding: 6px 10px;
+  padding-right: 8px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2, #4c515b);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-left: 2px solid transparent;
+}
+
+.dv-toc-item:hover {
+  color: var(--primary, #1677ff);
+  background: var(--bg-hover, #f1f4f9);
+}
+
+.dv-toc-item.active {
+  color: var(--primary, #1677ff);
+  border-left-color: var(--primary, #1677ff);
+  background: var(--primary-soft, rgba(22, 119, 255, 0.08));
+}
+
+.dv-main {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  background: var(--bg-chat, #fff);
+}
+
+html.dark .dv-main {
+  background: var(--bg-chat, #1a1d24);
+}
+
+.dv-toc-expand {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 5;
+  padding: 5px;
+  border-radius: 8px;
+  color: var(--text-2, #4c515b);
+  background: var(--bg-card, #f7f8fc);
+  border: 1px solid var(--border, #e8ebf1);
+  box-shadow: var(--shadow-soft, 0 2px 10px rgba(31, 35, 41, 0.05));
+}
 </style>
 
 <style>
@@ -206,87 +293,3 @@ defineExpose({ open })
 }
 </style>
 
-<style scoped>
-.dv-toc {
-  width: 232px;
-  flex: none;
-  border-right: 1px solid var(--border, #dcdfe6);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.dv-toc-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 10px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-1, #303133);
-  border-bottom: 1px solid var(--border, #dcdfe6);
-  flex: none;
-}
-
-.dv-toc-toggle,
-.dv-toc-expand {
-  cursor: pointer;
-  color: var(--text-3, #909399);
-}
-
-.dv-toc-toggle:hover,
-.dv-toc-expand:hover {
-  color: var(--el-color-primary);
-}
-
-.dv-toc-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 6px 0 20px;
-}
-
-.dv-toc-item {
-  padding: 6px 10px;
-  padding-right: 8px;
-  font-size: 12.5px;
-  line-height: 1.4;
-  color: var(--text-2, #606266);
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  border-left: 2px solid transparent;
-}
-
-.dv-toc-item:hover {
-  color: var(--el-color-primary);
-  background: var(--bg-card-2, rgba(128, 128, 128, 0.06));
-}
-
-.dv-toc-item.active {
-  color: var(--el-color-primary);
-  border-left-color: var(--el-color-primary);
-  background: var(--bg-card-2, rgba(128, 128, 128, 0.08));
-}
-
-.dv-main {
-  flex: 1;
-  min-width: 0;
-  position: relative;
-}
-
-.dv-toc-expand {
-  position: absolute;
-  left: 10px;
-  top: 10px;
-  z-index: 5;
-  padding: 4px;
-  border-radius: 6px;
-  background: var(--bg-card, #fff);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
-}
-
-.dv-main.no-toc {
-  padding-left: 0;
-}
-</style>

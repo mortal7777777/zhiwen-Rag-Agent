@@ -50,9 +50,14 @@ async function load() {
       flow: 'scrolled-doc',
       allowScriptedContent: false,
     })
-    // 章内高亮样式（注入到 iframe）
+    // 章内排版：限宽居中阅读栏 + 高亮样式（注入到 iframe）
     rendition.themes.default({
-      body: { padding: '0 6px' },
+      body: {
+        padding: '0 24px',
+        'max-width': '880px',
+        margin: '0 auto',
+        'line-height': '1.8',
+      },
       '.viewer-flash': {
         background: 'rgba(255, 213, 79, 0.55)',
         'border-radius': '4px',

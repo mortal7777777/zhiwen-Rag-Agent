@@ -4,20 +4,28 @@
       <el-empty :description="error" />
     </div>
     <template v-else-if="data">
-      <div v-if="data.truncated" class="tv-truncated">
+      <div v-if="isLegacyDoc" class="tv-banner">
+        <el-icon><InfoFilled /></el-icon>
+        旧版 .doc（Word 97-2003）以提取文本方式预览，不含图片与排版；
+        用 Word「另存为 .docx」后重新上传，可获得保留排版和图片的专业视图
+      </div>
+      <div v-else-if="data.truncated" class="tv-banner">
+        <el-icon><WarningFilled /></el-icon>
         文档共 {{ data.char_count?.toLocaleString() }} 字符，预览仅前
         {{ (data.content || '').length.toLocaleString() }} 字符，定位可能超出范围
       </div>
       <div ref="scrollEl" class="tv-scroll" @scroll="onScroll">
-        <div
-          v-for="sec in sections"
-          :key="sec.id"
-          :id="sec.id"
-          class="doc-section"
-          :data-sec-title="sec.title"
-        >
-          <MarkdownContent v-if="isMarkdown" :content="sec.source" />
-          <pre v-else class="tv-plain">{{ sec.source }}</pre>
+        <div class="tv-column">
+          <div
+            v-for="sec in sections"
+            :key="sec.id"
+            :id="sec.id"
+            class="doc-section"
+            :data-sec-title="sec.title"
+          >
+            <MarkdownContent v-if="isMarkdown" :content="sec.source" />
+            <pre v-else class="tv-plain">{{ sec.source }}</pre>
+          </div>
         </div>
       </div>
     </template>
@@ -31,6 +39,7 @@
 // - 位置记忆 = 当前节 id + 节内滚动比例；
 // - 引用定位 = 压平文本在渲染 DOM 里检索（见 textSearch.js）。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import MarkdownContent from '../MarkdownContent.vue'
 import { previewDocument } from '../../api'
 import { findTextInElement, scrollToAndFlash } from './textSearch'
@@ -47,6 +56,9 @@ const data = ref(null)
 const scrollEl = ref(null)
 
 const isMarkdown = computed(() => data.value?.kind === 'markdown')
+const isLegacyDoc = computed(() =>
+  props.relativePath.toLowerCase().endsWith('.doc'),
+)
 
 // ---------------- 分节（跳过代码围栏内的伪标题） ----------------
 
@@ -126,9 +138,10 @@ function getToc() {
 
 function jumpTo(entry) {
   const el = document.getElementById(entry.id)
-  if (!el || !scrollEl.value) return
-  scrollEl.value.scrollTop += el.getBoundingClientRect().top -
-    scrollEl.value.getBoundingClientRect().top - 12
+  const sc = scrollEl.value
+  if (!el || !sc) return
+  sc.scrollTop += el.getBoundingClientRect().top -
+    sc.getBoundingClientRect().top - 12
   scrollToAndFlash(el.querySelector('h1,h2,h3,h4,h5,h6') || el)
 }
 
@@ -176,13 +189,20 @@ function reportScroll() {
 
 // ---------------- 定位：引用锚点 → 上次位置 ----------------
 
-// 返回 true 表示定位成功（父组件据此决定是否回退到记忆位置）
-function applyLocator(locator) {
-  if (!locator?.anchorText) return false
+// 返回 true 表示定位成功（父组件据此决定是否回退到记忆位置）。
+// content-visibility 跳过渲染的节内 getBoundingClientRect 不可靠（多为 0），
+// 必须两段式：先滚到命中元素所在节（节本身总有布局）触发浏览器渲染该节，
+// 布局稳定后再对目标元素精确定位，否则会落在文档开头。
+async function applyLocator(locator) {
   const sc = scrollEl.value
-  if (!sc) return false
+  if (!sc || !locator?.anchorText) return false
   const hit = findTextInElement(sc, locator.anchorText)
   if (!hit?.element) return false
+  const section = hit.element.closest('.doc-section')
+  if (section) {
+    sc.scrollTop = section.offsetTop - 8
+    await new Promise((r) => setTimeout(r, 150))
+  }
   scrollToAndFlash(hit.element, sc)
   return true
 }
@@ -219,42 +239,63 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
   justify-content: center;
 }
 
-.tv-truncated {
-  padding: 6px 10px;
-  margin-bottom: 8px;
+.tv-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  margin: 10px 16px 0;
   border-radius: 8px;
-  font-size: 12px;
-  color: var(--text-3, #909399);
-  background: var(--bg-card-2, rgba(128, 128, 128, 0.08));
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2, #4c515b);
+  background: var(--primary-soft, rgba(22, 119, 255, 0.08));
+  border: 1px solid var(--border, #e8ebf1);
 }
 
 .tv-scroll {
   flex: 1;
   position: relative; /* offsetTop 相对本容器计算 */
   overflow-y: auto;
-  padding: 4px 16px 40px;
-  scroll-behavior: auto;
+  padding: 18px 24px 60px;
+}
+
+/* 阅读栏：限宽居中，收起目录后不会满屏拉宽 */
+.tv-column {
+  max-width: 880px;
+  margin: 0 auto;
 }
 
 /* 按需渲染：屏外节跳过布局/绘制，DOM 保持完整可检索 */
 .doc-section {
   content-visibility: auto;
   contain-intrinsic-size: auto 600px;
+  font-size: 15px;
+  line-height: 1.85;
+  color: var(--text-1, #23262d);
 }
 
 .doc-section + .doc-section {
-  margin-top: 20px;
-  border-top: 1px dashed var(--border, #dcdfe6);
-  padding-top: 16px;
+  margin-top: 28px;
+  border-top: 1px solid var(--border, #e8ebf1);
+  padding-top: 22px;
+}
+
+.doc-section :deep(h1),
+.doc-section :deep(h2),
+.doc-section :deep(h3) {
+  margin-top: 1.2em;
 }
 
 .tv-plain {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 13px;
-  line-height: 1.7;
-  font-family: var(--font-mono, Consolas, monospace);
+  font-size: 14.5px;
+  line-height: 1.85;
+  text-align: justify;
+  font-family: Consolas, 'JetBrains Mono', monospace;
+  color: var(--text-1, #23262d);
 }
 
 /* 引用定位高亮 */
