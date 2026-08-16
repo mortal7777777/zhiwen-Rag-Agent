@@ -408,9 +408,67 @@ START -> prepare -> agent -> tools -> (循环) -> finalize -> END
 9. **bash 工作目录一致性**：bash 默认在工作目录根执行（与文件工具一致）。
 10. **README 更新**：文件/命令执行、HITL、记忆、环境变量、API 一览等章节。
 
+### 4.19 本轮（2026-08-16：P0 交互对齐 Claude Code + CLI 美化 + 预热修复 + P1 三项 + P2 与知识库管理）
+
+**P0 交互四件套**（提交 `5dfdafe`）：
+1. **diff 审批渲染**：`permissions.py` 新增 `build_diff_lines()`（difflib 行级 diff），
+   `display_args` 的 edit_file 预计算 `diff_lines`（预览放宽到 800 字符）；
+   CLI 审批弹窗逐行红删绿增，write_file 显示内容预览；Web 审批卡行级 diff。
+2. **工具输出展开**：`_tool_detail()` 随 `tool_result` SSE 事件与 tool_trace 持久化
+   `detail`（3500 字符截断，不影响模型历史瘦身）；CLI `Ctrl+O` / `/output [n]`
+   展开最近工具输出；Web 工具卡点击展开。
+3. **消息级回退**：`POST /conversations/{id}/rewind`（删除该消息及之后 +
+   重置过期摘要 + 清 todos/checkpoint）；CLI `/rewind` 选消息回退并预填输入框；
+   Web 用户消息悬停「回退」按钮。
+4. **/compact 与 /context**：`GET /agent/context/{id}`（占用统计）+
+   `POST /agent/compact/{id}`（强制压缩，保留 max(4, N/4) 条近期）；
+   CLI 双进度条命令；Web 头部「上下文」面板（占用条 + 一键压缩）。
+
+**CLI 界面美化**：输入区状态行（全宽分隔线 + 模型/工具/会话/沙箱/上下文 meter）、
+底部常驻快捷键工具栏（prompt_toolkit `bottom_toolbar`）、空输入 `?` 展开/收起
+完整命令面板、盒式横幅 + 启动命令总览、工具卡配色。
+
+**性能修复**（提交 `ddea54b`）：排查 run207-209「慢+缓存差」——56s 检索是
+热重载后 BGE 模型冷启动（会话中编辑 backend 文件触发 reload 所致）。
+修复：lifespan 后台预热 embedding/reranker；`run.py` `reload_excludes`
+排除 cli_agent.py/日志（客户端编辑不再误杀服务端）。
+
+**P1 三项**（提交 `c231dd0`）：
+1. **分阶段耗时打点**：`_timed_node` 包装七个图节点（多轮/多分支累加）+
+   TTFT（首个内容 chunk）；落 `agent_runs.token_usage.timings`；Web 运行记录
+   详情显示每阶段占比条。注意修过 `state.get("runtime") or {}` 空字典 falsy 坑。
+2. **结构化输出**：`context.py` 新增 5 个 Pydantic schema，plan/事实提取/记忆整合
+   优先 `with_structured_output`（工具调用式），失败回退旧正则解析。
+3. **沙箱一键切换**：请求级 `command_sandbox`（schema 校验 subprocess|docker）
+   → run() → runtime → 主循环与子代理 bash 工具覆盖设置页；
+   CLI `--sandbox` 启动参数 + `/sandbox docker|subprocess|off`。
+
+**P2 + 知识库管理**（提交 `c8a6e78`）：
+1. **文档预览**：`GET /documents/preview`（md 原文/其余提取文本，20 万字符封顶）；
+   KnowledgeView 抽屉渲染（md 用 MarkdownContent）。
+2. **自定义分类**：新表 `document_meta`（relative_path 唯一：category/tags/notes，
+   create_all 自动建表）；`GET|PUT /documents/meta`；文档列表合并分类列，
+   下拉筛选 + 编辑对话框（分类可新建）。
+3. **用量仪表盘**：`GET /runs/stats?days=N`（tokens/命中率/估算成本/每日趋势，
+   成本按 deepseek 量级单价估算）；RunsView 顶部统计卡 + 趋势条。
+4. **CLI headless**：`cli_agent.py -p "问题" --output-format text|json`
+   （类 claude -p，json 含 answer/sources/tool_trace/token_usage/timings）。
+5. 长任务（>10s）完成终端 bell；`scripts/regression_gate.py` RAGAS 回归门槛
+   （不进 pre-commit，改动检索/提示词后手动跑）。
+
+**架构决策（与用户讨论定稿）**：多用户**不做**（单用户本地，单例状态/本地模型
+都是单用户假设；将来要共用走多配置文件而非租户体系）；**Java 后端不需要**
+（核心资产全在 Python 生态，瓶颈在 LLM/本地模型不在框架）。
+
+**下一步已定**：接专业开源文档查看器（pdf.js/epub.js/docx-preview + 文本类
+content-velocity 方案）+ 引用「查看原文」定位 + 位置记忆——完整方案见
+**`docs/DOCUMENT_VIEWER_PLAN.md`**（新会话直接按它开工）。
+
 ### 本会话遗留的小事
 - 桌面 `C:\Users\user\Desktop\practice2` 是测试产物（内容已清空），删除被 Windows 拒绝（疑似占用/权限），**用户手动删除即可**。
 - `docs/` 下还有 `AGENT_COMPARISON.md`（与主流 agent 对比）、`HERMES_STYLE_AGENT.md`（终端/ACP 路线），写文档前先读，避免重复。
+
+
 
 ---
 

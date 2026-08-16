@@ -162,6 +162,19 @@ graph.add_edge("subagent", "agent")           # 结果合并回父状态后再�
 
 ## 更新记录
 
+- **分阶段耗时打点**（2026-08-16）：`_timed_node` 包装器统一给七个图节点计时
+  （subagent 每分支、agent/tools 每轮自动累加），`_agent_node` 记录 TTFT
+  （首个内容 chunk）；落 `agent_runs.token_usage.timings`，运行记录详情页
+  显示每阶段占比条——"为什么慢"不再需要逐层挖 trace。
+- **结构化输出**（2026-08-16）：plan/事实提取/记忆整合改为
+  `with_structured_output`（Pydantic schema，工具调用式）优先，
+  失败回退旧正则解析；弱模型下嵌套/多余文本不再解析失败。
+- **请求级沙箱覆盖**（2026-08-16）：`AgentChatRequest.command_sandbox`
+  （subprocess|docker）→ runtime → 主循环与子代理 bash 工具，
+  优先于设置页 `command_sandbox`；CLI `--sandbox` / `/sandbox` 一键切换。
+- **消息级 rewind**（2026-08-16）：`POST /conversations/{id}/rewind` 删除
+  该消息及之后全部消息 + 重置过期摘要 + 清 todos/pending checkpoint；
+  CLI `/rewind` 与 Web 回退按钮，被回退原文预填回输入框。
 - **原生 checkpointer**（2026-08-13）：接入 `langgraph-checkpoint-sqlite`
   与 SafeJsonPlusSerializer，每个 superstep 自动落快照；
   `GET /api/conversations/{id}/timeline[/{checkpoint_id}]` 提供时间线审计；
@@ -169,3 +182,6 @@ graph.add_edge("subagent", "agent")           # 结果合并回父状态后再�
 - **Hooks**（2026-08-13）：PreToolUse / PostToolUse 用户脚本回调
   （配置 `GET/PUT /api/hooks`），PreToolUse 可 deny 拦截、PostToolUse 可
   回填 additional_context，SSE 新增 `hook` 事件。
+- **启动预热**（2026-08-16）：lifespan 后台线程预热 BGE embedding/reranker，
+  热重载/重启后首轮知识库检索不再付 30~60s 模型加载（源自 run#208 排查）。
+
