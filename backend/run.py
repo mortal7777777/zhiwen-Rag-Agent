@@ -34,4 +34,13 @@ if __name__ == "__main__":
         host="127.0.0.1",
         port=8000,
         reload=True,
+        # 只对服务端代码热重载：CLI 客户端与日志在 backend 目录内，
+        # 保存不应触发服务重启（重启会卸载 CUDA 模型，首轮检索慢 30~60s）
+        reload_excludes=[
+            "cli_agent.py",
+            "*.log",
+            ".env.local",
+            "tests/*",
+            "__pycache__/*",
+        ],
     )

@@ -54,6 +54,43 @@ async def lifespan(_: FastAPI):
                 load_overrides(session)
     except Exception as exc:
         logger.warning("加载运行时配置失败：%s", exc)
+
+    def _warmup_rag_models() -> None:
+        """后台预热本地 BGE embedding/reranker（懒加载模型 → CUDA）。
+
+        不预热时，重启/热重载后的首次知识库检索要付 30~60s 的模型加载，
+        用户看到的就是"第一问特别慢"（如 run#208 的 56s 检索）。
+        放到启动期后台做，首轮检索直接命中热模型。
+        """
+        import threading
+        import time as _time
+
+        def _run() -> None:
+            try:
+                from langchain_core.documents import Document
+
+                from .api.deps import get_service
+
+                service = get_service()
+                t0 = _time.perf_counter()
+                service.embeddings.embed_query("预热")
+                t1 = _time.perf_counter()
+                service.reranker.rerank(
+                    "预热", [Document(page_content="预热")], top_k=1
+                )
+                logger.info(
+                    "RAG 模型预热完成：embedding %.1fs + reranker %.1fs（设备 %s/%s）",
+                    t1 - t0,
+                    _time.perf_counter() - t1,
+                    service.embeddings.device,
+                    service.reranker.device,
+                )
+            except Exception as exc:
+                logger.warning("RAG 模型预热失败（首次检索时将懒加载）：%s", exc)
+
+        threading.Thread(target=_run, name="rag-warmup", daemon=True).start()
+
+    _warmup_rag_models()
     logger.info("启动 %s v%s", settings.app_name, settings.version)
     yield
     logger.info("服务已关闭")
