@@ -675,7 +675,12 @@ def _prepare_node(state: AgentState) -> dict:
     )
     # 扩展工具：MCP + 受控执行（文件/命令，敏感操作走人工确认）
     tools.extend(service.mcp_tools(db))
-    tools.extend(service.extra_tools(project_dir=state.get("project_dir")))
+    tools.extend(
+        service.extra_tools(
+            project_dir=state.get("project_dir"),
+            sandbox=runtime.get("command_sandbox"),
+        )
+    )
     if db is not None and conv_id is not None:
         try:
             from ..todos import make_todo_tool
@@ -773,6 +778,7 @@ def _subagent_tools(
     hint: str,
     counter: list[int],
     project_dir: str | None = None,
+    sandbox: str | None = None,
 ):
     """按工具提示给子代理构建受限工具集（只读/检索类，不含敏感操作）。"""
     from ..tools_extra import (
@@ -817,7 +823,7 @@ def _subagent_tools(
             make_write_file_tool(settings, project_dir),
             make_edit_file_tool(settings, project_dir),
             make_delete_file_tool(settings, project_dir),
-            make_bash_tool(settings, project_dir),
+            make_bash_tool(settings, project_dir, sandbox),
         ]
     return []
 
@@ -953,7 +959,10 @@ def _subagent_node(state: AgentState) -> dict:
     step = task.get("step") or ""
     hint = task.get("tool_hint") or ""
     counter: list[int] = [0]
-    tools = _subagent_tools(service, hint, counter, state.get("project_dir"))
+    tools = _subagent_tools(
+        service, hint, counter, state.get("project_dir"),
+        sandbox=runtime.get("command_sandbox"),
+    )
 
     messages = [
         SystemMessage(content=SUBAGENT_SYSTEM_PROMPT),
@@ -1258,6 +1267,12 @@ def _agent_node(state: AgentState) -> dict:
                 buf_parts.clear()  # 工具轮：丢弃已流出的过渡思考文本
             content = getattr(chunk, "content", None)
             if content:
+                # TTFT 打点：首个内容 chunk 到达（含工具轮过渡文本，即 API 首字）
+                timings = runtime.setdefault("timings", {})
+                if "first_token_ms" not in timings:
+                    timings["first_token_ms"] = round(
+                        (time.perf_counter() - runtime["started"]) * 1000
+                    )
                 if tool_mode:
                     continue
                 buf_parts.append(content)
@@ -2276,6 +2291,8 @@ def _finalize_node(state: AgentState) -> dict:
                 token_usage={
                     **usage_summary_with_aux(),
                     "last_call": runtime.get("token_usage"),
+                    # 分阶段耗时：prepare/dispatch/subagent/merge/agent/tools/finalize + TTFT
+                    "timings": dict(runtime.get("timings") or {}),
                 },
             )
             write_trace(
@@ -2297,6 +2314,7 @@ def _finalize_node(state: AgentState) -> dict:
                     "plan_done_count": state.get("plan_done_count", 0),
                     "subagents": len(state.get("subagent_results") or []),
                     "usage": usage_summary(),
+                    "timings": dict(runtime.get("timings") or {}),
                 },
             )
         except Exception as exc:
@@ -2392,16 +2410,41 @@ def _route_after_tools(state: AgentState) -> str:
     return "agent"
 
 
+def _timed_node(name: str, fn):
+    """节点耗时打点包装器：把每个图节点的墙钟耗时累加进 runtime.timings。
+
+    subagent 每个分支、agent/tools 每一轮都进同一节点函数，
+    用 += 累加得到该阶段的总耗时；finalize 落库到 agent_runs.token_usage.timings。
+    """
+
+    def wrapped(state: AgentState) -> dict:
+        runtime = state.get("runtime")
+        if runtime is None:
+            runtime = {}
+            state["runtime"] = runtime
+        timings = runtime.setdefault("timings", {})
+        t0 = time.perf_counter()
+        try:
+            return fn(state)
+        finally:
+            timings[f"{name}_ms"] = (
+                timings.get(f"{name}_ms", 0)
+                + round((time.perf_counter() - t0) * 1000)
+            )
+
+    return wrapped
+
+
 def build_agent_graph(checkpointer=None):
     """构建 LangGraph：prepare -> [dispatch -> subagents -> merge] -> agent -> tools -> finalize。"""
     graph = StateGraph(AgentState)
-    graph.add_node("prepare", _prepare_node)
-    graph.add_node("dispatch", _dispatch_node)
-    graph.add_node("subagent", _subagent_node)
-    graph.add_node("merge", _merge_node)
-    graph.add_node("agent", _agent_node)
-    graph.add_node("tools", _tools_node)
-    graph.add_node("finalize", _finalize_node)
+    graph.add_node("prepare", _timed_node("prepare", _prepare_node))
+    graph.add_node("dispatch", _timed_node("dispatch", _dispatch_node))
+    graph.add_node("subagent", _timed_node("subagent", _subagent_node))
+    graph.add_node("merge", _timed_node("merge", _merge_node))
+    graph.add_node("agent", _timed_node("agent", _agent_node))
+    graph.add_node("tools", _timed_node("tools", _tools_node))
+    graph.add_node("finalize", _timed_node("finalize", _finalize_node))
 
     graph.add_edge(START, "prepare")
     graph.add_conditional_edges(
@@ -2490,14 +2533,19 @@ class LangGraphAgentService(AgentService):
             logger.warning("MCP 工具配置失败：%s", exc)
             return []
 
-    def extra_tools(self, project_dir: str | None = None) -> list:
-        """受控执行工具：类 Claude Code 文件/命令工具集（需在设置中开启总开关）。"""
+    def extra_tools(
+        self, project_dir: str | None = None, sandbox: str | None = None
+    ) -> list:
+        """受控执行工具：类 Claude Code 文件/命令工具集（需在设置中开启总开关）。
+
+        sandbox：请求级沙箱覆盖（subprocess|docker），空则跟随设置页。
+        """
         if not effective(self.settings, "advanced_tools_enabled", True):
             return []
         try:
             from ..tools_extra import make_agent_tools
 
-            return make_agent_tools(self.settings, project_dir)
+            return make_agent_tools(self.settings, project_dir, sandbox)
         except Exception as exc:
             logger.warning("受控执行工具加载失败：%s", exc)
             return []
@@ -2533,6 +2581,7 @@ class LangGraphAgentService(AgentService):
         plan_only: bool = False,
         resume_plan: list[str] | None = None,
         project_dir: str | None = None,
+        command_sandbox: str | None = None,
     ):
         """执行 LangGraph 编排，逐事件产出（session/plan/vision/.../done）。"""
         settings = self.settings
@@ -2581,6 +2630,10 @@ class LangGraphAgentService(AgentService):
             "status": "ok",
             "error": None,
             "token_usage": None,
+            # 请求级沙箱覆盖（CLI --sandbox / /sandbox）：空则跟随设置页
+            "command_sandbox": command_sandbox,
+            # 分阶段耗时打点（节点包装器与 agent 节点写入，finalize 落库）
+            "timings": {},
         }
         state: AgentState = {
             "service": self,

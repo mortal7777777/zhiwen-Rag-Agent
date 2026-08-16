@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..config import Settings
@@ -36,6 +37,50 @@ MEMORY_CATEGORIES = {
 }
 
 _consolidate_lock = threading.Lock()
+
+
+# ---------------- 结构化输出 schema（with_structured_output 用） ----------------
+
+
+class PlanSteps(BaseModel):
+    """任务规划输出：简单问题返回空数组。"""
+
+    steps: list[str] = Field(
+        default_factory=list, description="2~5 步执行计划，一步即可完成时为空数组"
+    )
+
+
+class FactItem(BaseModel):
+    """一条值得长期记住的事实。"""
+
+    category: str = Field(
+        description="记忆分类，只能是：profile/preference/project/decision/lesson/other"
+    )
+    content: str = Field(description="一句话、第三人称的客观事实")
+
+
+class FactsList(BaseModel):
+    """事实提取输出：没有可提取内容时为空数组。"""
+
+    facts: list[FactItem] = Field(default_factory=list)
+
+
+class MergedFact(BaseModel):
+    """整合后的一条记忆（合并多条原始记忆）。"""
+
+    source_ids: list[int] = Field(description="被合并的原始记忆 id 列表")
+    category: str = Field(description="记忆分类")
+    content: str = Field(description="整合后的记忆内容")
+
+
+class ConsolidateOutput(BaseModel):
+    """记忆整合整理输出。"""
+
+    facts: list[MergedFact] = Field(default_factory=list)
+    archived_ids: list[int] = Field(
+        default_factory=list, description="过时/被覆盖而归档的旧记忆 id"
+    )
+    summary: str = Field(default="", description="不超过 150 字的用户画像摘要")
 
 # 不同任务模板的历史上下文预算（token）：检索型任务历史权重低、写作/编程需要更多上下文
 TEMPLATE_HISTORY_BUDGET = {
@@ -103,6 +148,18 @@ class ContextService:
         """调用低温模型时按当前线程注入辅助用量收集器（与主循环分开统计）。"""
         return self.chat.invoke(
             messages,
+            config={"callbacks": [get_aux_usage_collector()]},
+        )
+
+    def _structured(self, schema: type[BaseModel], prompt: str):
+        """结构化输出（with_structured_output，工具调用式约束 schema）。
+
+        比旧的"正文 JSON + 正则贪婪匹配"稳：模型不合规时返回 None
+        或抛异常，由调用方回退旧解析路径，不影响主流程。
+        """
+        llm = self.chat.with_structured_output(schema)
+        return llm.invoke(
+            [HumanMessage(content=prompt)],
             config={"callbacks": [get_aux_usage_collector()]},
         )
 
@@ -389,6 +446,23 @@ class ContextService:
 
 用户：{user_text[:1500]}
 助手：{assistant_text[:1500]}"""
+        # 优先结构化输出（schema 约束，弱模型下比正则解析稳）
+        try:
+            out = self._structured(FactsList, prompt)
+            if out is not None and getattr(out, "facts", None) is not None:
+                facts = []
+                for item in out.facts:
+                    text = str(item.content or "").strip()
+                    category = str(item.category or "other").strip()
+                    if not text:
+                        continue
+                    if category not in MEMORY_CATEGORIES:
+                        category = "other"
+                    facts.append({"category": category, "content": text})
+                return facts
+        except Exception as exc:
+            logger.warning("结构化事实提取失败，回退正则解析：%s", exc)
+        # 回退：正文 JSON + 正则抽取（旧路径）
         try:
             resp = self._invoke([HumanMessage(content=prompt)])
             content = (resp.content or "").strip()
@@ -482,18 +556,28 @@ class ContextService:
 
 记忆列表：
 {lines[:12000]}"""
+            # 优先结构化输出（schema 约束 source_ids/archived_ids 为整数数组）
+            data = None
             try:
-                resp = self._invoke([HumanMessage(content=prompt)])
-                content = (resp.content or "").strip()
-                match = re.search(r"\{.*\}", content, re.DOTALL)
-                if not match:
-                    return {"merged": 0, "archived": 0, "summary": None}
-                data = json.loads(match.group(0))
+                out = self._structured(ConsolidateOutput, prompt)
+                if out is not None:
+                    data = out.model_dump()
             except Exception as exc:
-                logger.warning("记忆整合失败：%s", exc)
-                return {"merged": 0, "archived": 0, "summary": None}
+                logger.warning("结构化记忆整合失败，回退正则解析：%s", exc)
+            if data is None:
+                # 回退：正文 JSON + 正则抽取（旧路径）
+                try:
+                    resp = self._invoke([HumanMessage(content=prompt)])
+                    content = (resp.content or "").strip()
+                    match = re.search(r"\{.*\}", content, re.DOTALL)
+                    if not match:
+                        return {"merged": 0, "archived": 0, "summary": None}
+                    data = json.loads(match.group(0))
+                except Exception as exc:
+                    logger.warning("记忆整合失败：%s", exc)
+                    return {"merged": 0, "archived": 0, "summary": None}
 
-            archived_ids = set(data.get("archived_ids") or [])
+            archived_ids = set(int(x) for x in (data.get("archived_ids") or []))
             for m in active:
                 if m["id"] in archived_ids:
                     repo.update_memory(db, m["id"], status="archived")
@@ -565,6 +649,15 @@ class ContextService:
 3. 只输出 JSON 字符串数组，不要任何解释。
 
 问题：{question[:1000]}"""
+        # 优先结构化输出（steps 由 schema 约束为数组，杜绝嵌套/多余文本解析问题）
+        try:
+            out = self._structured(PlanSteps, prompt)
+            if out is not None and getattr(out, "steps", None) is not None:
+                steps = [str(x).strip() for x in out.steps if str(x).strip()]
+                return steps[:5]
+        except Exception as exc:
+            logger.warning("结构化规划失败，回退正则解析：%s", exc)
+        # 回退：正文 JSON + 正则抽取（旧路径）
         try:
             resp = self._invoke([HumanMessage(content=prompt)])
             content = (resp.content or "").strip()

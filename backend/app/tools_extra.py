@@ -101,12 +101,25 @@ def command_allowed(settings, command_line: str) -> tuple[bool, str]:
 
 
 def _run_command(
-    settings, command: str, cwd: str = "", project_dir: str | None = None
+    settings,
+    command: str,
+    cwd: str = "",
+    project_dir: str | None = None,
+    sandbox_override: str | None = None,
 ) -> dict:
-    """执行命令：默认在工作目录根执行（与文件工具一致），支持子目录 + 超时 + 截断。"""
+    """执行命令：默认在工作目录根执行（与文件工具一致），支持子目录 + 超时 + 截断。
+
+    sandbox_override：请求级沙箱覆盖（CLI --sandbox / /sandbox 命令），
+    优先于设置页的 command_sandbox；空则跟随设置。
+    """
     workspace = _resolve_workspace(settings, project_dir)
     workdir = workspace if not cwd else _safe_path(workspace, cwd)
-    sandbox = str(effective(settings, "command_sandbox") or "subprocess").strip().lower()
+    sandbox = str(
+        sandbox_override
+        if sandbox_override is not None
+        else effective(settings, "command_sandbox")
+        or "subprocess"
+    ).strip().lower()
     if sandbox == "docker":
         return _run_docker_command(settings, command, workdir)
     try:
@@ -218,10 +231,13 @@ def _docker_run_cmd(settings, command: str, workdir: Path) -> list[str]:
     return options + [image, "sh", "-c", command]
 
 
-def make_agent_tools(settings, project_dir: str | None = None) -> list[BaseTool]:
+def make_agent_tools(
+    settings, project_dir: str | None = None, sandbox_override: str | None = None
+) -> list[BaseTool]:
     """Agent 可用的文件/命令工具：读类自动，写/命令类敏感（HITL）。
 
     project_dir：会话工作目录（CLI 启动目录），未配置 tool_workspace 时生效。
+    sandbox_override：请求级沙箱覆盖（subprocess|docker），空则跟随设置。
     """
     return [
         make_list_dir_tool(settings, project_dir),
@@ -230,7 +246,7 @@ def make_agent_tools(settings, project_dir: str | None = None) -> list[BaseTool]
         make_write_file_tool(settings, project_dir),
         make_edit_file_tool(settings, project_dir),
         make_delete_file_tool(settings, project_dir),
-        make_bash_tool(settings, project_dir),
+        make_bash_tool(settings, project_dir, sandbox_override),
     ]
 
 
@@ -508,9 +524,11 @@ def make_delete_file_tool(settings, project_dir: str | None = None) -> BaseTool:
     )
 
 
-def make_bash_tool(settings, project_dir: str | None = None) -> BaseTool:
+def make_bash_tool(
+    settings, project_dir: str | None = None, sandbox_override: str | None = None
+) -> BaseTool:
     def _invoke(command: str, cwd: str = "") -> dict:
-        return _run_command(settings, command, cwd, project_dir)
+        return _run_command(settings, command, cwd, project_dir, sandbox_override)
 
     return StructuredTool.from_function(
         func=_invoke,

@@ -56,6 +56,25 @@
         <div v-if="detail.error" class="detail-label">错误</div>
         <div v-if="detail.error" class="detail-error">{{ detail.error }}</div>
 
+        <!-- 分阶段耗时：prepare/子代理/模型/工具/TTFT（token_usage.timings） -->
+        <template v-if="detailTimings">
+          <div class="detail-label">分阶段耗时（总 {{ formatMs(detail.latency_ms) }}）</div>
+          <div class="detail-timings">
+            <div
+              v-for="item in detailTimingItems"
+              :key="item.key"
+              class="timing-row"
+            >
+              <span class="timing-name">{{ item.label }}</span>
+              <div class="timing-bar">
+                <i :style="{ width: item.pct }" />
+              </div>
+              <span class="timing-value">{{ formatMs(item.value) }}</span>
+              <span class="timing-pct">{{ item.pct }}</span>
+            </div>
+          </div>
+        </template>
+
         <div class="detail-label">工具轨迹</div>
         <div v-if="!detail.tool_trace || !detail.tool_trace.length" class="detail-empty">
           无工具调用
@@ -81,7 +100,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getRunTrace, listConversations, listRuns } from '../api'
 
@@ -93,6 +112,38 @@ const detailVisible = ref(false)
 const detail = ref(null)
 const traceJson = ref('')
 const convTitles = ref({})
+
+// 分阶段耗时的展示顺序与中文名（token_usage.timings，旧数据无此字段则不显示）
+const TIMING_LABELS = [
+  ['first_token_ms', '首 Token（TTFT）'],
+  ['prepare_ms', '准备（记忆/规划）'],
+  ['dispatch_ms', '子任务分派'],
+  ['subagent_ms', '子代理执行'],
+  ['merge_ms', '结果合并'],
+  ['agent_ms', '模型生成'],
+  ['tools_ms', '工具执行'],
+  ['finalize_ms', '收尾落库'],
+]
+
+const detailTimings = computed(() => detail.value?.token_usage?.timings || null)
+
+const detailTimingItems = computed(() => {
+  const timings = detailTimings.value
+  if (!timings || !detail.value) return []
+  const total = Math.max(1, detail.value.latency_ms || 0)
+  const items = []
+  for (const [key, label] of TIMING_LABELS) {
+    const value = timings[key]
+    if (value == null) continue
+    items.push({
+      key,
+      label,
+      value,
+      pct: `${Math.min(100, Math.round((value / total) * 100))}%`,
+    })
+  }
+  return items
+})
 
 function formatMs(ms) {
   if (ms == null) return '-'
@@ -167,6 +218,52 @@ onMounted(load)
 .detail-body {
   max-height: 60vh;
   overflow-y: auto;
+}
+
+/* 分阶段耗时：名称 + 占比条 + 数值 */
+.detail-timings {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+
+.timing-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 64px 40px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.timing-name {
+  color: var(--text-3, #909399);
+}
+
+.timing-bar {
+  height: 6px;
+  border-radius: 4px;
+  background: rgba(128, 128, 128, 0.12);
+  overflow: hidden;
+}
+
+.timing-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--el-color-primary, #409eff), #67c23a);
+}
+
+.timing-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2, #606266);
+}
+
+.timing-pct {
+  text-align: right;
+  color: var(--text-3, #909399);
+  font-size: 11px;
 }
 
 .detail-label {

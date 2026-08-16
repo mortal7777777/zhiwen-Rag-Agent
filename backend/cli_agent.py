@@ -613,6 +613,7 @@ COMMANDS = [
     "/compact",
     "/rewind",
     "/output",
+    "/sandbox",
     "/clear",
     "/init",
     "/resume",
@@ -653,7 +654,13 @@ def complete(buf: str) -> tuple[list[str], str]:
         values = ["auto", "knowledge", "web", "none"]
         matches = [v for v in values if v.startswith(arg) and v != arg]
         cp = _common_prefix(matches)
-        return matches, cp[len(arg) :] if cp else ""
+        return matches, cp[len(arg):] if cp else ""
+    if " " in buf and buf.split(" ", 1)[0] == "/sandbox":
+        _, _, arg = buf.partition(" ")
+        values = ["docker", "subprocess", "off"]
+        matches = [v for v in values if v.startswith(arg) and v != arg]
+        cp = _common_prefix(matches)
+        return matches, cp[len(arg):] if cp else ""
     if buf.startswith("/"):
         word = buf.split(" ", 1)[0]
         matches = [c for c in COMMANDS if c.startswith(word)]
@@ -1196,10 +1203,17 @@ def ctx_meter(stats: dict | None, width: int = 10) -> str:
     return f"上下文 {'█' * filled}{'░' * (width - filled)} {pct}%"
 
 
-def build_status_line(model: str | None, tool_mode: str, conversation_id: int | None) -> str:
-    """输入框上方的状态行：模型 · 工具模式 · 会话 · 上下文 meter。"""
+def build_status_line(
+    model: str | None,
+    tool_mode: str,
+    conversation_id: int | None,
+    sandbox: str | None = None,
+) -> str:
+    """输入框上方的状态行：模型 · 工具模式 · 会话 · 沙箱 · 上下文 meter。"""
     bits = [f"模型 {model or '未知'}", f"工具 {tool_mode}"]
     bits.append(f"会话 {conversation_id}" if conversation_id else "会话 新")
+    if sandbox:
+        bits.append(f"沙箱 {sandbox}")
     meter = ctx_meter(LAST_CONTEXT.get("stats"))
     if meter:
         bits.append(meter)
@@ -1577,6 +1591,7 @@ def stream_question(
     conversation_id: int | None,
     reader: KeyReader,
     screen: Screen,
+    sandbox: str | None = None,
 ) -> int:
     """发送问题并渲染 SSE 事件；Ctrl+C/Esc 即时打断并通知后端取消。"""
     body = json.dumps(
@@ -1586,6 +1601,7 @@ def stream_question(
             "tool_mode": tool_mode,
             "template_id": None,
             "project_dir": os.getcwd(),
+            "command_sandbox": sandbox,
         },
         ensure_ascii=False,
     ).encode("utf-8")
@@ -1838,11 +1854,18 @@ def main() -> None:
     parser.add_argument(
         "--tool", default="auto", choices=["auto", "knowledge", "web", "none"]
     )
+    parser.add_argument(
+        "--sandbox",
+        default=None,
+        choices=["subprocess", "docker"],
+        help="命令沙箱：docker=容器沙箱（无网络/只读根/限资源），subprocess=宿主执行；不传跟随设置页",
+    )
     parser.add_argument("--conversation", type=int, default=None)
     args = parser.parse_args()
 
     base = f"http://{args.host}:{args.port}"
     tool_mode = args.tool
+    sandbox_mode: str | None = args.sandbox
     conversation_id = args.conversation
     cwd = os.getcwd()
     history = load_history(cwd)
@@ -1858,12 +1881,12 @@ def main() -> None:
         print_banner(model, tool_mode, has_agents)
         while True:
             try:
-                # 输入区状态行：模型/工具/会话/上下文 meter（对话历史与输入框之间有分隔线）
+                # 输入区状态行：模型/工具/会话/沙箱/上下文 meter（对话历史与输入框之间有分隔线）
                 question = read_line(
                     reader,
                     history,
                     default=pending_prefill,
-                    status=build_status_line(model, tool_mode, conversation_id),
+                    status=build_status_line(model, tool_mode, conversation_id, sandbox_mode),
                 )
                 pending_prefill = ""
             except Interrupted as exc:
@@ -2005,11 +2028,23 @@ def main() -> None:
                     n = int(arg) if arg.isdigit() else 1
                     show_tool_output(n)
                     continue
+                if cmd == "/sandbox":
+                    if arg in ("docker", "subprocess"):
+                        sandbox_mode = arg
+                        tip = "容器沙箱（无网络/只读根/限资源）" if arg == "docker" else "宿主执行"
+                        print(paint(f"命令沙箱已切换为：{arg}（{tip}）。", "dim"))
+                    elif arg in ("off", "auto", ""):
+                        sandbox_mode = None
+                        print(paint("命令沙箱：跟随设置页配置（/sandbox docker|subprocess 切换）。", "dim"))
+                    else:
+                        print(paint("用法：/sandbox docker|subprocess|off", "yellow"))
+                    continue
                 if cmd == "/status":
                     bits = [
                         f"模式={tool_mode}",
                         f"会话={conversation_id or '新会话'}",
                         f"模型={model or '未知'}",
+                        f"沙箱={sandbox_mode or '跟随设置'}",
                     ]
                     meter = ctx_meter(LAST_CONTEXT.get("stats"))
                     if meter:
@@ -2022,8 +2057,8 @@ def main() -> None:
                             "/exit /quit 退出 · /new 新会话 · /tools auto|knowledge|web|none\n"
                             "/todos 任务清单 · /status 状态 · /cost 用量 · /clear 清屏\n"
                             "/context 上下文占用 · /compact 手动压缩 · /rewind 消息回退\n"
-                            "/output [n] 展开工具输出 · /init 创建 AGENTS.md\n"
-                            "/memory 项目记忆 · /resume 恢复会话\n"
+                            "/output [n] 展开工具输出 · /sandbox docker|subprocess|off 命令沙箱\n"
+                            "/init 创建 AGENTS.md · /memory 项目记忆 · /resume 恢复会话\n"
                             "Ctrl+C/Esc 打断 · Ctrl+L 清屏 · Ctrl+R 重发 · Ctrl+O 展开输出 · ↑/↓ 历史",
                             "dim",
                         )
@@ -2033,7 +2068,7 @@ def main() -> None:
                 continue
             last_question = question
             conversation_id = stream_question(
-                base, question, tool_mode, conversation_id, reader, screen
+                base, question, tool_mode, conversation_id, reader, screen, sandbox_mode
             )
     except KeyboardInterrupt:
         print()

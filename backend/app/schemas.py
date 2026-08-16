@@ -107,6 +107,14 @@ class AgentChatRequest(BaseModel):
         default=None,
         description="计划模式确认后复用已确认的计划步骤（不再重新规划）",
     )
+    command_sandbox: str | None = Field(
+        default=None,
+        pattern="^(subprocess|docker)$",
+        description=(
+            "请求级命令沙箱覆盖（CLI --sandbox）：subprocess=宿主执行 / "
+            "docker=容器沙箱；不传则跟随设置页 command_sandbox"
+        ),
+    )
 
 
 class AgentChatResponse(BaseModel):
