@@ -72,6 +72,16 @@ def is_sensitive_tool(name: str, args: dict | None = None) -> bool:
     """判断该工具调用是否属于敏感操作（需要人工确认）。"""
     if name in SENSITIVE_TOOLS:
         return True
+    # 用户自写工具（user_tools 目录）：按模块声明的 SENSITIVE 标记判断；
+    # 未声明标记的工具在加载器里已默认按敏感处理
+    try:
+        from .user_tool_loader import is_user_tool_sensitive
+
+        user_sensitive = is_user_tool_sensitive(name)
+        if user_sensitive is not None:
+            return user_sensitive
+    except Exception:
+        pass
     if name == "file_tool":
         op = str((args or {}).get("operation") or "").strip().lower()
         if op in SENSITIVE_FILE_OPS:

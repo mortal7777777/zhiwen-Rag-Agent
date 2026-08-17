@@ -672,6 +672,7 @@ def _prepare_node(state: AgentState) -> dict:
         vision=service.vision,
         skills_enabled=skills_on,
         skill_enabled_ids=skill_enabled_ids,
+        searxng_base_url=effective(settings, "searxng_base_url") or "",
     )
     # 扩展工具：MCP + 受控执行（文件/命令，敏感操作走人工确认）
     tools.extend(service.mcp_tools(db))
@@ -681,6 +682,14 @@ def _prepare_node(state: AgentState) -> dict:
             sandbox=runtime.get("command_sandbox"),
         )
     )
+    # 用户自写工具（动态目录）：agent 按 tool-authoring 技能规范生成的工具，
+    # 每次请求重建工具列表时自动加载（新工具下一个请求即生效，无需重启）
+    try:
+        from ..user_tool_loader import load_user_tools
+
+        tools.extend(load_user_tools())
+    except Exception as exc:
+        logger.warning("用户自写工具加载失败：%s", exc)
     if db is not None and conv_id is not None:
         try:
             from ..todos import make_todo_tool
@@ -804,6 +813,7 @@ def _subagent_tools(
                 settings.tavily_api_key,
                 effective(settings, "web_search_max_results"),
                 allow_web_fallback=False,
+                searxng_base_url=effective(settings, "searxng_base_url") or "",
             )
         ]
     if hint == "web_search":
@@ -813,6 +823,7 @@ def _subagent_tools(
                 settings.tavily_api_key,
                 effective(settings, "web_search_max_results"),
                 counter,
+                searxng_base_url=effective(settings, "searxng_base_url") or "",
             )
         ]
     if hint in ("file_tool/bash",):
@@ -1549,6 +1560,33 @@ def _run_verify(settings, paths: list[str]) -> list[dict]:
     return results
 
 
+# 纯查询类工具：per-run 结果缓存（同轮重复调用直接命中，不重复执行）
+# 副作用类（写/改/删/命令/建索引）绝不缓存，否则会掩盖真实状态变化
+_CACHEABLE_TOOLS = frozenset(
+    {
+        "knowledge_base_search",
+        "web_search",
+        "list_dir",
+        "read_file",
+        "grep_search",
+        "skill_lookup",
+    }
+)
+
+
+def _tool_cache_key(name: str, args: dict | None) -> str | None:
+    """工具结果缓存键：工具名 + 规范化参数序列化（键序无关）。
+
+    返回 None 表示无法序列化（此时不缓存，直接执行）。
+    """
+    try:
+        return name + "|" + json.dumps(
+            args or {}, sort_keys=True, ensure_ascii=False
+        )
+    except Exception:
+        return None
+
+
 def _slim_tool_result(result: dict, content_limit: int = 8000) -> dict:
     """工具结果进历史前瘦身：大 content 字段保留首尾、中间省略。
 
@@ -1556,6 +1594,7 @@ def _slim_tool_result(result: dict, content_limit: int = 8000) -> dict:
     历史里只需要 summary + 关键片段供下一轮决策；小输出原样保留，
     不破坏 provider 已建立的缓存前缀。返回新 dict，不改原 result。
     """
+
     if not isinstance(result, dict):
         return result
     slim = dict(result)
@@ -1722,6 +1761,8 @@ def _tools_node(state: AgentState) -> dict:
                 approval[tc.get("id")] = {"ok": False, "reason": reason}
 
     # 并行执行多个工具调用（检索类内部已有 GPU 锁；API 类并发安全），保持返回顺序
+    tool_cache: dict = runtime.setdefault("tool_cache", {})
+
     def _execute(tc: dict) -> tuple[dict, dict]:
         name = tc.get("name", "")
         tool = tools_by_name.get(name)
@@ -1744,6 +1785,20 @@ def _tools_node(state: AgentState) -> dict:
                 "permission": "denied",
                 "_duration_ms": None,
             }
+        # ---- per-run 工具结果缓存：纯查询工具同参重复调用直接命中 ----
+        # 键 = 工具名 + 规范化参数。只缓存查询类（见 _CACHEABLE_TOOLS），
+        # 副作用类不缓存；error 结果不缓存（失败要重试）；命中时 summary
+        # 标注"（缓存命中）"，前端/模型可见，且引用编号（index）保持不变，
+        # 回答里的 [n] 依然指向同一来源。
+        cache_key = None
+        if name in _CACHEABLE_TOOLS:
+            cache_key = _tool_cache_key(name, args)
+            if cache_key is not None and cache_key in tool_cache:
+                hit = dict(tool_cache[cache_key])
+                if hit.get("error") is None:
+                    if hit.get("summary"):
+                        hit["summary"] = f"（缓存命中）{hit['summary']}"
+                    return tc, hit
         # PreToolUse hooks：返回 deny 时拦截工具执行
         if db is not None:
             pre = run_hooks(db, "pre_tool_use", name, args)
@@ -1782,6 +1837,13 @@ def _tools_node(state: AgentState) -> dict:
             if not isinstance(result, dict):
                 result = {"result": result}
             result["_duration_ms"] = duration
+            # 成功结果写入 per-run 缓存（查询类工具）；
+            # add_document 写库成功后清空检索类缓存——知识库内容已变，
+            # 旧检索结果失效，不能继续命中
+            if cache_key is not None and not result.get("error"):
+                tool_cache[cache_key] = dict(result)
+            if name == "add_document" and not result.get("error"):
+                tool_cache.clear()
             if gate is not None and gate.get("remember"):
                 result["summary"] = (
                     str(result.get("summary") or "") + "（已记住，下次不再询问）"

@@ -46,6 +46,9 @@ DEFAULT_ROOTS = [
     # 用 glob 在扫描时动态展开。
     ("claude", _expand_plugin_skill_root("ecc/*/*/skills"), "flat"),
     ("claude", _expand_plugin_skill_root("anthropic-agent-skills/*/*/skills"), "flat"),
+    # Hermes 个人技能层（~/.hermes/skills）：用户 skill_manage 创建的技能，
+    # 放发行版层之前，同名时个人版优先（用户显式创建/安装的内容覆盖官方版）
+    ("hermes", os.path.expanduser("~/.hermes/skills"), "nested"),
     ("hermes", r"D:\agents\hermes\skills", "nested"),
     # Hermes 的可选技能与主技能统一归为 "hermes" 来源，避免界面出现两个 Hermes 选项
     ("hermes", r"D:\agents\hermes\optional-skills", "nested"),

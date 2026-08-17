@@ -25,6 +25,9 @@ data/
 opensearch_meta/
 .agent_trash/
 
+# 用户自写工具（agent 生成物，不入库；目录由 .gitkeep 占位）
+backend/app/user_tools/*.py
+
 # IDE / 系统
 .idea/
 .vscode/
