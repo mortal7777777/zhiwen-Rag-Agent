@@ -136,3 +136,84 @@ class LocalBGEEmbeddings:
                 self._fallback_to_cpu(exc)
                 return self.embed_documents(texts, batch_size=batch_size)
             raise
+
+
+class APIBGEEmbeddings:
+    """OpenAI 兼容 API 嵌入（/v1/embeddings），接口与 LocalBGEEmbeddings 一致。
+
+    适用于硅基流动（BAAI/bge-m3 等）、OpenAI（text-embedding-3-small）等
+    提供 OpenAI 兼容嵌入端点的供应商。本地无 GPU / 不想占显存时替代本地 BGE。
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str = "",
+        timeout: float = 60.0,
+        max_batch: int = 64,
+    ):
+        self.base_url = (base_url or "").rstrip("/")
+        self.api_key = api_key or ""
+        self.model = model or ""  # 空 = 使用供应商默认模型
+        self.timeout = timeout
+        self.max_batch = max_batch
+        self._dimension: int | None = None
+
+    @property
+    def device(self) -> str:
+        return "api"
+
+    @property
+    def dimension(self) -> int:
+        """向量维度：首次调用探测（用一次真实嵌入）。"""
+        if self._dimension is None:
+            self._dimension = len(self.embed_query("维度探测"))
+        return self._dimension
+
+    def _post(self, payload: dict) -> dict:
+        import httpx
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        body = dict(payload)
+        if self.model:
+            body["model"] = self.model
+        resp = httpx.post(
+            f"{self.base_url}/embeddings",
+            json=body,
+            headers=headers,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def embed_query(self, text: str) -> list[float]:
+        data = self._post({"input": [text]})
+        try:
+            return data["data"][0]["embedding"]
+        except (KeyError, IndexError) as exc:
+            raise RuntimeError(f"嵌入 API 响应格式异常：{data}") from exc
+
+    def embed_documents(
+        self, texts: list[str], batch_size: int | None = None
+    ) -> list[list[float]]:
+        """批量嵌入（按 max_batch 分批请求，保持输入顺序）。"""
+        cleaned = [t.strip() for t in (texts or []) if t and t.strip()]
+        if not cleaned:
+            return []
+        batch = batch_size or self.max_batch
+        out: list[list[float]] = []
+        for start in range(0, len(cleaned), batch):
+            chunk = cleaned[start : start + batch]
+            data = self._post({"input": chunk})
+            items = data.get("data") or []
+            # 供应商可能乱序返回：按 index 排序，保证顺序一致
+            items.sort(key=lambda x: int(x.get("index", 0)))
+            for item in items:
+                vec = item.get("embedding")
+                if vec is None:
+                    raise RuntimeError(f"嵌入 API 响应缺少 embedding：{item}")
+                out.append(vec)
+        return out

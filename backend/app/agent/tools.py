@@ -65,8 +65,14 @@ def execute_knowledge_search(
     }
 
 
-def execute_web_search(query: str, provider: str, api_key: str, max_results: int) -> dict:
-    """联网搜索：provider = duckduckgo | tavily | off。"""
+def execute_web_search(
+    query: str,
+    provider: str,
+    api_key: str,
+    max_results: int,
+    searxng_base_url: str = "",
+) -> dict:
+    """联网搜索：provider = duckduckgo | tavily | searxng | off。"""
     if provider == "off":
         return {
             "query": query,
@@ -77,6 +83,8 @@ def execute_web_search(query: str, provider: str, api_key: str, max_results: int
     try:
         if provider == "tavily":
             results = _search_tavily(query, api_key, max_results)
+        elif provider == "searxng":
+            results = _search_searxng(query, searxng_base_url, max_results)
         else:
             results = _search_duckduckgo(query, max_results)
         for item in results:
@@ -188,6 +196,41 @@ def _search_tavily(query: str, api_key: str, max_results: int) -> list[dict]:
     ]
 
 
+def _search_searxng(query: str, base_url: str, max_results: int) -> list[dict]:
+    """SearXNG 自托管元搜索（JSON API，无限量免 key）。
+
+    请求：GET {base_url}/search?q=...&format=json
+    响应：{results: [{title, url, content, ...}]}；非 200 / 实例未启动会抛错。
+    """
+    import httpx
+    from urllib.parse import urlencode
+
+    base = (base_url or "").rstrip("/")
+    if not base:
+        raise RuntimeError("未配置 SearXNG 实例地址（SEARXNG_BASE_URL）")
+    params = urlencode(
+        {
+            "q": query,
+            "format": "json",
+            "language": "zh-CN",
+            "categories": "general",
+        }
+    )
+    response = httpx.get(f"{base}/search?{params}", timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    return [
+        {
+            "title": _truncate(item.get("title", ""), 150),
+            "url": item.get("url", ""),
+            "snippet": _truncate(
+                item.get("content") or item.get("snippet") or "", 350
+            ),
+        }
+        for item in data.get("results", [])[:max_results]
+    ]
+
+
 # ---------------- LangChain 工具工厂 ----------------
 
 def make_knowledge_base_tool(
@@ -199,6 +242,7 @@ def make_knowledge_base_tool(
     tavily_api_key: str,
     web_max_results: int,
     allow_web_fallback: bool = True,
+    searxng_base_url: str = "",
 ) -> BaseTool:
     """知识库检索工具。
 
@@ -227,7 +271,7 @@ def make_knowledge_base_tool(
             and (not result.get("results") or best < crag_min_score)
         ):
             web = execute_web_search(
-                query, web_provider, tavily_api_key, web_max_results
+                query, web_provider, tavily_api_key, web_max_results, searxng_base_url
             )
             fallback = web.get("results", [])
             for item in fallback:
@@ -296,13 +340,16 @@ def make_web_search_tool(
     tavily_api_key: str,
     max_results: int,
     counter: list[int],
+    searxng_base_url: str = "",
 ) -> BaseTool:
-    """联网搜索工具：provider 可插拔。"""
+    """联网搜索工具：provider 可插拔（duckduckgo / tavily / searxng）。"""
 
     @tool
     def web_search(query: str) -> dict:
         """联网搜索互联网上的公开信息（新闻、百科、实时数据等）。当问题涉及时事、网络信息，或知识库检索确认无法覆盖时调用；知识库已有文档相关的问题请优先使用 knowledge_base_search。返回标题、链接和摘要（每条带 index 引用编号，回答引用时用 [n] 标注）。"""
-        result = execute_web_search(query, provider, tavily_api_key, max_results)
+        result = execute_web_search(
+            query, provider, tavily_api_key, max_results, searxng_base_url
+        )
         for item in result.get("results", []):
             counter[0] += 1
             item["index"] = counter[0]
@@ -402,6 +449,7 @@ def build_tools(
     vision=None,
     skills_enabled: bool = True,
     skill_enabled_ids: set[str] | None = None,
+    searxng_base_url: str = "",
 ) -> list[BaseTool]:
     """根据前端开关组装工具列表（都不开则返回空列表 = 纯对话）。"""
     tools: list[BaseTool] = []
@@ -417,12 +465,15 @@ def build_tools(
                 tavily_api_key,
                 max_results,
                 allow_web_fallback=use_web_search,
+                searxng_base_url=searxng_base_url,
             )
         )
         tools.append(make_add_document_tool(rag_service, rag_service.settings))
     if use_web_search:
         tools.append(
-            make_web_search_tool(provider, tavily_api_key, max_results, counter)
+            make_web_search_tool(
+                provider, tavily_api_key, max_results, counter, searxng_base_url
+            )
         )
     if vision is not None and getattr(vision, "configured", False):
         tools.append(make_vision_tool(vision))

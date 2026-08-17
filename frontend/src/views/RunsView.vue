@@ -119,6 +119,51 @@
           </div>
         </template>
 
+        <!-- Token 用量 + 缓存命中（token_usage：主循环 + 辅助调用分开统计） -->
+        <template v-if="detailUsage">
+          <div class="detail-label">Token 用量</div>
+          <div class="usage-grid">
+            <div class="usage-cell">
+              <div class="usage-value">{{ detailUsage.llm_calls ?? '-' }}</div>
+              <div class="usage-label">主循环 LLM 调用</div>
+            </div>
+            <div class="usage-cell">
+              <div class="usage-value">{{ fmtTokens(detailUsage.prompt_tokens) }}</div>
+              <div class="usage-label">输入 tokens</div>
+            </div>
+            <div class="usage-cell">
+              <div class="usage-value">{{ fmtTokens(detailUsage.completion_tokens) }}</div>
+              <div class="usage-label">输出 tokens</div>
+            </div>
+            <div class="usage-cell">
+              <div class="usage-value">
+                {{
+                  detailUsage.cache_hit_rate != null
+                    ? (detailUsage.cache_hit_rate * 100).toFixed(0) + '%'
+                    : '-'
+                }}
+              </div>
+              <div class="usage-label">主循环缓存命中率</div>
+            </div>
+          </div>
+          <div class="usage-sub">
+            <template v-if="detailUsage.aux_llm_calls">
+              辅助调用（标题/计划/摘要/记忆等）：{{ detailUsage.aux_llm_calls }} 次 ·
+              {{ fmtTokens(detailUsage.aux_prompt_tokens) }} 入 /
+              {{ fmtTokens(detailUsage.aux_completion_tokens) }} 出
+            </template>
+            <template v-else>无辅助调用</template>
+          </div>
+          <div v-if="detailUsage.cache_hit_tokens != null" class="usage-sub">
+            缓存明细：命中 {{ fmtTokens(detailUsage.cache_hit_tokens) }} ·
+            未命中 {{ fmtTokens(detailUsage.cache_miss_tokens) }}
+          </div>
+          <div v-if="lastCallCache" class="usage-sub">
+            末次调用缓存：{{ fmtTokens(lastCallCache.read) }} 读 /
+            {{ fmtTokens(lastCallCache.total) }} 总
+          </div>
+        </template>
+
         <div class="detail-label">工具轨迹</div>
         <div v-if="!detail.tool_trace || !detail.tool_trace.length" class="detail-empty">
           无工具调用
@@ -187,6 +232,42 @@ const TIMING_LABELS = [
 ]
 
 const detailTimings = computed(() => detail.value?.token_usage?.timings || null)
+
+// Token 用量 + 主循环缓存命中率（token_usage 顶层字段）
+const detailUsage = computed(() => {
+  const usage = detail.value?.token_usage
+  if (!usage || typeof usage !== 'object') return null
+  const hit = usage.cache_hit_tokens ?? 0
+  const miss = usage.cache_miss_tokens ?? 0
+  return {
+    llm_calls: usage.llm_calls,
+    prompt_tokens: usage.prompt_tokens,
+    completion_tokens: usage.completion_tokens,
+    cache_hit_tokens: usage.cache_hit_tokens,
+    cache_miss_tokens: usage.cache_miss_tokens,
+    aux_llm_calls: usage.aux_llm_calls,
+    aux_prompt_tokens: usage.aux_prompt_tokens,
+    aux_completion_tokens: usage.aux_completion_tokens,
+    // 缓存命中率 = 命中/(命中+未命中)，无缓存数据时 null
+    cache_hit_rate: hit + miss > 0 ? hit / (hit + miss) : null,
+  }
+})
+
+// 末次 LLM 调用的缓存详情（last_call.input_token_details.cache_read）
+const lastCallCache = computed(() => {
+  const last = detail.value?.token_usage?.last_call
+  if (!last || typeof last !== 'object') return null
+  const details = last.input_token_details
+  const read =
+    details?.cache_read ??
+    last.prompt_cache_hit_tokens ??
+    last.prompt_tokens_details?.cached_tokens
+  if (read == null) return null
+  return {
+    read,
+    total: last.input_tokens ?? last.prompt_tokens ?? 0,
+  }
+})
 
 const detailTimingItems = computed(() => {
   const timings = detailTimings.value
@@ -358,6 +439,41 @@ onMounted(load)
   flex-direction: column;
   gap: 5px;
   margin-bottom: 12px;
+}
+
+/* Token 用量卡片网格 */
+.usage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.usage-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--bg-hover, rgba(128, 128, 128, 0.06));
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+
+.usage-value {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-label {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.usage-sub {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-top: 4px;
 }
 
 .timing-row {

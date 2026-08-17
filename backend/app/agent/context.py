@@ -212,6 +212,26 @@ class ContextService:
         max_messages = self.settings.history_max_messages
         summary, up_to = repo.get_summary_state(db, conversation_id)
         covered = sum(1 for r in rows if r["id"] <= up_to)
+        # 最近运行的缓存命中统计（主循环口径，供上下文面板展示）
+        cache_hit = 0
+        cache_miss = 0
+        recent_llm_calls = 0
+        recent_runs = 0
+        try:
+            runs = repo.list_agent_runs(db, limit=10, conversation_id=conversation_id)
+            for r in runs:
+                usage = r.get("token_usage")
+                if not isinstance(usage, dict):
+                    continue
+                hit = usage.get("cache_hit_tokens") or 0
+                miss = usage.get("cache_miss_tokens") or 0
+                if hit or miss:
+                    cache_hit += int(hit)
+                    cache_miss += int(miss)
+                recent_llm_calls += int(usage.get("llm_calls") or 0)
+                recent_runs += 1
+        except Exception as exc:
+            logger.warning("上下文面板读取运行统计失败：%s", exc)
         return {
             "conversation_id": conversation_id,
             "message_count": len(rows),
@@ -222,6 +242,16 @@ class ContextService:
             "summary_up_to_id": up_to,
             "summary_covered_messages": covered,
             "compaction_would_trigger": len(rows) > max_messages or total_tokens > budget,
+            # 最近 N 次运行：主循环 LLM 调用数与缓存命中率（0 数据时为 None）
+            "recent_runs": recent_runs,
+            "recent_llm_calls": recent_llm_calls,
+            "recent_cache_hit_tokens": cache_hit,
+            "recent_cache_miss_tokens": cache_miss,
+            "recent_cache_hit_rate": (
+                cache_hit / (cache_hit + cache_miss)
+                if (cache_hit + cache_miss) > 0
+                else None
+            ),
         }
 
     def compact_now(self, db: Session, conversation_id: int) -> dict:

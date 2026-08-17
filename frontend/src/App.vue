@@ -301,6 +301,105 @@
             </div>
 
             <div class="settings-section">
+              <div class="section-head">
+                <span class="settings-label">嵌入模型（Embedding）</span>
+              </div>
+              <div class="generic-form">
+                <div class="generic-row">
+                  <span class="generic-label">提供方式</span>
+                  <el-radio-group v-model="embeddingProvider" size="small">
+                    <el-radio-button value="local">本地 BGE</el-radio-button>
+                    <el-radio-button value="api">API</el-radio-button>
+                  </el-radio-group>
+                </div>
+                <template v-if="embeddingProvider === 'api'">
+                  <div class="generic-row">
+                    <span class="generic-label">Base URL</span>
+                    <el-input
+                      v-model="embeddingApi.base_url"
+                      size="small"
+                      placeholder="https://api.siliconflow.cn/v1"
+                      class="generic-select"
+                    />
+                  </div>
+                  <div class="generic-row">
+                    <span class="generic-label">模型</span>
+                    <el-input
+                      v-model="embeddingApi.model"
+                      size="small"
+                      placeholder="BAAI/bge-m3（留空用供应商默认）"
+                      class="generic-select"
+                    />
+                  </div>
+                  <div class="generic-row">
+                    <span class="generic-label">API Key</span>
+                    <el-input
+                      v-model="embeddingApi.api_key"
+                      type="password"
+                      show-password
+                      size="small"
+                      :placeholder="embeddingApi._masked ? `已设置 ${embeddingApi._masked}（留空保持不变）` : '未设置'"
+                      class="generic-select"
+                    />
+                  </div>
+                </template>
+                <div v-else class="settings-tip">
+                  使用本地 BGE 模型（bge-base-zh-v1.5，768 维），无需网络与密钥；
+                  切换为 API 后需点击下方「保存」并重建索引。
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <div class="section-head">
+                <span class="settings-label">重排序模型（Reranker）</span>
+              </div>
+              <div class="generic-form">
+                <div class="generic-row">
+                  <span class="generic-label">提供方式</span>
+                  <el-radio-group v-model="rerankerProvider" size="small">
+                    <el-radio-button value="local">本地 BGE</el-radio-button>
+                    <el-radio-button value="api">API</el-radio-button>
+                  </el-radio-group>
+                </div>
+                <template v-if="rerankerProvider === 'api'">
+                  <div class="generic-row">
+                    <span class="generic-label">Base URL</span>
+                    <el-input
+                      v-model="rerankerApi.base_url"
+                      size="small"
+                      placeholder="https://api.siliconflow.cn/v1"
+                      class="generic-select"
+                    />
+                  </div>
+                  <div class="generic-row">
+                    <span class="generic-label">模型</span>
+                    <el-input
+                      v-model="rerankerApi.model"
+                      size="small"
+                      placeholder="BAAI/bge-reranker-v2-m3（留空用供应商默认）"
+                      class="generic-select"
+                    />
+                  </div>
+                  <div class="generic-row">
+                    <span class="generic-label">API Key</span>
+                    <el-input
+                      v-model="rerankerApi.api_key"
+                      type="password"
+                      show-password
+                      size="small"
+                      :placeholder="rerankerApi._masked ? `已设置 ${rerankerApi._masked}（留空保持不变）` : '未设置'"
+                      class="generic-select"
+                    />
+                  </div>
+                </template>
+                <div v-else class="settings-tip">
+                  使用本地 BGE 重排序模型（bge-reranker-v2-m3），无需网络与密钥。
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">
               <div class="settings-label">通用</div>
               <div class="generic-form">
                 <div class="generic-row">
@@ -311,9 +410,19 @@
                   <span class="generic-label">联网搜索</span>
                   <el-select v-model="webProvider" size="small" class="generic-select">
                     <el-option label="DuckDuckGo（免费）" value="duckduckgo" />
+                    <el-option label="SearXNG（自托管，无限量）" value="searxng" />
                     <el-option label="Tavily" value="tavily" />
                     <el-option label="关闭" value="off" />
                   </el-select>
+                </div>
+                <div v-if="webProvider === 'searxng'" class="generic-row">
+                  <span class="generic-label">SearXNG 地址</span>
+                  <el-input
+                    v-model="searxngBaseUrl"
+                    size="small"
+                    placeholder="http://localhost:8888"
+                    class="generic-select"
+                  />
                 </div>
                 <div v-if="webProvider === 'tavily'" class="generic-row">
                   <span class="generic-label">Tavily Key</span>
@@ -903,7 +1012,14 @@ const webProvider = ref('duckduckgo')
 const tavilyKey = ref('')
 const tavilyMasked = ref('')
 const webMaxResults = ref(6)
+const searxngBaseUrl = ref('http://localhost:8888')
 const modelSaving = ref(false)
+
+// 嵌入 / 重排序模型提供方式（local=本地 BGE / api=OpenAI 兼容接口）
+const embeddingProvider = ref('local')
+const embeddingApi = ref({ base_url: '', api_key: '', model: '' })
+const rerankerProvider = ref('local')
+const rerankerApi = ref({ base_url: '', api_key: '', model: '' })
 
 const providerDialogVisible = ref(false)
 const providerDialogType = ref('chat')
@@ -931,7 +1047,24 @@ async function loadSettings() {
     webMaxResults.value = settingsModel.value.editable.web_search_max_results || 6
     tavilyMasked.value = settingsModel.value.editable.tavily_api_key || ''
     tavilyKey.value = ''
+    searxngBaseUrl.value =
+      settingsModel.value.editable.searxng_base_url || 'http://localhost:8888'
     const editable = settingsModel.value.editable || {}
+    // 嵌入 / 重排序模型提供方式
+    embeddingProvider.value = editable.embedding_provider || 'local'
+    embeddingApi.value = {
+      base_url: editable.embedding_api_base_url || '',
+      api_key: '',
+      model: editable.embedding_api_model || '',
+      _masked: editable.embedding_api_key || '',
+    }
+    rerankerProvider.value = editable.reranker_provider || 'local'
+    rerankerApi.value = {
+      base_url: editable.reranker_api_base_url || '',
+      api_key: '',
+      model: editable.reranker_api_model || '',
+      _masked: editable.reranker_api_key || '',
+    }
     toolsForm.value = {
       advanced_tools_enabled: editable.advanced_tools_enabled !== false,
       agent_subagents_enabled: editable.agent_subagents_enabled !== false,
@@ -1058,8 +1191,20 @@ async function saveModelSettings(silent = false) {
       chat_temperature: temperature.value,
       web_search_provider: webProvider.value,
       web_search_max_results: webMaxResults.value,
+      searxng_base_url: searxngBaseUrl.value.trim(),
+      // 嵌入 / 重排序模型提供方式
+      embedding_provider: embeddingProvider.value,
+      embedding_api_base_url: embeddingApi.value.base_url.trim(),
+      embedding_api_model: embeddingApi.value.model.trim(),
+      reranker_provider: rerankerProvider.value,
+      reranker_api_base_url: rerankerApi.value.base_url.trim(),
+      reranker_api_model: rerankerApi.value.model.trim(),
     }
     if (tavilyKey.value.trim()) updates.tavily_api_key = tavilyKey.value.trim()
+    if (embeddingApi.value.api_key.trim())
+      updates.embedding_api_key = embeddingApi.value.api_key.trim()
+    if (rerankerApi.value.api_key.trim())
+      updates.reranker_api_key = rerankerApi.value.api_key.trim()
     await saveSettings(updates)
     await loadSettings()
     if (!silent) ElMessage.success('设置已保存并生效')

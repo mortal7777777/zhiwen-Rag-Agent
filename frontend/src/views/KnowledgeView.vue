@@ -17,7 +17,18 @@
         <el-tag type="info">向量条数：{{ status.doc_count ?? '-' }}</el-tag>
         <el-tag v-if="status.error" type="danger">状态异常：{{ status.error }}</el-tag>
       </div>
-      <div class="data-dir">数据目录：{{ status.data_dir || '-' }}</div>
+      <div class="data-dir">
+        数据目录：{{ status.data_dir || '-' }}
+        <el-button
+          size="small"
+          type="primary"
+          plain
+          class="change-dir-btn"
+          @click="openChangeDir"
+        >
+          更改目录
+        </el-button>
+      </div>
     </el-card>
 
     <!-- 上传区域 -->
@@ -150,6 +161,30 @@
         <el-button type="primary" :loading="metaSaving" @click="saveMeta">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 更改数据目录对话框 -->
+    <el-dialog v-model="changeDirVisible" title="更改知识库目录" width="480px" append-to-body>
+      <el-form label-width="70px">
+        <el-form-item label="当前目录">
+          <span class="meta-file">{{ status.data_dir || '-' }}</span>
+        </el-form-item>
+        <el-form-item label="新目录">
+          <el-input
+            v-model="changeDirForm.path"
+            placeholder="输入绝对路径，如 D:\AI\my_docs；不存在会自动创建"
+          />
+        </el-form-item>
+        <div class="dir-hint">
+          切换后旧索引仍指向原目录，需要点击「重建索引」让新目录的文档生效。
+        </div>
+      </el-form>
+      <template #footer>
+        <el-button @click="changeDirVisible = false">取消</el-button>
+        <el-button type="primary" :loading="changeDirSaving" @click="saveChangeDir">
+          切换目录
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -165,6 +200,7 @@ import {
   listDocuments,
   rebuildIndex,
   saveDocumentMeta,
+  setDataDir,
   uploadDocuments,
 } from '../api'
 
@@ -187,6 +223,11 @@ const docViewerRef = ref(null)
 const metaEditVisible = ref(false)
 const metaSaving = ref(false)
 const metaForm = ref({ relative_path: '', name: '', category: '', tags: '', notes: '' })
+
+// 更改数据目录
+const changeDirVisible = ref(false)
+const changeDirSaving = ref(false)
+const changeDirForm = ref({ path: '' })
 
 const filteredDocuments = computed(() =>
   categoryFilter.value
@@ -275,6 +316,36 @@ async function handleRebuild() {
   }
 }
 
+function openChangeDir() {
+  changeDirForm.value = { path: status.value.data_dir || '' }
+  changeDirVisible.value = true
+}
+
+async function saveChangeDir() {
+  const path = changeDirForm.value.path.trim()
+  if (!path) {
+    ElMessage.warning('请输入新的目录路径')
+    return
+  }
+  changeDirSaving.value = true
+  try {
+    const result = await setDataDir(path)
+    changeDirVisible.value = false
+    ElMessage.success(result.hint || '目录已切换')
+    // 切换到新目录后刷新列表（可能为空目录）与状态
+    documents.value = []
+    await refresh()
+    if (documents.value.length) {
+      // 新目录有文档但索引未建：引导用户重建
+      ElMessage.info('新目录包含文档但索引尚未建立，请点击「重建索引」')
+    }
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '更改目录失败')
+  } finally {
+    changeDirSaving.value = false
+  }
+}
+
 function handlePreview(row) {
   docViewerRef.value?.open(row.relative_path)
 }
@@ -335,6 +406,12 @@ onMounted(() => {
   gap: 16px;
 }
 
+/* 卡片不被 flex 压缩：文档很多、列表很高时页面整体滚动，
+   三张卡片（状态/上传/列表）各自完整显示基本信息 */
+.knowledge-page > :deep(.el-card) {
+  flex-shrink: 0;
+}
+
 .knowledge-page :deep(.el-card) {
   border-radius: 14px;
   border: 1px solid var(--border);
@@ -361,6 +438,23 @@ onMounted(() => {
   margin-top: 8px;
   color: var(--text-3);
   font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.change-dir-btn {
+  flex-shrink: 0;
+}
+
+.dir-hint {
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.6;
+  background: var(--bg-hover, rgba(128, 128, 128, 0.06));
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-top: 2px;
 }
 
 .upload-button {

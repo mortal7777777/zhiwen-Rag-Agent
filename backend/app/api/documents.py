@@ -58,6 +58,41 @@ def list_documents(
     return docs
 
 
+@router.put("/documents/data-dir")
+def set_data_dir(
+    payload: dict,
+    db=Depends(get_db),
+    service: RAGService = Depends(get_service),
+) -> dict:
+    """更改知识库数据目录：即时生效并持久化，返回新目录与提示。
+
+    新目录不存在会自动创建；切换后旧索引仍指向旧目录，需要用户
+    在界面点击「重建索引」把新目录的文档嵌入 OpenSearch。
+    """
+    raw = (payload or {}).get("path")
+    if not raw or not str(raw).strip():
+        raise HTTPException(status_code=400, detail="目录路径不能为空")
+    from ..config import get_settings
+    from ..runtime_config import save_overrides
+
+    settings = get_settings()
+    try:
+        target = Path(str(raw)).expanduser().resolve()
+        target.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"目录不可用：{exc}")
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail=f"不是有效目录：{target}")
+    # 保存覆盖（内部会把路径同步到 settings 单例，RAGService 立即读到新值）
+    save_overrides(db, {"data_dir": str(target)}, settings=settings)
+    service.refresh()
+    return {
+        "ok": True,
+        "data_dir": str(target),
+        "hint": "目录已切换。旧索引仍指向原目录，请点击「重建索引」让新目录的文档生效。",
+    }
+
+
 @router.get("/documents/preview")
 def preview_document(
     path: str = Query(..., description="文档相对路径"),

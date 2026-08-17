@@ -1281,6 +1281,17 @@ def show_context(base_url: str, conversation_id: int | None) -> None:
         )
     else:
         print(paint("   摘要   未生成", "dim"))
+    recent_runs = int(stats.get("recent_runs") or 0)
+    if recent_runs:
+        rate = stats.get("recent_cache_hit_rate")
+        rate_txt = f"{rate * 100:.0f}%" if rate is not None else "-"
+        print(
+            paint(
+                f"   缓存   {rate_txt} 命中率（近 {recent_runs} 次运行 · "
+                f"主循环 {stats.get('recent_llm_calls', 0)} 次调用）",
+                "dim",
+            )
+        )
     if stats.get("compaction_would_trigger"):
         print(paint("   超出软窗口，下一轮将自动压缩（也可 /compact 立即压缩）。", "yellow"))
     else:

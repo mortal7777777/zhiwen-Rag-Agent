@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ EDITABLE_KEYS = {
     "agent_title_model",
     "chat_temperature",
     "main_model_vision",
+    # 知识库数据目录（可在知识库管理页修改，改动即时生效并持久化）
+    "data_dir",
     # 旧式视觉模型键值（兼容保留）
     "sensenova_api_key",
     "sensenova_base_url",
@@ -42,6 +45,7 @@ EDITABLE_KEYS = {
     "web_search_provider",
     "web_search_max_results",
     "tavily_api_key",
+    "searxng_base_url",
     # 技能总开关
     "skills_enabled",
     # 高级工具（P0：受控执行 / MCP / 技能沙箱 / 思考摘要）
@@ -69,6 +73,15 @@ EDITABLE_KEYS = {
     "checkpoint_enabled",
     "checkpoint_native_enabled",
     "trajectory_compress_enabled",
+    # 嵌入/重排序模型提供方式（local=本地 BGE / api=OpenAI 兼容接口）
+    "embedding_provider",
+    "embedding_api_base_url",
+    "embedding_api_key",
+    "embedding_api_model",
+    "reranker_provider",
+    "reranker_api_base_url",
+    "reranker_api_key",
+    "reranker_api_model",
 }
 
 # 只读展示键
@@ -97,6 +110,26 @@ _lock = threading.Lock()
 _overrides: dict = {}
 
 
+def _apply_data_dir_override(settings, value) -> None:
+    """把 data_dir 覆盖同步到全局 settings 单例。
+
+    RAGService 直接读 settings.data_dir 属性（不走 effective()），
+    所以改目录必须直接改单例属性才能即时生效。Settings 是 frozen
+    dataclass，用 object.__setattr__ 原地修改（有意为之的运行时变更，
+    所有持有该实例引用的 service 都会读到新值）。
+    """
+    if settings is None:
+        return
+    try:
+        from pathlib import Path
+
+        p = Path(str(value)).expanduser().resolve()
+        p.mkdir(parents=True, exist_ok=True)  # 不存在则创建，保证可用
+        object.__setattr__(settings, "data_dir", p)
+    except Exception as exc:
+        logger.warning("应用 data_dir 覆盖失败（%s）：%s", value, exc)
+
+
 def load_overrides(db) -> dict:
     """从数据库加载覆盖值（启动时 / 保存后调用）。"""
     global _overrides
@@ -113,6 +146,9 @@ def load_overrides(db) -> dict:
             logger.warning("runtime_overrides 解析失败：%s", exc)
     with _lock:
         _overrides = data
+    # 重启后恢复 data_dir：直接改 settings 单例（RAGService 读属性不走 effective）
+    if data.get("data_dir"):
+        _apply_data_dir_override(get_settings(), data["data_dir"])
     return data
 
 
@@ -135,6 +171,15 @@ def save_overrides(db, updates: dict, settings=None) -> dict:
             cleaned = _validate_providers(value, settings=settings)
             if cleaned:
                 clean[key] = cleaned
+            continue
+        if key == "data_dir":
+            # 路径校验 + 即时同步到 settings 单例（RAGService 读属性不走 effective）
+            _apply_data_dir_override(settings, value)
+            clean[key] = str(
+                getattr(settings, "data_dir", None)
+                if settings is not None
+                else Path(str(value)).expanduser().resolve()
+            )
             continue
         if key in ("active_chat_provider", "active_vision_provider"):
             clean[key] = str(value).strip()

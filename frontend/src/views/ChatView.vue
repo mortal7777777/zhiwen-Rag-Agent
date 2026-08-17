@@ -671,7 +671,17 @@ wo<template>
     </el-dialog>
 
     <!-- 上下文占用面板（/context + /compact 的 Web 入口） -->
-    <el-dialog v-model="contextVisible" title="上下文占用" width="480px">
+    <!-- append-to-body：与其他 dialog 一致，避免渲染在父级 DOM 内导致
+         层级错乱（内容看不见 / 关闭按钮失效）；接口 15s 超时自动报错关闭 -->
+    <el-dialog
+      v-model="contextVisible"
+      title="上下文占用"
+      width="480px"
+      append-to-body
+      :close-on-click-modal="true"
+      :close-on-press-escape="true"
+      @close="onContextClose"
+    >
       <div v-if="contextStats" class="ctx-stats">
         <div class="ctx-row">
           <span class="ctx-label">历史消息</span>
@@ -707,6 +717,47 @@ wo<template>
             }}
           </span>
         </div>
+
+        <!-- 最近运行的缓存命中率与 LLM 调用量（主循环口径） -->
+        <template v-if="contextStats.recent_runs">
+          <div class="ctx-row">
+            <span class="ctx-label">缓存命中率</span>
+            <span class="ctx-value">
+              {{
+                contextStats.recent_cache_hit_rate != null
+                  ? (contextStats.recent_cache_hit_rate * 100).toFixed(0) + '%'
+                  : '-'
+              }}
+              <span class="ctx-sub">（近 {{ contextStats.recent_runs }} 次运行）</span>
+            </span>
+          </div>
+          <div class="ctx-bar">
+            <i
+              :style="{
+                width:
+                  contextStats.recent_cache_hit_rate != null
+                    ? (contextStats.recent_cache_hit_rate * 100).toFixed(1) + '%'
+                    : '0%',
+              }"
+            />
+          </div>
+          <div class="ctx-row">
+            <span class="ctx-label">主循环 LLM 调用</span>
+            <span class="ctx-value">{{ contextStats.recent_llm_calls }} 次</span>
+          </div>
+          <div v-if="contextStats.recent_cache_hit_tokens != null" class="ctx-row">
+            <span class="ctx-label">缓存明细</span>
+            <span class="ctx-value">
+              命中 {{ fmtCtxTokens(contextStats.recent_cache_hit_tokens) }} ·
+              未命中 {{ fmtCtxTokens(contextStats.recent_cache_miss_tokens) }}
+            </span>
+          </div>
+        </template>
+        <div v-else class="ctx-row">
+          <span class="ctx-label">缓存命中率</span>
+          <span class="ctx-value">（本会话暂无运行记录）</span>
+        </div>
+
         <div class="ctx-note">
           超出软窗口（条数或 token 预算）时下一轮自动压缩；也可以手动压缩——
           保留近期消息原文，更早的对话并入滚动摘要。
@@ -1287,16 +1338,35 @@ function barPct(cur, cap) {
   return `${Math.min(100, Math.round((cur / cap) * 100))}%`
 }
 
+function fmtCtxTokens(n) {
+  if (n == null) return '-'
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
+
+// 请求序号：关闭/重开对话框时使进行中的请求失效，防止旧请求
+// 超时后误关新打开的对话框（竞态）
+let contextReqId = 0
+
 async function openContextDialog() {
   if (!activeId.value) return
+  const reqId = ++contextReqId
   contextVisible.value = true
   contextStats.value = null
   try {
-    contextStats.value = await getAgentContext(activeId.value)
+    const stats = await getAgentContext(activeId.value)
+    if (reqId === contextReqId) contextStats.value = stats
   } catch (error) {
+    if (reqId !== contextReqId) return // 过期请求（用户已关闭/重开），忽略
     ElMessage.error(error.response?.data?.detail || '读取上下文统计失败')
     contextVisible.value = false
   }
+}
+
+function onContextClose() {
+  // 关闭时作废进行中的请求：15s 超时回调不会再触碰对话框状态
+  contextReqId++
 }
 
 async function handleCompact() {
@@ -2290,6 +2360,11 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.6;
   color: var(--text-3);
+}
+
+.ctx-sub {
+  font-size: 11px;
+  color: var(--text-3, #909399);
 }
 
 .assistant-content {

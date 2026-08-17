@@ -114,3 +114,88 @@ class LocalReranker:
                 self._fallback_to_cpu(exc)
                 return self.rerank(query, documents, top_k=top_k)
             raise
+
+
+class APIReranker:
+    """API 重排序（/v1/rerank），接口与 LocalReranker 一致。
+
+    兼容通用 rerank 格式（硅基流动 / Jina / Cohere 等）：
+    请求 {model, query, documents: [str], top_n}，响应
+    {results: [{index, relevance_score}]}。本地无 GPU 时替代本地 BGE reranker。
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str = "",
+        timeout: float = 60.0,
+    ):
+        self.base_url = (base_url or "").rstrip("/")
+        self.api_key = api_key or ""
+        self.model = model or ""
+        self.timeout = timeout
+
+    @property
+    def device(self) -> str:
+        return "api"
+
+    def rerank(
+        self,
+        query: str,
+        documents: list[Document],
+        top_k: int = 4,
+    ) -> list[Document]:
+        """把 query 与每个候选交给 API 打分，按分数降序保留前 top_k 条。"""
+        if not documents:
+            return []
+        import httpx
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        body = {
+            "query": query,
+            "documents": [doc.page_content for doc in documents],
+            "top_n": max(1, top_k),
+        }
+        if self.model:
+            body["model"] = self.model
+        resp = httpx.post(
+            f"{self.base_url}/rerank",
+            json=body,
+            headers=headers,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results") or []
+        # index -> relevance_score
+        scores: dict[int, float] = {}
+        for item in results:
+            try:
+                scores[int(item.get("index", -1))] = float(
+                    item.get("relevance_score", 0.0)
+                )
+            except (TypeError, ValueError):
+                continue
+        ranked = sorted(
+            ((i, doc) for i, doc in enumerate(documents) if i in scores),
+            key=lambda x: scores[x[0]],
+            reverse=True,
+        )
+        out: list[Document] = []
+        for i, doc in ranked[:top_k]:
+            doc.metadata["rerank_score"] = round(scores[i], 4)
+            out.append(doc)
+        # API 可能对部分候选未打分：未打分的按原顺序附在末尾（保持返回数稳定）
+        if len(out) < top_k:
+            seen = {id(d) for _, d in ranked[:top_k]}
+            for doc in documents:
+                if len(out) >= top_k:
+                    break
+                if id(doc) in seen:
+                    continue
+                seen.add(id(doc))
+                out.append(doc)
+        return out

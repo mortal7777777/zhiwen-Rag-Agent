@@ -59,23 +59,59 @@ class RAGService:
     # ============================================================
     @property
     def embeddings(self) -> LocalBGEEmbeddings:
+        """嵌入模型：provider=api 且配了 base_url 时用 API，否则本地 BGE。"""
         if self._embeddings is None:
-            self._embeddings = LocalBGEEmbeddings(
-                self.settings.embedding_model_dir,
-                use_fp16=self.settings.embedding_fp16,
-            )
-            logger.info(
-                "本地 Embedding 模型就绪：%s（%s，%d 维）",
-                self.settings.embedding_model_dir.name,
-                self._embeddings.device,
-                self._embeddings.dimension,
-            )
+            from ..runtime_config import effective
+            from .embeddings import APIBGEEmbeddings
+
+            provider = str(effective(self.settings, "embedding_provider") or "local")
+            base_url = str(effective(self.settings, "embedding_api_base_url") or "").strip()
+            if provider == "api" and base_url:
+                self._embeddings = APIBGEEmbeddings(
+                    base_url=base_url,
+                    api_key=str(effective(self.settings, "embedding_api_key") or "").strip(),
+                    model=str(effective(self.settings, "embedding_api_model") or "").strip(),
+                )
+                logger.info(
+                    "Embedding 使用 API：%s（模型 %s）",
+                    base_url,
+                    effective(self.settings, "embedding_api_model") or "供应商默认",
+                )
+            else:
+                self._embeddings = LocalBGEEmbeddings(
+                    self.settings.embedding_model_dir,
+                    use_fp16=self.settings.embedding_fp16,
+                )
+                logger.info(
+                    "本地 Embedding 模型就绪：%s（%s，%d 维）",
+                    self.settings.embedding_model_dir.name,
+                    self._embeddings.device,
+                    self._embeddings.dimension,
+                )
         return self._embeddings
 
     @property
     def reranker(self) -> LocalReranker:
+        """重排序模型：provider=api 且配了 base_url 时用 API，否则本地 BGE。"""
         if self._reranker is None:
-            self._reranker = LocalReranker(self.settings.reranker_cache_dir)
+            from ..runtime_config import effective
+            from .reranker import APIReranker
+
+            provider = str(effective(self.settings, "reranker_provider") or "local")
+            base_url = str(effective(self.settings, "reranker_api_base_url") or "").strip()
+            if provider == "api" and base_url:
+                self._reranker = APIReranker(
+                    base_url=base_url,
+                    api_key=str(effective(self.settings, "reranker_api_key") or "").strip(),
+                    model=str(effective(self.settings, "reranker_api_model") or "").strip(),
+                )
+                logger.info(
+                    "Reranker 使用 API：%s（模型 %s）",
+                    base_url,
+                    effective(self.settings, "reranker_api_model") or "供应商默认",
+                )
+            else:
+                self._reranker = LocalReranker(self.settings.reranker_cache_dir)
         return self._reranker
 
     @property

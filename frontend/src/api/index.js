@@ -194,6 +194,10 @@ export const getDocumentFileUrl = (relativePath) =>
     .map((seg) => encodeURIComponent(seg))
     .join('/')}`
 
+/** 更改知识库数据目录（即时生效并持久化） */
+export const setDataDir = (path) =>
+  client.put('/documents/data-dir', { path }).then((res) => res.data)
+
 /** 全部文档的自定义分类元数据 */
 export const getDocumentMeta = () =>
   client.get('/documents/meta').then((res) => res.data)
@@ -291,9 +295,11 @@ export const resolvePermission = (
 export const listPendingPermissions = () =>
   client.get('/agent/permissions').then((res) => res.data)
 
-/** 上下文占用统计：消息条数 / token 预算 / 滚动摘要进度 */
+/** 上下文占用统计：消息条数 / token 预算 / 滚动摘要进度 / 缓存命中率 */
 export const getAgentContext = (conversationId) =>
-  client.get(`/agent/context/${conversationId}`).then((res) => res.data)
+  client
+    .get(`/agent/context/${conversationId}`, { timeout: 15000 })
+    .then((res) => res.data)
 
 /** 手动压缩会话历史：保留近期消息，更早的并入滚动摘要 */
 export const compactConversation = (conversationId) =>

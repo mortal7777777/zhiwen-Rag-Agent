@@ -68,9 +68,10 @@ class Settings:
     )
 
     # ---- 联网搜索 ----
-    web_search_provider: str = "duckduckgo"  # duckduckgo | tavily | off
+    web_search_provider: str = "duckduckgo"  # duckduckgo | tavily | searxng | off
     tavily_api_key: str = ""
     web_search_max_results: int = 6
+    searxng_base_url: str = "http://localhost:8888"  # 自托管 SearXNG 实例地址
 
     # ---- Agent 参数 ----
     agent_max_iterations: int = 6       # ReAct 循环最大轮数（工具调用次数上限）
@@ -112,6 +113,16 @@ class Settings:
     # ---- 嵌入性能 ----
     embedding_fp16: bool = True           # CUDA 下用 fp16 嵌入（实测约 3 倍提速）
     embed_batch_size: int = 128           # 文档嵌入批大小（同时是 OpenSearch 批量写入大小）
+
+    # ---- 嵌入/重排序模型提供方式：local=本地 BGE（默认）；api=OpenAI 兼容接口 ----
+    embedding_provider: str = "local"     # local | api
+    embedding_api_base_url: str = ""      # 如 https://api.siliconflow.cn/v1
+    embedding_api_key: str = ""
+    embedding_api_model: str = ""         # 如 BAAI/bge-m3（留空则取供应商默认）
+    reranker_provider: str = "local"      # local | api
+    reranker_api_base_url: str = ""       # 如 https://api.siliconflow.cn/v1
+    reranker_api_key: str = ""
+    reranker_api_model: str = ""          # 如 BAAI/bge-reranker-v2-m3
 
     # ---- 检索参数 ----
     recall_k: int = 40       # 每路检索器各取前 N 条
@@ -193,6 +204,14 @@ class Settings:
                 "RERANKER_CACHE_DIR",
                 LOCAL_MODELS_ROOT / "models--BAAI--bge-reranker-v2-m3",
             ),
+            embedding_provider=_env("EMBEDDING_PROVIDER", "local"),
+            embedding_api_base_url=_env("EMBEDDING_API_BASE_URL", ""),
+            embedding_api_key=_env("EMBEDDING_API_KEY", ""),
+            embedding_api_model=_env("EMBEDDING_API_MODEL", ""),
+            reranker_provider=_env("RERANKER_PROVIDER", "local"),
+            reranker_api_base_url=_env("RERANKER_API_BASE_URL", ""),
+            reranker_api_key=_env("RERANKER_API_KEY", ""),
+            reranker_api_model=_env("RERANKER_API_MODEL", ""),
             opensearch_url=_env("OPENSEARCH_URL", "http://localhost:9200"),
             opensearch_index=_env("OPENSEARCH_INDEX", "rag_knowledge_base_v2"),
             deepseek_api_key=_env("DEEPSEEK_API_KEY", ""),
@@ -214,6 +233,7 @@ class Settings:
             web_search_provider=_env("WEB_SEARCH_PROVIDER", "duckduckgo"),
             tavily_api_key=_env("TAVILY_API_KEY", ""),
             web_search_max_results=int(_env("WEB_SEARCH_MAX_RESULTS", "6")),
+            searxng_base_url=_env("SEARXNG_BASE_URL", "http://localhost:8888"),
             agent_max_iterations=int(_env("AGENT_MAX_ITERATIONS", "6")),
             agent_max_failures=int(_env("AGENT_MAX_FAILURES", "3")),
             agent_task_max_iterations=int(_env("AGENT_TASK_MAX_ITERATIONS", "24")),
