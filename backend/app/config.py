@@ -72,6 +72,7 @@ class Settings:
     tavily_api_key: str = ""
     web_search_max_results: int = 6
     searxng_base_url: str = "http://localhost:8888"  # 自托管 SearXNG 实例地址
+    searxng_engines: str = ""  # 逗号分隔指定引擎（如 bing,baidu,sogou）；空=实例默认
 
     # ---- Agent 参数 ----
     agent_max_iterations: int = 6       # ReAct 循环最大轮数（工具调用次数上限）
@@ -234,6 +235,7 @@ class Settings:
             tavily_api_key=_env("TAVILY_API_KEY", ""),
             web_search_max_results=int(_env("WEB_SEARCH_MAX_RESULTS", "6")),
             searxng_base_url=_env("SEARXNG_BASE_URL", "http://localhost:8888"),
+            searxng_engines=_env("SEARXNG_ENGINES", ""),
             agent_max_iterations=int(_env("AGENT_MAX_ITERATIONS", "6")),
             agent_max_failures=int(_env("AGENT_MAX_FAILURES", "3")),
             agent_task_max_iterations=int(_env("AGENT_TASK_MAX_ITERATIONS", "24")),

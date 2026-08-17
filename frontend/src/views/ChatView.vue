@@ -856,6 +856,24 @@ const activeId = ref(null)
 const currentTitle = ref('新对话')
 const sessionCollapsed = ref(false)
 
+// 会话草稿：每个会话（含新对话 key='new'）独立保留输入框内容
+const drafts = ref({})
+// 会话消息内存缓存：切换时保存当前内存态（含生成中的消息），
+// 切回时优先用缓存，避免正在生成的内容丢失
+const sessionMessagesCache = {}
+
+function currentDraftKey() {
+  return activeId.value ?? 'new'
+}
+
+function saveDraft() {
+  drafts.value[currentDraftKey()] = question.value
+}
+
+function restoreDraft() {
+  question.value = drafts.value[currentDraftKey()] || ''
+}
+
 // 输入区选项
 const toolMode = ref('auto') // auto=自动（两者都启用）/ manual=手动
 const useWebSearch = ref(false)
@@ -1150,7 +1168,10 @@ function focusPermissionCard() {
   if (typing) return
   p._focusIndex = 0
   nextTick(() => {
-    const card = document.querySelector(`.permission-card[data-perm-id="${p.id}"] .permission-opts`)
+    // 注意：data-perm-id 在外层包装 div 上（.permission-card 是其子元素），
+    // 选择器必须用后代写法，否则查不到元素、focus() 静默失败，
+    // 导致键盘（数字/Enter）全部无效
+    const card = document.querySelector(`[data-perm-id="${p.id}"] .permission-opts`)
     card?.focus()
   })
 }
@@ -1203,35 +1224,48 @@ async function loadSessions() {
 }
 
 function startNewChat() {
-  if (loading.value) return
+  // 生成中也允许新建：流式消息对象独立于会话数组，切走不影响后台生成
+  saveDraft()
+  if (activeId.value != null) sessionMessagesCache[activeId.value] = messages.value
   activeId.value = null
   currentTitle.value = '新对话'
   messages.value = []
-  question.value = ''
+  restoreDraft()
 }
 
 async function switchSession(session) {
-  if (loading.value || session.id === activeId.value) return
+  if (session.id === activeId.value) return
+  // 保存当前会话的草稿与内存消息（含生成中的内容），再切换
+  saveDraft()
+  if (activeId.value != null) sessionMessagesCache[activeId.value] = messages.value
   activeId.value = session.id
   currentTitle.value = session.title
   restoringTemplate = true
   templateId.value = session.template_id || 0
   restoringTemplate = false
-  try {
-    const history = await getConversationMessages(session.id)
-    messages.value = history.map(mapHistoryMessage)
-    // 恢复 TodoWrite 任务清单，挂到最近一条助手消息（若有）
-    try {
-      const todoRes = await getTodos(session.id)
-      const lastAssistant = [...messages.value].reverse().find((m) => m.role === 'assistant')
-      if (lastAssistant && todoRes.todos?.length) lastAssistant.todos = todoRes.todos
-    } catch {
-      // 任务清单读取失败不阻塞会话加载
-    }
+  if (sessionMessagesCache[session.id]) {
+    // 本会话有内存缓存（正在生成 / 刚切走）：直接用，不重新拉取，
+    // streamMsg 继续写入同一个消息对象，切回即看到完整内容
+    messages.value = sessionMessagesCache[session.id]
     scrollToBottom(true)
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '加载历史消息失败')
+  } else {
+    try {
+      const history = await getConversationMessages(session.id)
+      messages.value = history.map(mapHistoryMessage)
+      // 恢复 TodoWrite 任务清单，挂到最近一条助手消息（若有）
+      try {
+        const todoRes = await getTodos(session.id)
+        const lastAssistant = [...messages.value].reverse().find((m) => m.role === 'assistant')
+        if (lastAssistant && todoRes.todos?.length) lastAssistant.todos = todoRes.todos
+      } catch {
+        // 任务清单读取失败不阻塞会话加载
+      }
+      scrollToBottom(true)
+    } catch (error) {
+      ElMessage.error(error.response?.data?.detail || '加载历史消息失败')
+    }
   }
+  restoreDraft()
 }
 
 async function handleRename(session) {
@@ -1265,6 +1299,9 @@ async function handleDelete(session) {
   }
   try {
     await deleteConversation(session.id)
+    // 清理该会话的内存缓存与草稿
+    delete sessionMessagesCache[session.id]
+    delete drafts.value[session.id]
     if (session.id === activeId.value) {
       startNewChat()
     }
@@ -1633,6 +1670,8 @@ async function send(options = {}) {
   streamMsg = messages.value[messages.value.length - 1]
   pendingText.value = ''
   question.value = ''
+  // 发送成功：清空该会话草稿（内容已发出）
+  drafts.value[currentDraftKey()] = ''
   attachedImages.value = []
   loading.value = true
   currentTool.value = ''
@@ -2255,6 +2294,10 @@ onBeforeUnmount(() => {
 .msg.user .msg-body {
   display: flex;
   justify-content: flex-end;
+  /* 撑满整行：否则 msg-body 收缩到气泡宽度，气泡的 max-width:70%
+     以自身宽度为参照（自引用收缩），实际换行宽度只有整行的 ~62% */
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .user-bubble {
@@ -2291,6 +2334,9 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
+  /* 占满整行：否则 group 收缩到气泡宽度，气泡 max-width:70% 以自身为参照
+     （自引用收缩），短文本也会被压窄换行（如两个字拆成两行） */
+  width: 100%;
 }
 
 .user-rewind {

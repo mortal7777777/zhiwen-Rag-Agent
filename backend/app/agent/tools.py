@@ -71,6 +71,7 @@ def execute_web_search(
     api_key: str,
     max_results: int,
     searxng_base_url: str = "",
+    searxng_engines: str = "",
 ) -> dict:
     """联网搜索：provider = duckduckgo | tavily | searxng | off。"""
     if provider == "off":
@@ -84,7 +85,7 @@ def execute_web_search(
         if provider == "tavily":
             results = _search_tavily(query, api_key, max_results)
         elif provider == "searxng":
-            results = _search_searxng(query, searxng_base_url, max_results)
+            results = _search_searxng(query, searxng_base_url, max_results, searxng_engines)
         else:
             results = _search_duckduckgo(query, max_results)
         for item in results:
@@ -196,11 +197,28 @@ def _search_tavily(query: str, api_key: str, max_results: int) -> list[dict]:
     ]
 
 
-def _search_searxng(query: str, base_url: str, max_results: int) -> list[dict]:
+def _search_searxng(
+    query: str,
+    base_url: str,
+    max_results: int,
+    engines: str = "",
+) -> list[dict]:
     """SearXNG 自托管元搜索（JSON API，无限量免 key）。
 
-    请求：GET {base_url}/search?q=...&format=json
-    响应：{results: [{title, url, content, ...}]}；非 200 / 实例未启动会抛错。
+    请求：GET {base_url}/search?q=...&format=json[&engines=a,b]
+    响应：{results: [{title, url, content, ...}], unresponsive_engines: [...]}
+    非 200 / 实例未启动会抛错。
+
+    engines 逗号分隔指定引擎（如 "bing,baidu,sogou"），留空用实例默认。
+    国内网络建议指定可直连/经代理稳定的引擎，避免 google 系超时拉低质量。
+
+    403 常见原因（给出可操作提示）：
+    1. 实例默认只开 html 格式，需在 settings.yml 加 search.formats: [html, json]；
+    2. server.limiter 默认拦无转发头的请求（本客户端已带 X-Forwarded-For 头，
+       仍 403 则需在 settings.yml 设 server.limiter: false）；
+    3. 容器内访问 Google/Bing 需要走宿主机代理（Clash 7890）：
+       docker run -e HTTP_PROXY=http://host.docker.internal:7890 \\
+                  -e HTTPS_PROXY=http://host.docker.internal:7890 ...
     """
     import httpx
     from urllib.parse import urlencode
@@ -208,18 +226,37 @@ def _search_searxng(query: str, base_url: str, max_results: int) -> list[dict]:
     base = (base_url or "").rstrip("/")
     if not base:
         raise RuntimeError("未配置 SearXNG 实例地址（SEARXNG_BASE_URL）")
-    params = urlencode(
-        {
-            "q": query,
-            "format": "json",
-            "language": "zh-CN",
-            "categories": "general",
-        }
+    params: dict = {
+        "q": query,
+        "format": "json",
+        "language": "zh-CN",
+        "categories": "general",
+    }
+    engine_list = [
+        e.strip() for e in (engines or "").split(",") if e.strip()
+    ]
+    if engine_list:
+        params["engines"] = ",".join(engine_list)
+    # 带转发头：SearXNG 的 limiter（botdetection）对无 X-Forwarded-For /
+    # X-Real-IP 的请求直接 403（日志：X-Forwarded-For nor X-Real-IP header
+    # is set!）。本机自托管场景下带 127.0.0.1 头即可放行。
+    response = httpx.get(
+        f"{base}/search?{urlencode(params)}",
+        timeout=30,
+        headers={"X-Forwarded-For": "127.0.0.1", "X-Real-IP": "127.0.0.1"},
     )
-    response = httpx.get(f"{base}/search?{params}", timeout=30)
+    if response.status_code == 403:
+        raise RuntimeError(
+            "SearXNG 返回 403 Forbidden。三步配置："
+            "① settings.yml 开 JSON：search.formats: [html, json]；"
+            "② 关闭限流器：server.limiter: false（默认会拦无转发头的请求）；"
+            "③ 容器访问上游引擎走宿主机代理（Docker 加 "
+            "-e HTTP_PROXY=http://host.docker.internal:7890 -e HTTPS_PROXY=...）。"
+            "改完重启容器即可。"
+        )
     response.raise_for_status()
     data = response.json()
-    return [
+    results = [
         {
             "title": _truncate(item.get("title", ""), 150),
             "url": item.get("url", ""),
@@ -229,6 +266,19 @@ def _search_searxng(query: str, base_url: str, max_results: int) -> list[dict]:
         }
         for item in data.get("results", [])[:max_results]
     ]
+    if not results:
+        # 空结果：带上失败引擎诊断（如 unresponsive_engines），便于排查
+        dead = data.get("unresponsive_engines") or []
+        if dead:
+            dead_summary = "；".join(
+                f"{name}（{reason}）" for name, reason in dead[:5]
+            )
+            raise RuntimeError(
+                f"SearXNG 未返回结果，上游引擎全部不可用：{dead_summary}。"
+                "检查容器代理（host.docker.internal:7890）是否可用、"
+                "或在设置里指定引擎（如 searxng_engines=bing,baidu,sogou）。"
+            )
+    return results
 
 
 # ---------------- LangChain 工具工厂 ----------------
@@ -243,6 +293,7 @@ def make_knowledge_base_tool(
     web_max_results: int,
     allow_web_fallback: bool = True,
     searxng_base_url: str = "",
+    searxng_engines: str = "",
 ) -> BaseTool:
     """知识库检索工具。
 
@@ -271,7 +322,12 @@ def make_knowledge_base_tool(
             and (not result.get("results") or best < crag_min_score)
         ):
             web = execute_web_search(
-                query, web_provider, tavily_api_key, web_max_results, searxng_base_url
+                query,
+                web_provider,
+                tavily_api_key,
+                web_max_results,
+                searxng_base_url,
+                searxng_engines,
             )
             fallback = web.get("results", [])
             for item in fallback:
@@ -341,6 +397,7 @@ def make_web_search_tool(
     max_results: int,
     counter: list[int],
     searxng_base_url: str = "",
+    searxng_engines: str = "",
 ) -> BaseTool:
     """联网搜索工具：provider 可插拔（duckduckgo / tavily / searxng）。"""
 
@@ -348,7 +405,12 @@ def make_web_search_tool(
     def web_search(query: str) -> dict:
         """联网搜索互联网上的公开信息（新闻、百科、实时数据等）。当问题涉及时事、网络信息，或知识库检索确认无法覆盖时调用；知识库已有文档相关的问题请优先使用 knowledge_base_search。返回标题、链接和摘要（每条带 index 引用编号，回答引用时用 [n] 标注）。"""
         result = execute_web_search(
-            query, provider, tavily_api_key, max_results, searxng_base_url
+            query,
+            provider,
+            tavily_api_key,
+            max_results,
+            searxng_base_url,
+            searxng_engines,
         )
         for item in result.get("results", []):
             counter[0] += 1
@@ -450,6 +512,7 @@ def build_tools(
     skills_enabled: bool = True,
     skill_enabled_ids: set[str] | None = None,
     searxng_base_url: str = "",
+    searxng_engines: str = "",
 ) -> list[BaseTool]:
     """根据前端开关组装工具列表（都不开则返回空列表 = 纯对话）。"""
     tools: list[BaseTool] = []
@@ -466,13 +529,19 @@ def build_tools(
                 max_results,
                 allow_web_fallback=use_web_search,
                 searxng_base_url=searxng_base_url,
+                searxng_engines=searxng_engines,
             )
         )
         tools.append(make_add_document_tool(rag_service, rag_service.settings))
     if use_web_search:
         tools.append(
             make_web_search_tool(
-                provider, tavily_api_key, max_results, counter, searxng_base_url
+                provider,
+                tavily_api_key,
+                max_results,
+                counter,
+                searxng_base_url,
+                searxng_engines,
             )
         )
     if vision is not None and getattr(vision, "configured", False):

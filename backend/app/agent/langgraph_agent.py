@@ -98,6 +98,7 @@ class AgentState(TypedDict, total=False):
     plan_map: list[dict]
     kb_documents: list[str]
     memory_hits: list[str]
+    xml_retry_count: int
     memory_summary: str | None
     vision_descriptions: list[str]
     summary_text: str | None
@@ -568,8 +569,10 @@ def _prepare_node(state: AgentState) -> dict:
     if restored is not None:
         # ---- 恢复路径：基于 checkpoint 的消息链继续 ----
         messages = list(restored["messages"])
+        # 注意：time_context（分钟级时间戳）不放 resume_notes——
+        # 插在 messages[1] 会让跨分钟恢复的前缀变化，整个历史缓存失效；
+        # 与 fresh 路径一致放消息末尾（question 之前）
         resume_notes = [
-            time_context,
             "这是一次中断后恢复的任务。请基于上方已有的执行进展继续完成，"
             "不要重复已经完成的检索/搜索步骤，除非信息确实缺失。",
         ]
@@ -590,7 +593,9 @@ def _prepare_node(state: AgentState) -> dict:
                     )
                 ),
             )
-        # 恢复路径：checkpoint 消息链已包含历史与动态块，仅追加问题
+        # 恢复路径：checkpoint 消息链已包含历史与动态块；时间戳纯背景
+        # 信息（无指令约束力），放历史之后避免破坏静态前缀缓存
+        messages.append(SystemMessage(content=time_context))
         messages.append(HumanMessage(content=question))
         # 恢复进度状态
         state["sources"] = restored.get("sources") or []
@@ -602,6 +607,7 @@ def _prepare_node(state: AgentState) -> dict:
         state["verify_fail_count"] = int(restored.get("verify_fail_count") or 0)
         state["plan_done_count"] = int(restored.get("plan_done_count") or 0)
         state["plan_push_count"] = int(restored.get("plan_push_count") or 0)
+        state["xml_retry_count"] = int(restored.get("xml_retry_count") or 0)
         state["force_continue"] = False
         state["dispatch_done"] = bool(restored.get("dispatch_done"))
         runtime["final_text"] = restored.get("final_text") or ""
@@ -673,6 +679,7 @@ def _prepare_node(state: AgentState) -> dict:
         skills_enabled=skills_on,
         skill_enabled_ids=skill_enabled_ids,
         searxng_base_url=effective(settings, "searxng_base_url") or "",
+        searxng_engines=effective(settings, "searxng_engines") or "",
     )
     # 扩展工具：MCP + 受控执行（文件/命令，敏感操作走人工确认）
     tools.extend(service.mcp_tools(db))
@@ -814,6 +821,7 @@ def _subagent_tools(
                 effective(settings, "web_search_max_results"),
                 allow_web_fallback=False,
                 searxng_base_url=effective(settings, "searxng_base_url") or "",
+                searxng_engines=effective(settings, "searxng_engines") or "",
             )
         ]
     if hint == "web_search":
@@ -824,6 +832,7 @@ def _subagent_tools(
                 effective(settings, "web_search_max_results"),
                 counter,
                 searxng_base_url=effective(settings, "searxng_base_url") or "",
+                searxng_engines=effective(settings, "searxng_engines") or "",
             )
         ]
     if hint in ("file_tool/bash",):
@@ -1261,21 +1270,18 @@ def _agent_node(state: AgentState) -> dict:
         )
         # deepseek 等推理模型在工具调用轮次会先输出大量过渡思考文本
         # （"我将调用工具…"），与 tool_calls 同轮出现。这些文本不是最终
-        # 回答，直接展示会污染对话。策略：流式时先缓冲；一旦出现
-        # tool_call_chunks 判定为工具轮，丢弃已缓冲的思考文本；无工具
-        # 调用的纯回答轮次才把缓冲文本作为正式回答发出。
-        # 另外：模型偶尔用 XML 风格工具调用（如 <tool_calls>/<invoke>），
-        # langchain 不识别，同样视为工具轮丢弃文本。
+        # 回答，直接展示会污染对话。策略：流式时整体缓冲，流结束后基于
+        # 合并文本统一判定：有 tool_calls 或 XML 工具调用标记 → 工具轮，
+        # 缓冲文本整体丢弃（含过渡思考 + XML 标记，不展示给用户）；
+        # 纯回答轮次才把缓冲文本作为正式回答发出。
+        # 注意：判定必须放在合并文本上做——XML 标签（如 <tool_calls>）跨
+        # 分片时逐片检测会漏判，导致工具调用信息泄漏进最终回答。
         buf_parts: list[str] = []
-        tool_mode = False
         for chunk in stream:
             if stopped():
                 runtime["status"] = "stopped"
                 break
             chunks.append(chunk)
-            if getattr(chunk, "tool_call_chunks", None):
-                tool_mode = True
-                buf_parts.clear()  # 工具轮：丢弃已流出的过渡思考文本
             content = getattr(chunk, "content", None)
             if content:
                 # TTFT 打点：首个内容 chunk 到达（含工具轮过渡文本，即 API 首字）
@@ -1284,21 +1290,7 @@ def _agent_node(state: AgentState) -> dict:
                     timings["first_token_ms"] = round(
                         (time.perf_counter() - runtime["started"]) * 1000
                     )
-                if tool_mode:
-                    continue
                 buf_parts.append(content)
-                # 模型偶尔用 XML 风格工具调用，langchain 不解析为
-                # tool_calls；检测到标记视为工具轮，丢弃缓冲文本
-                if any(
-                    m in content
-                    for m in ("<tool_calls", "<invoke", "<tool_use", "<function_calls")
-                ):
-                    tool_mode = True
-                    buf_parts.clear()
-        if not tool_mode and buf_parts:
-            text = "".join(buf_parts)
-            runtime["final_text"] += text
-            bus.emit("token", text)
     finally:
         service.rag.release_llm()
 
@@ -1330,29 +1322,69 @@ def _agent_node(state: AgentState) -> dict:
 
     tool_calls = list(getattr(merged, "tool_calls", None) or [])
     merged_text = merged.content or ""
+    # 全角/DSML 前缀变体先归一化：否则 <｜DSML｜tool_calls> 这类标签
+    # 漏过工具轮判定，正文（含标签）直接泄漏进最终回答
+    merged_text = _normalize_tool_markers(merged_text)
     # ---- XML 风格工具调用兜底解析 ----
     # deepseek 等模型偶尔输出 <tool_calls><invoke name="bash">…</invoke></tool_calls>
     # 的 XML 格式（而非 OpenAI JSON tool_calls）。流式单 chunk 检测容易
     # 因标签被切分而漏判；这里对合并后的完整文本做兜底：
     # 1. 检测到 XML 工具调用标记 → 丢弃正文文本（不展示给用户）
     # 2. 尽力解析出 (工具名, 参数) 转成标准 tool_calls 执行
-    if not tool_calls and (
-        "<tool_calls" in merged_text
-        or "<invoke" in merged_text
-        or "<tool_use" in merged_text
-        or "<function_calls" in merged_text
-    ):
+    if not tool_calls and any(m in merged_text for m in _XML_TOOL_MARKERS):
         parsed_xml_calls = _parse_xml_tool_calls(merged_text)
         if parsed_xml_calls:
             tool_calls = parsed_xml_calls
             logger.info("XML 工具调用兜底解析：%s", [tc.get("name") for tc in parsed_xml_calls])
     # 工具轮：content 是过渡思考文本，不写入消息历史（避免下一轮
     # 重复发送 + 污染上下文）；只保留 tool_calls 供 tools 节点执行
-    stored_content = "" if tool_calls else merged_text
+    if tool_calls:
+        stored_content = ""
+    elif any(m in merged_text for m in _XML_TOOL_MARKERS):
+        # XML 标记存在但兜底解析失败：剥离标记再存，避免 <tool_calls>
+        # 泄漏进消息历史（下轮会重复发送给模型）
+        stored_content = _strip_xml_tool_tags(merged_text).strip()
+    else:
+        stored_content = merged_text
     messages.append(
         AIMessage(content=stored_content, tool_calls=tool_calls)
     )
     state["pending_tool_calls"] = tool_calls
+
+    # ---- 工具轮判定（基于合并后的完整文本，跨分片 XML 标签不漏判）----
+    # 有 tool_calls 或 XML 工具调用标记 → 工具轮：缓冲文本（过渡思考 +
+    # XML 标记文本）整体丢弃，不展示给用户；纯回答轮才发出缓冲文本。
+    is_tool_round = bool(tool_calls) or any(
+        m in merged_text for m in _XML_TOOL_MARKERS
+    )
+    if not is_tool_round and buf_parts:
+        # 逐片清理 XML 工具调用标记：sensenova 等模型偶尔把
+        # <tool_calls> 写进正文，直接展示会泄漏
+        text = _strip_xml_tool_tags("".join(buf_parts))
+        runtime["final_text"] += text
+        bus.emit("token", text)
+
+    # ---- XML 标记存在但兜底解析失败：有界重试，避免"静默停止" ----
+    # 模型把工具调用写成 XML 文本且格式无法解析时，不执行工具也不作答就
+    # 收尾会表现为"停止生成"；提示模型改用标准工具调用或直接作答，最多重试 2 次。
+    xml_force = False
+    if (
+        not tool_calls
+        and any(m in merged_text for m in _XML_TOOL_MARKERS)
+        and not state["forced_final"]
+        and int(state.get("xml_retry_count") or 0) < 2
+    ):
+        state["xml_retry_count"] = int(state.get("xml_retry_count") or 0) + 1
+        messages.append(
+            SystemMessage(
+                content=(
+                    "你上一条输出包含 XML 风格工具调用标记（如 <tool_calls>/<invoke>），"
+                    "未能解析执行。请改用标准工具调用格式继续（不要把工具调用写成 XML 文本），"
+                    "或直接给出最终回答。"
+                )
+            )
+        )
+        xml_force = True
 
     # ---- 计划硬约束：还有未完成的工具型步骤时，不允许提前收尾 ----
     force_continue = False
@@ -1408,8 +1440,9 @@ def _agent_node(state: AgentState) -> dict:
         "forced_final": state["forced_final"],
         "last_call_warned": state["last_call_warned"],
         "plan_done_count": state.get("plan_done_count", 0),
-        "force_continue": force_continue,
+        "force_continue": force_continue or xml_force,
         "plan_push_count": state.get("plan_push_count", 0),
+        "xml_retry_count": state.get("xml_retry_count", 0),
         "todos": state.get("todos") or [],
     }
 
@@ -1429,12 +1462,14 @@ def _parse_xml_tool_calls(text: str) -> list[dict]:
     """
     import re as _re
 
+    text = _normalize_tool_markers(text)
     calls: list[dict] = []
-    # 匹配 <invoke name="X"> 或 <tool_use name="X"> 或 <function name="X">
+    # 匹配 <invoke name="X"> / <tool_use name='X'> / <tool_call> / <function> /
+    # <antml:invoke> 等（容忍 name= 两侧空格与单双引号）
     pattern = _re.compile(
-        r"<(?:invoke|tool_use|function|tool)\s+name=[\"']([^\"']+)[\"'][^>]*>"
-        r"(.*?)</(?:invoke|tool_use|function|tool)>",
-        _re.S,
+        r"<(?:invoke|tool_use|tool_call|function|tool|antml:invoke)\s+name\s*=\s*[\"']([^\"']+)[\"'][^>]*>"
+        r"(.*?)</(?:invoke|tool_use|tool_call|function|tool|antml:invoke)>",
+        _re.S | _re.I,
     )
     for m in pattern.finditer(text):
         name = m.group(1).strip()
@@ -1444,22 +1479,22 @@ def _parse_xml_tool_calls(text: str) -> list[dict]:
         args: dict = {}
         # 参数：<parameter name="k">v</parameter>
         for pm in _re.finditer(
-            r"<parameter\s+name=[\"']([^\"']+)[\"'][^>]*>(.*?)</parameter>",
+            r"<parameter\s+name\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</parameter>",
             body,
             _re.S,
         ):
             k = pm.group(1).strip()
             v = pm.group(2).strip()
-            if not k:
+            if not k or not v:
                 continue
-            # 参数值若为 JSON 数组/对象则自动解析（如 todo_update.tasks），
-            # 避免字符串传递导致工具调用失败
-            if v.startswith(("[", "{")):
-                try:
-                    args[k] = json.loads(v)
-                except Exception:
-                    args[k] = v
-            else:
+            # 参数值统一尝试 JSON 解析（数字/布尔/数组/对象），失败按字符串；
+            # 解析出 null 时跳过该参数（由 _mcp_default_args 补默认值，
+            # 避免把 null 传给服务端触发 "expected X, received null"）
+            try:
+                parsed = json.loads(v)
+                if parsed is not None:
+                    args[k] = parsed
+            except Exception:
                 args[k] = v
         # 参数：JSON 内嵌（<arguments>{...}</arguments> 或裸 JSON）
         if not args:
@@ -1587,6 +1622,77 @@ def _tool_cache_key(name: str, args: dict | None) -> str | None:
         return None
 
 
+# 工具调用 XML 标签：正文中出现说明模型把工具调用写进了回答文本
+# （sensenova 等模型偶尔如此），对用户展示前清理，避免 <tool_calls> 泄漏
+_XML_TOOL_TAG_RE = re.compile(
+    r"</?(?:tool_calls|tool_call|invoke|tool_use|function_calls|function|arguments|parameter)[^>]*>",
+    re.I,
+)
+
+# 完整工具调用块（含内部参数值）：整体删除，避免仅删标签后参数内容泄漏。
+# 覆盖 <tool_calls>…</tool_calls>、<invoke name=…>…</invoke>、
+# <tool_use>…</tool_use>、<tool_call>…</tool_call>、<function>…</function>，
+# 以及完整的 <parameter>…</parameter>/<arguments>…</arguments> 子元素
+# （外层标签未闭合时子元素仍可能完整，逐元素删除防内容残留）。
+_XML_TOOL_BLOCK_RE = re.compile(
+    r"<(?:tool_calls|tool_call|tool_use|invoke|function|function_calls|parameter|arguments)\b[^>]*>.*?"
+    r"</(?:tool_calls|tool_call|tool_use|invoke|function|function_calls|parameter|arguments)>",
+    re.S | re.I,
+)
+
+# 工具轮检测标记：模型输出这些片段即视为 XML 风格工具调用（含变体）
+_XML_TOOL_MARKERS = (
+    "<tool_calls",
+    "<invoke",
+    "<tool_use",
+    "<function_calls",
+    "<user|tool_calls",
+    "<|tool_calls",
+    "<|DSML|tool_calls",
+    "<function name=",
+)
+
+
+def _normalize_tool_markers(text: str) -> str:
+    """归一化工具调用标记的变体写法（全角符号 / |DSML| 前缀等）。
+
+    实测泄漏消息里的标签是全角竖线变体 <｜DSML｜tool_calls>（U+FF5C），
+    不归一化则检测/解析/清理全部漏判，正文直接泄漏进最终回答；
+    <|DSML|tool_calls>、<|user|tool_calls> 等前缀格式同样先转标准标签。
+    """
+    if not text:
+        return text
+    # 全角变体（｜＜＞ = U+FF5C/U+FF1C/U+FF1E）先转 ASCII
+    text = text.replace("｜", "|").replace("＜", "<").replace("＞", ">")
+    # 去掉 |DSML| / |user| 前缀（竖线数量不限），如
+    # <|DSML|tool_calls> / <||DSML||tool_calls> / <|user|tool_calls> → <tool_calls>
+    text = re.sub(r"<(/?)(?:\|+DSML\|+|\|+user\|+)", r"<\1", text)
+    return text
+
+
+def _strip_xml_tool_tags(text: str) -> str:
+    """清理回答正文中的工具调用 XML 标记（仅影响展示，不改历史消息）。
+
+    整块删除工具调用 XML（含内部参数值），避免只删标签后参数内容（如命令、
+    query）泄漏进回答；未闭合/跨片残留的孤立标签再逐个清掉。
+    不做 strip：流式分片逐片调用时保持空白原样，拼接不受影响；
+    完整文本的收尾清理（strip）在 finalize 做。
+    """
+    if not text:
+        return text
+    # 全角/DSML 前缀等变体先归一成标准标签，再走整块删除
+    cleaned = _normalize_tool_markers(text)
+    # <user|tool_calls> / <|tool_calls> 变体（开/闭标签）：先归一成 <tool_calls>
+    cleaned = re.sub(r"</?user\|", "<", cleaned)
+    cleaned = re.sub(r"</\|tool_calls", "</tool_calls", cleaned)
+    cleaned = re.sub(r"<\|tool_calls", "<tool_calls", cleaned)
+    # 整块删除（含内部参数值）
+    cleaned = _XML_TOOL_BLOCK_RE.sub("", cleaned)
+    # 残留的孤立标签（未闭合/不完整）逐个清掉
+    cleaned = _XML_TOOL_TAG_RE.sub("", cleaned)
+    return cleaned
+
+
 def _slim_tool_result(result: dict, content_limit: int = 8000) -> dict:
     """工具结果进历史前瘦身：大 content 字段保留首尾、中间省略。
 
@@ -1637,6 +1743,34 @@ def _tool_detail(result: dict, limit: int = 3500) -> str:
         return json.dumps(result, ensure_ascii=False)[:limit]
     except Exception:
         return str(result)[:limit]
+
+
+def _tool_has_required_args(tool) -> bool:
+    """判断工具参数 schema 是否存在必填字段（空参数兜底用）。
+
+    MCP 工具经 _schema_to_model 转换后所有字段均为可选（Playwright MCP 的
+    schema 缺陷由 _mcp_default_args 在 invoke 内补默认值），因此空参数调用
+    是合法的，不应被"参数缺失"拦截；只有 schema 明确存在必填字段（或无
+    schema 信息）时才拦截空参数。
+    """
+    schema = getattr(tool, "args_schema", None)
+    if schema is None:
+        return True  # 无 schema 信息，保守拦截（保持原有行为）
+    try:
+        fields = getattr(schema, "model_fields", None)
+        if fields is None:
+            fields = getattr(schema, "__fields__", None)  # pydantic v1 兼容
+        if not fields:
+            return False  # schema 无字段：空参数合法
+        for f in fields.values():
+            is_required = getattr(f, "is_required", None)
+            if is_required is not None and is_required():
+                return True
+            if getattr(f, "required", False):
+                return True
+        return False
+    except Exception:
+        return True  # 判断失败时保守拦截
 
 
 def _tools_node(state: AgentState) -> dict:
@@ -1822,8 +1956,10 @@ def _tools_node(state: AgentState) -> dict:
                     "error": f"操作被 hook 拒绝：{reason}。请说明影响并询问替代方案。",
                     "_duration_ms": None,
                 }
-        if not args:
-            # 空参数兜底：不浪费一次工具调用，直接提示模型补充参数
+        if not args and _tool_has_required_args(tool):
+            # 空参数兜底：schema 有必填字段且调用为空时不浪费一次工具调用，
+            # 直接提示模型补充参数；全可选工具（如 MCP 工具）放行到 invoke，
+            # 由 _mcp_default_args 补默认值
             return tc, {
                 "summary": f"{name} 参数缺失，请补充参数后重试",
                 "error": f"参数缺失：调用 {name} 需要必要参数，请补充后重试",
@@ -1832,6 +1968,11 @@ def _tools_node(state: AgentState) -> dict:
             }
         try:
             t0 = time.perf_counter()
+            if name.startswith("mcp_"):
+                # LLM 显式传 JSON null 时，pydantic 模型（非 Optional 注解）
+                # 会直接拒绝（"Input should be a valid ..."），发送前剔除；
+                # 服务端对缺省与 null 语义无差别，且 zod .optional() 拒 null
+                args = {k: v for k, v in (args or {}).items() if v is not None}
             result = tool.invoke(args)
             duration = round((time.perf_counter() - t0) * 1000)
             if not isinstance(result, dict):
@@ -2253,6 +2394,11 @@ def _finalize_node(state: AgentState) -> dict:
     runtime: dict = state["runtime"]
 
     final_text = runtime.get("final_text") or ""
+    # 收尾清理：完整文本上再清一次 XML 工具标记 + strip（分片清理可能漏跨片标签）
+    cleaned_final = _strip_xml_tool_tags(final_text).strip()
+    if cleaned_final != final_text:
+        final_text = cleaned_final
+        runtime["final_text"] = cleaned_final
     sources = state.get("sources") or []
     tool_trace = state.get("tool_trace") or []
     conv_id = runtime.get("conv_id")
@@ -2735,6 +2881,7 @@ class LangGraphAgentService(AgentService):
             "plan_done_count": 0,
             "force_continue": False,
             "plan_push_count": 0,
+            "xml_retry_count": 0,
             "early_created": early_created,
             "dispatch_done": False,
             "task_mode": False,

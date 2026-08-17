@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -51,13 +52,17 @@ def _schema_to_model(input_schema: dict | None):
         return (str, Field(...))
 
     for name, spec in properties.items():
-        py_type, default_field = _py_type(spec)
-        if name in required:
-            fields[name] = (py_type, Field(..., description=str(spec.get("description", ""))))
+        py_type, _ = _py_type(spec)
+        desc = str(spec.get("description", ""))
+        # 尊重 schema 的 default：Playwright MCP 部分字段声明 required 但带
+        # default（如 console_messages.level、network_requests.static），服务端
+        # 空参可用默认值；客户端按"必填"解析会误拦空参调用（参数缺失）。
+        if name in required and "default" not in spec:
+            fields[name] = (py_type, Field(..., description=desc))
         else:
             fields[name] = (
                 py_type,
-                Field(default=None, description=str(spec.get("description", ""))),
+                Field(default=spec.get("default"), description=desc),
             )
     if not fields:
         return None
@@ -239,6 +244,56 @@ class MCPManager:
             self._servers.clear()
 
 
+# Playwright MCP 的 schema 缺陷：部分工具 schema 声明可选/带默认，但
+# 服务端运行时校验更严格（缺 null 报错 / 三选一必填），客户端侧按工具名
+# 补默认值绕过（服务端为第三方，升级前在本地兜底）。其他工具如有同类
+# 问题按同样方式追加。
+_MCP_TOOL_DEFAULT_ARGS: dict[str, dict] = {
+    "browser_snapshot": {
+        "target": "body",
+        "depth": 10,
+        "boxes": False,
+    },
+    # browser_tabs：服务端 zod 校验拒绝显式 null（index/url 虽为可选）。
+    # 空参/全 null 时补 index=0、url="" 占位（已实测 list/close/new 均接受）；
+    # action="select" 时应显式传 index、action="new" 时应显式传 url
+    # （枚举为 list/new/close/select）；显式非 None 值不会被覆盖。
+    "browser_tabs": {
+        "index": 0,
+        "url": "",
+    },
+    # browser_wait_for：schema 全可选但服务端运行时要求 time/text/textGone
+    # 至少其一（"Either time, text or textGone must be provided"），空参时
+    # 补 1 秒等待兜底（已实测 {"time": 1} 被接受）。
+    "browser_wait_for": {
+        "time": 1,
+    },
+}
+
+
+def _mcp_default_args(tool_name: str, kwargs: dict) -> dict:
+    """为 MCP 工具补默认参数并剔除 null（仅当缺省时补，显式非 None 值不覆盖）。
+
+    剔除 null 是所有工具通用的兜底：StructuredTool 经 pydantic 解析后可选
+    字段会被填成 None（JSON null），而 Playwright MCP 服务端（zod .optional()）
+    拒绝显式 null（报 "expected X, received null"），缺省则正常接受。
+    """
+    merged = dict(kwargs or {})
+    defaults = _MCP_TOOL_DEFAULT_ARGS.get(tool_name) or {}
+    for key, value in defaults.items():
+        # 仅当显式传入了非 None 值才保留；值为 None（StructuredTool 经
+        # pydantic 解析后可选字段常为 null）视为缺省，补默认值。
+        if key.startswith("_"):
+            continue
+        if key in merged and merged[key] is not None:
+            continue
+        merged[key] = value
+    if tool_name == "browser_snapshot" and not merged.get("filename"):
+        # Playwright MCP 的 filename 允许任意文件名；自动命名避免覆盖旧快照
+        merged["filename"] = f"snapshot-{int(time.time())}.md"
+    return {k: v for k, v in merged.items() if v is not None}
+
+
 def make_mcp_tool(
     server: MCPServerSession,
     server_cfg: dict,
@@ -250,7 +305,9 @@ def make_mcp_tool(
 
     def _invoke(**kwargs):
         try:
-            output = server.call_tool(tool_name, kwargs or {})
+            # 补默认参数：Playwright MCP 部分工具 schema 声明可选但服务端必填
+            call_args = _mcp_default_args(tool_name, kwargs)
+            output = server.call_tool(tool_name, call_args or {})
             return {
                 "summary": f"MCP[{server.name}] {tool_name} 调用完成",
                 "output": _truncate(output, 1500),

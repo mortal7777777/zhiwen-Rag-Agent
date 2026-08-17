@@ -46,6 +46,7 @@ EDITABLE_KEYS = {
     "web_search_max_results",
     "tavily_api_key",
     "searxng_base_url",
+    "searxng_engines",
     # 技能总开关
     "skills_enabled",
     # 高级工具（P0：受控执行 / MCP / 技能沙箱 / 思考摘要）

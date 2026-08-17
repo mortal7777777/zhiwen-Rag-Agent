@@ -420,7 +420,16 @@
                   <el-input
                     v-model="searxngBaseUrl"
                     size="small"
-                    placeholder="http://localhost:8888"
+                    placeholder="http://localhost:8889"
+                    class="generic-select"
+                  />
+                </div>
+                <div v-if="webProvider === 'searxng'" class="generic-row">
+                  <span class="generic-label">引擎（可选）</span>
+                  <el-input
+                    v-model="searxngEngines"
+                    size="small"
+                    placeholder="bing,baidu,sogou（逗号分隔，留空用实例默认）"
                     class="generic-select"
                   />
                 </div>
@@ -1013,6 +1022,7 @@ const tavilyKey = ref('')
 const tavilyMasked = ref('')
 const webMaxResults = ref(6)
 const searxngBaseUrl = ref('http://localhost:8888')
+const searxngEngines = ref('')
 const modelSaving = ref(false)
 
 // 嵌入 / 重排序模型提供方式（local=本地 BGE / api=OpenAI 兼容接口）
@@ -1049,6 +1059,7 @@ async function loadSettings() {
     tavilyKey.value = ''
     searxngBaseUrl.value =
       settingsModel.value.editable.searxng_base_url || 'http://localhost:8888'
+    searxngEngines.value = settingsModel.value.editable.searxng_engines || ''
     const editable = settingsModel.value.editable || {}
     // 嵌入 / 重排序模型提供方式
     embeddingProvider.value = editable.embedding_provider || 'local'
@@ -1192,6 +1203,7 @@ async function saveModelSettings(silent = false) {
       web_search_provider: webProvider.value,
       web_search_max_results: webMaxResults.value,
       searxng_base_url: searxngBaseUrl.value.trim(),
+      searxng_engines: searxngEngines.value.trim(),
       // 嵌入 / 重排序模型提供方式
       embedding_provider: embeddingProvider.value,
       embedding_api_base_url: embeddingApi.value.base_url.trim(),
