@@ -157,6 +157,15 @@ def list_messages(
             "created_at": msg.created_at,
         }
         for msg in reversed(rows)
+        # 展示过滤：工具轮行（role='tool'）、工具轮助手消息
+        # （content 为 {"__tool_calls__": ...} 标记）与 D 块/轮内提示
+        # （role='system'）只服务缓存前缀与上下文重建，不显示给用户
+        if msg.role != "tool"
+        and msg.role != "system"
+        and not (
+            msg.role == "assistant"
+            and (msg.content or "").lstrip().startswith('{"__tool_calls__"')
+        )
     ]
     return messages
 
@@ -225,7 +234,12 @@ def list_messages_with_id(
         .all()
     )
     return [
-        {"id": msg.id, "role": msg.role, "content": msg.content}
+        {
+            "id": msg.id,
+            "role": msg.role,
+            "content": msg.content,
+            "tool_trace": msg.tool_trace,
+        }
         for msg in rows
     ]
 

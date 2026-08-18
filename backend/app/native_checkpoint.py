@@ -14,7 +14,7 @@ import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -58,18 +58,58 @@ def build_saver(meta_dir: Path):
 
 
 def messages_to_history_rows(messages: list) -> list[dict]:
-    """把快照消息转成可写回数据库的 user/assistant 历史行。"""
+    """把快照消息转成可写回数据库的历史行（含工具轮，缓存前缀保真）。
+
+    - 工具轮 AIMessage（带 tool_calls）-> role='assistant'，
+      content 为 {"__tool_calls__": [...]} 标记 JSON；
+    - ToolMessage -> role='tool'，tool_trace 存配对元数据；
+    - 与 langgraph_agent._rows_to_history 的格式互逆。
+    """
+    import json as _json
+
     rows: list[dict] = []
     for m in messages or []:
         if isinstance(m, HumanMessage):
-            role = "user"
+            content = m.content
+            if not isinstance(content, str):
+                content = str(content)
+            if content.strip():
+                rows.append({"role": "user", "content": content})
         elif isinstance(m, AIMessage):
-            role = "assistant"
-        else:
-            continue
-        content = m.content
-        if not isinstance(content, str):
-            content = str(content)
-        if content.strip():
-            rows.append({"role": role, "content": content})
+            calls = list(getattr(m, "tool_calls", None) or [])
+            if calls:
+                marker = {"__tool_calls__": calls}
+                reasoning = (getattr(m, "additional_kwargs", {}) or {}).get(
+                    "reasoning_content"
+                )
+                if reasoning:
+                    marker["__reasoning__"] = reasoning
+                rows.append(
+                    {
+                        "role": "assistant",
+                        "content": _json.dumps(marker, ensure_ascii=False),
+                    }
+                )
+                continue
+            content = m.content
+            if not isinstance(content, str):
+                content = str(content)
+            if content.strip():
+                rows.append({"role": "assistant", "content": content})
+        elif isinstance(m, ToolMessage):
+            content = m.content
+            if not isinstance(content, str):
+                content = str(content)
+            rows.append(
+                {
+                    "role": "tool",
+                    "content": content,
+                    "tool_trace": [
+                        {
+                            "tool_call_id": m.tool_call_id or "",
+                            "name": m.name or "",
+                        }
+                    ],
+                }
+            )
     return rows

@@ -108,10 +108,17 @@
 - **按需注入**：用户画像摘要（常驻）+ 语义召回（关键词 n-gram 粗筛 → 向量精排，
   相关性不足用最近记忆补位，按 token 预算裁剪）；
 - **分层上下文**：时间/热点 → 画像摘要 → 相关记忆 → 会话摘要 → 图片理解 → 历史（预算裁剪）→ 当前问题。
-- **Prompt caching（前缀缓存友好）**：系统提示词拆成"静态核心（模板+工具规则）+
-  动态部分（任务清单/文档清单/技能）"，静态核心与历史消息放在最前、跨轮字节级稳定，
-  动态上下文统一放到历史之后——命中 DeepSeek 等提供商的自动前缀缓存，
-  长会话/多轮工具循环的输入成本大幅下降（token 记录新增 cache_hit/cache_miss 指标可验证）。
+- **Prompt caching（纯追加链，前缀缓存友好）**：DeepSeek 等提供商的自动前缀缓存
+  要求请求前缀从 token 0 逐字节一致（无显式断点 API），因此消息链设计为：
+  `[静态核心（模板+工具规则）, 技能目录+文档清单, 历史, D块（项目记忆/todos/摘要/记忆/时间）, 问题]`——
+  静态部分跨轮字节级稳定；每轮变化的内容（D 块与轮内进度提示）统一收在链尾，
+  且 finalize 把问题之后的**全部消息（含 system 行）**落库，下一轮从 DB 重建的
+  历史与上一轮实际发送逐字节一致（纯追加：请求 = 上一请求 + [D块, 问题]）；
+  工具定义哈希跨轮监测、强制收尾保持 bind_tools（tools 数组参与缓存键）、
+  项目记忆无变化不写盘、工具结果进历史前瘦身（2500 字符）——
+  长会话/多轮工具循环的输入成本大幅下降
+  （token 记录新增 cache_hit/cache_miss 与逐调用 `calls` 遥测可验证；
+  实测轮内调用 2+ 命中 95~98%）。
 
 ### 多供应商模型管理（参考 cc-switch）
 
@@ -164,8 +171,8 @@
 
 ### 可观测性
 
-- `agent_runs`：每次运行的 question / plan / tool_trace（含耗时）/ answer_len / latency / status / error / **token 用量**；
-- 结构化 trace：`opensearch_meta/traces/YYYY-MM-DD.jsonl`（线程级 token 聚合，含流式调用补记）；
+- `agent_runs`：每次运行的 question / plan / tool_trace（含耗时）/ answer_len / latency / status / error / **token 用量**（含逐调用 `calls` 缓存遥测：每次主循环调用的 input / cache_read / output / 耗时，定位轮内断链）；
+- 结构化 trace：`opensearch_meta/traces/YYYY-MM-DD.jsonl`（线程级 token 聚合，含流式调用补记与逐调用 `calls` 遥测）；
 - `/api/metrics`：请求量、错误率、检索/生成/扩展平均耗时；
 - 预留 Langfuse 接入点（当前本地 JSONL，隐私友好）。
 
@@ -368,9 +375,11 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-当前 29 个用例覆盖：任务清单（播种/同步/跨轮刷新/模糊完成/修订/进度）、文件工具
+当前 118 个用例覆盖：任务清单（播种/同步/跨轮刷新/模糊完成/修订/进度）、文件工具
 安全边界与命令白名单、CUDA 降级逻辑、技能内容清洗、联网可信度标注、
-RAG 工具纯函数。测试不依赖 GPU / MySQL / 网络。
+RAG 工具纯函数、CLI 交互（Ctrl+C/行编辑/审批弹窗）、文档文件服务、
+取消机制（run_id 注入 + 逐帧停流）、hooks 门禁、用户工具加载、
+run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 
 提交前自动跑测试：已安装 pre-commit 钩子（`scripts/install-git-hooks.ps1`），
 `git commit` 前会自动执行 pytest，失败则阻止提交（`--no-verify` 可跳过）。

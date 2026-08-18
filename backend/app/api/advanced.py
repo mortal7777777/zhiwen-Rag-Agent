@@ -257,7 +257,13 @@ def rollback_to_checkpoint(
     rows = messages_to_history_rows(ch.get("messages") or [])
     repo.clear_messages(db, conversation_id)
     for row in rows:
-        repo.add_message(db, conversation_id, row["role"], row["content"])
+        repo.add_message(
+            db,
+            conversation_id,
+            row["role"],
+            row["content"],
+            tool_trace=row.get("tool_trace"),
+        )
     save_todos(db, conversation_id, ch.get("todos") or [])
     return {
         "ok": True,

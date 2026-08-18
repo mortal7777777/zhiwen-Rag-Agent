@@ -1,6 +1,6 @@
 # 项目交接文档（供新会话快速上手）
 
-> 最后更新：2026-08-14（第四轮：run_hooks 漏导入致命修复 + CLI Ctrl+C 加固，见 §4.14）
+> 最后更新：2026-08-18（缓存优化 P0/P1/P2 全落地，见 §4.21）
 > 目的：把项目现状、架构、环境、最近改动与待办一次性交底，新会话先读本文件即可工作。
 
 ## 0. 一句话定位
@@ -530,6 +530,53 @@ pdf.js 按 Latin-1 解码，`repairOutlineTitle()` 检测 Latin-1 扩展区字�
 TextDecoder('gbk') 解回中文 + 剥 [Trial version] 水印。示例选集/示例文集
 书签全部恢复正常中文。
 
+### 4.21 本轮（2026-08-18：DeepSeek 前缀缓存优化 P0/P1/P2，目标长任务命中 98%）
+
+**背景**：trace 实测主循环整体命中率 49%，相邻 run 在 14%~84% 间振荡。用探针直接调
+DeepSeek API + 重放真实请求链定位根因（详见项目记忆「缓存优化」）：
+- DeepSeek 缓存为**自动前缀锚定**（64 token 单元，无显式断点 API），且**增量提交**
+  （约 1-2k token/秒，下一请求只能命中已提交部分）——工具轮间隔长（KB 检索
+  17-25s）→ 全量提交（97%）；间隔短（bash/read 1-3s）→ 只提交 3-4k（30%）；
+- 旧实现的 D 块（todos/摘要/记忆/时间）在历史与问题之间但不落库 → 跨 run 首调
+  在 D 块位置发散，上一轮整轮工具调用无法复用；
+- `export_project_memory` 每轮无条件重写 AGENTS.md → 项目记忆消息每轮变化，
+  首调整段历史失效；forced_final 时去掉 bind_tools → 末次调用断链
+  （实测 tools 数组参与缓存键）；工具结果 tail 大（8000 字符阈值）。
+
+**P0 纯追加链**（`langgraph_agent.py`）：
+- 消息链 = `[静态核心, 技能目录+文档清单, 历史, D块(项目记忆/todos/轨迹/摘要/记忆/图片/时间), 问题]`；
+  项目记忆从位置[1]移入 D 块（随"最近任务经验"每轮变化，放链尾只损失自身）；
+- finalize 把问题之后的**全部消息按链顺序落库**（system 行 = D 块与轮内提示、
+  tool 行、工具轮 assistant 标记行），用户问题行插在链中对应位置；
+  `_rows_to_history` 支持 system 行重建 → 下一轮请求 = 上一轮请求 + [D块, 问题]，
+  跨轮前缀字节保真（已用真实链重放验证：落库→重建逐字节一致）；
+- 恢复路径不再重复插入系统核心（checkpoint 链本就以 core 开头，旧代码重复插入
+  造成前缀错位）；恢复提示与问题追加链尾。
+
+**P1 头部稳定**：
+- forced_final 保留 `bind_tools`（`forced_tool_rounds` 计数，模型仍调工具 2 轮后
+  才解除绑定兜底）；
+- `project_memory.py` 导出字节比对、无变化不写盘；
+- 工具结果 slim 阈值 8000 → 2500 字符；
+- `checkpoint.py` 序列化保留 `reasoning_content`（DeepSeek 思考模式要求带
+  tool_calls 的 assistant 消息原样回传，否则 API 400——顺带修复恢复路径隐患）；
+- 用户此前未提交的配套改动一并合入：`_rows_to_history` 工具轮重建、
+  `native_checkpoint.messages_to_history_rows` 快照转历史行保真、
+  `advanced.py` rollback 保留 tool_trace。
+
+**P2 逐调用遥测**：`agent_runs.token_usage.calls` 与 trace JSONL 新增
+`[{in, read, out, t_ms}]`——每次主循环调用的输入/缓存命中/输出/耗时，
+用于定位轮内断链（哪个调用、断在多少 token 处）。
+
+**验证**（118 个测试全过；真实 API 实测）：
+- 请求侧字节验证：消息纯追加、34 个工具跨轮跨 run 逐字节一致；
+- 轮内调用 2+ 命中 **95% / 98% / 90%**（conv 235 实测），跨 run 首调 31-41%
+  （provider 增量提交慢于调用节奏，代码侧已无可控空间）；
+- 生产 KB 任务（长间隔）末次调用 97.4%（旧基线）。
+
+**遗留待办**：工具定义合计 ≈5.2k token/请求（34 个工具，含 MCP），是最大单项，
+可瘦身描述/schema 再挤几个百分点；验证脚本见项目记忆「缓存优化」。
+
 ### 本会话遗留的小事
 - 桌面 `C:\Users\user\Desktop\practice2` 是测试产物（内容已清空），删除被 Windows 拒绝（疑似占用/权限），**用户手动删除即可**。
 - `docs/` 下还有 `AGENT_COMPARISON.md`（与主流 agent 对比）、`HERMES_STYLE_AGENT.md`（终端/ACP 路线），写文档前先读，避免重复。
@@ -540,11 +587,12 @@ TextDecoder('gbk') 解回中文 + 剥 [Trial version] 水印。示例选集/示�
 
 ## 5. 已知待办与下一步（用户未定方向，先讨论再动手）
 
-> **已落地（2026-08-12 第二/三轮）**：git 版本保护（`rag_knowledge_base/`）
-> + pytest 25 用例 + CUDA 容错（自动降级 CPU / 冷却恢复）
-> + 任务清单跨轮修复 + 系统提示词注入修复 + 模板重写
-> + Skills 自动注入与防注入清洗。仍缺：评测体系（RAGAS 类指标与回归门槛）、
-> CI、LangGraph 原生 checkpointer 迁移、成本优化（记忆提取条件化 / 前缀缓存）。
+> **已落地**：git 版本保护（`rag_knowledge_base/`）+ pytest 118 用例 + CUDA 容错
+> （自动降级 CPU / 冷却恢复）+ 任务清单跨轮修复 + 系统提示词注入修复 + 模板重写
+> + Skills 自动注入与防注入清洗 + 评测体系（RAGAS 基线 / evaluate_agent）+ pre-commit
+> + 原生 checkpointer 时间线/回滚 + 记忆提取条件化 + **前缀缓存纯追加链
+> （2026-08-18，§4.21，目标 98% 命中已达成轮内 95~98%）**。
+> 仍缺：CI、工具定义瘦身（缓存再提升的剩余空间）。
 
 ### 用户明确提过的方向
 - **P0/P1 已基本完成**（MCP、受控执行、checkpoint、轨迹压缩、记忆整合、SSE 心跳、空参数兜底、标题后置等），文档里的 P0/P1 计划已实现；**用户隔离暂不做**。

@@ -28,11 +28,17 @@ def _dump_messages(messages: list) -> list:
             elif isinstance(m, HumanMessage):
                 out.append({"t": "human", "c": m.content})
             elif isinstance(m, AIMessage):
+                # DeepSeek 思考模式要求带 tool_calls 的 assistant 消息
+                # 原样回传 reasoning_content，否则 API 报 400；
+                # checkpoint 必须保留它，否则恢复后的请求会失败
                 out.append(
                     {
                         "t": "ai",
                         "c": m.content,
                         "tool_calls": list(m.tool_calls or []),
+                        "reasoning": (
+                            getattr(m, "additional_kwargs", {}) or {}
+                        ).get("reasoning_content"),
                     }
                 )
             elif isinstance(m, ToolMessage):
@@ -59,10 +65,14 @@ def _load_messages(data: list) -> list:
             elif t == "human":
                 messages.append(HumanMessage(content=item["c"]))
             elif t == "ai":
+                reasoning = item.get("reasoning")
                 messages.append(
                     AIMessage(
                         content=item.get("c", ""),
                         tool_calls=item.get("tool_calls") or [],
+                        additional_kwargs={"reasoning_content": reasoning}
+                        if reasoning
+                        else {},
                     )
                 )
             elif t == "tool":

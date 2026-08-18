@@ -116,6 +116,16 @@ def export_project_memory(settings, db) -> dict:
     content = "\n".join(lines)
     path = project_memory_path(settings)
     try:
+        # 内容无变化不写盘：AGENTS.md 每轮都会导出，重写相同字节
+        # 会改变项目记忆 SystemMessage（缓存前缀的一部分），导致
+        # 跨 run 首调整个历史前缀失效
+        if path.exists():
+            try:
+                existing = path.read_text(encoding="utf-8")
+            except Exception:
+                existing = None
+            if existing == content:
+                return {"ok": True, "path": str(path), "unchanged": True}
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         logger.info("项目记忆已导出：%s", path)
