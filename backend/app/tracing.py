@@ -85,6 +85,10 @@ class UsageCollector(BaseCallbackHandler):
         try:
             llm_output = getattr(response, "llm_output", None) or {}
             usage = llm_output.get("token_usage") or {}
+            if not usage:
+                # 流式调用：usage 走 chunk.usage_metadata，由调用方手动补记
+                # （on_llm_end 的 llm_output 为空），这里跳过避免重复计数
+                return
             self.add_usage(
                 int(usage.get("prompt_tokens") or 0),
                 int(usage.get("completion_tokens") or 0),

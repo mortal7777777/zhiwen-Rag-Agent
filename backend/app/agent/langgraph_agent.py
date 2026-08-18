@@ -705,6 +705,33 @@ def _prepare_node(state: AgentState) -> dict:
         except Exception as exc:
             logger.warning("任务清单工具加载失败：%s", exc)
 
+    # ---- 工具定义哈希（缓存前缀监测）----
+    # bind_tools 的工具定义是缓存前缀的一部分，会话内变化会断缓存。
+    # 记录到 run 的 token_usage.tools_hash，并与上一 run 对比告警。
+    tools_hash = _tools_prefix_hash(tools)
+    runtime["tools_hash"] = tools_hash
+    if db is not None and conv_id is not None:
+        try:
+            prev_runs = repo.list_agent_runs(db, limit=1, conversation_id=conv_id)
+            if prev_runs:
+                prev_usage = prev_runs[0].get("token_usage")
+                prev_hash = (
+                    prev_usage.get("tools_hash")
+                    if isinstance(prev_usage, dict)
+                    else None
+                )
+                if prev_hash and prev_hash != tools_hash:
+                    logger.warning(
+                        "工具定义前缀变化 %s -> %s（conv=%s）：缓存前缀失效，"
+                        "命中率可能下降；常见原因=用户自写工具/技能注入/"
+                        "MCP 服务器变更",
+                        prev_hash,
+                        tools_hash,
+                        conv_id,
+                    )
+        except Exception as exc:
+            logger.warning("工具哈希对比失败：%s", exc)
+
     state["messages"] = messages
     state["tools"] = tools
     return {
@@ -1745,6 +1772,36 @@ def _tool_detail(result: dict, limit: int = 3500) -> str:
         return str(result)[:limit]
 
 
+def _tools_prefix_hash(tools) -> str:
+    """计算工具定义的稳定哈希（供缓存前缀监测）。
+
+    bind_tools 发给模型的工具定义（名称/描述/参数 schema）构成缓存前缀的
+    一部分，前缀字节变化会让 DeepSeek 自动缓存整体失效（命中率骤降）。
+    会话内工具定义应保持稳定；变化时记录日志便于定位元凶（用户自写工具、
+    技能注入、MCP 服务器变更等）。
+    """
+    import hashlib as _hashlib
+    import json as _json
+
+    parts = []
+    for t in sorted(tools, key=lambda x: getattr(x, "name", "") or ""):
+        name = getattr(t, "name", "") or ""
+        desc = getattr(t, "description", "") or ""
+        schema = ""
+        args_schema = getattr(t, "args_schema", None)
+        if args_schema is not None:
+            try:
+                schema = _json.dumps(
+                    args_schema.model_json_schema(),
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
+            except Exception:
+                schema = str(args_schema)
+        parts.append(f"{name}\u0000{desc}\u0000{schema}")
+    return _hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
 def _tool_has_required_args(tool) -> bool:
     """判断工具参数 schema 是否存在必填字段（空参数兜底用）。
 
@@ -2501,6 +2558,9 @@ def _finalize_node(state: AgentState) -> dict:
                     "last_call": runtime.get("token_usage"),
                     # 分阶段耗时：prepare/dispatch/subagent/merge/agent/tools/finalize + TTFT
                     "timings": dict(runtime.get("timings") or {}),
+                    # 工具定义哈希（缓存前缀监测）：与上一 run 对比，
+                    # 变化说明前缀被破坏，命中率可能下降
+                    "tools_hash": runtime.get("tools_hash"),
                 },
             )
             write_trace(

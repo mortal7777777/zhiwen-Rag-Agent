@@ -496,6 +496,33 @@ def test_schema_to_model_honors_default_in_required():
         pass
 
 
+def test_tools_prefix_hash_stable_and_sensitive():
+    from langchain_core.tools import tool
+
+    from app.agent.langgraph_agent import _tools_prefix_hash
+
+    @tool
+    def add(a: int, b: int) -> int:
+        """加法"""
+        return a + b
+
+    @tool
+    def hello(name: str) -> str:
+        """打招呼"""
+        return "hi " + name
+
+    h1 = _tools_prefix_hash([add, hello])
+    assert h1 == _tools_prefix_hash([hello, add])  # 顺序无关
+    assert len(h1) == 12
+
+    @tool
+    def add2(a: int, b: int, c: int = 0) -> int:
+        """加法"""
+        return a + b + c
+
+    assert h1 != _tools_prefix_hash([add2, hello])  # schema 变化敏感
+
+
 def test_mcp_default_args_other_tools_untouched():
     # 未登记的工具不补参
     assert _mcp_default_args("browser_navigate", {"url": "https://x.com"}) == {
