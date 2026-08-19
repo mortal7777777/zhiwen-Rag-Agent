@@ -172,7 +172,8 @@ class APIBGEEmbeddings:
         return self._dimension
 
     def _post(self, payload: dict) -> dict:
-        import httpx
+        # 代理回退直连：远端 embedding API 不因系统代理未启动而 10061
+        from ..network import make_httpx_client
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -180,11 +181,10 @@ class APIBGEEmbeddings:
         body = dict(payload)
         if self.model:
             body["model"] = self.model
-        resp = httpx.post(
+        resp = make_httpx_client(timeout=self.timeout).post(
             f"{self.base_url}/embeddings",
             json=body,
             headers=headers,
-            timeout=self.timeout,
         )
         resp.raise_for_status()
         return resp.json()

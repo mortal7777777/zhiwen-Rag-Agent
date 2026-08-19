@@ -23,8 +23,6 @@ import mimetypes
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from ..runtime_config import effective, vision_provider_config
 
 logger = logging.getLogger(__name__)
@@ -78,7 +76,12 @@ class SenseNovaVision:
         }
         base = self.provider.get("base_url") or "https://token.sensenova.cn/v1"
         url = f"{base.rstrip('/')}/chat/completions"
-        with httpx.Client(timeout=timeout or effective(self.settings, "vision_timeout", 120)) as client:
+        # 代理回退直连：系统代理未启动时不至于 WinError 10061
+        from ..network import make_httpx_client
+
+        with make_httpx_client(
+            timeout=timeout or effective(self.settings, "vision_timeout", 120)
+        ) as client:
             resp = client.post(url, headers=self._headers(), json=payload)
         if resp.status_code != 200:
             detail = resp.text[:500]
@@ -169,7 +172,9 @@ class SenseNovaVision:
             return []
         base = self.provider.get("base_url") or "https://token.sensenova.cn/v1"
         url = f"{base.rstrip('/')}/models"
-        with httpx.Client(timeout=15) as client:
+        from ..network import make_httpx_client
+
+        with make_httpx_client(timeout=15) as client:
             resp = client.get(url, headers=self._headers())
         if resp.status_code != 200:
             return []

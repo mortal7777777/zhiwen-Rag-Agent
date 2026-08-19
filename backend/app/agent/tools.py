@@ -173,9 +173,10 @@ def _search_duckduckgo(query: str, max_results: int) -> list[dict]:
 def _search_tavily(query: str, api_key: str, max_results: int) -> list[dict]:
     if not api_key:
         raise RuntimeError("未配置 TAVILY_API_KEY")
-    import httpx
+    # 走代理回退直连：系统代理（Clash 7890）未启动时不至于 WinError 10061
+    from ..network import make_httpx_client
 
-    response = httpx.post(
+    response = make_httpx_client(timeout=30).post(
         "https://api.tavily.com/search",
         json={
             "api_key": api_key,
@@ -183,7 +184,6 @@ def _search_tavily(query: str, api_key: str, max_results: int) -> list[dict]:
             "max_results": max_results,
             "search_depth": "basic",
         },
-        timeout=30,
     )
     response.raise_for_status()
     data = response.json()

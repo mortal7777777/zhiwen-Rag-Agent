@@ -24,7 +24,7 @@ class FakeResponse:
 
 
 class FakeHttpx:
-    """记录请求并返回预设响应的 httpx.post 替身。"""
+    """记录请求并返回预设响应的 httpx.post/get 替身。"""
 
     def __init__(self, responses: list[dict]):
         self._responses = list(responses)
@@ -34,13 +34,41 @@ class FakeHttpx:
         self.calls.append((url, json or {}, headers or {}))
         return FakeResponse(self._responses.pop(0))
 
+    def get(self, url, headers=None, timeout=None):
+        self.calls.append((url, {}, headers or {}))
+        return FakeResponse(self._responses.pop(0))
+
 
 def _install_fake_httpx(monkeypatch, responses: list[dict]) -> FakeHttpx:
-    """替换全局 httpx.post（API 类函数内 import httpx 拿的是 sys.modules 全局）。"""
+    """替换出站 HTTP：全局 httpx.post 与 app.network.make_httpx_client 都由 fake 接管。"""
     import httpx as real_httpx
+
+    from app import network as network_module
 
     fake = FakeHttpx(responses)
     monkeypatch.setattr(real_httpx, "post", fake.post)
+
+    class _FakeClient:
+        """make_httpx_client 的替身：post/get 转发到 FakeHttpx。"""
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, json=None, headers=None, timeout=None):
+            return fake.post(url, json=json, headers=headers, timeout=timeout)
+
+        def get(self, url, headers=None, timeout=None):
+            return fake.get(url, headers=headers, timeout=timeout)
+
+    monkeypatch.setattr(
+        network_module, "make_httpx_client", lambda **kw: _FakeClient()
+    )
     return fake
 
 
