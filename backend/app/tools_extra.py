@@ -322,7 +322,8 @@ def make_read_file_tool(settings, project_dir: str | None = None) -> BaseTool:
 
 def make_grep_search_tool(settings, project_dir: str | None = None) -> BaseTool:
     workspace = _resolve_workspace(settings, project_dir)
-    _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".agent_trash"}
+    # .pytest_cache 在 Windows 上可能有 ACL 权限异常（WinError 5），必须跳过
+    _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".agent_trash", ".pytest_cache"}
 
     def _walk(path: Path, include: str | None, budget: list[int]):
         if budget[0] <= 0:
