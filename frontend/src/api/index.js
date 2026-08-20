@@ -219,6 +219,10 @@ export const getSettings = () => client.get('/settings').then((res) => res.data)
 export const saveSettings = (updates) =>
   client.put('/settings', { updates }).then((res) => res.data)
 
+/** 拉取当前激活对话供应商支持的模型列表（OpenAI 兼容 GET /models） */
+export const listChatModels = () =>
+  client.get('/settings/models').then((res) => res.data)
+
 /** 列出本机可复用的 Agent 技能（include_hidden=true 时同时返回已隐藏项） */
 export const listSkills = (includeHidden = false) =>
   client

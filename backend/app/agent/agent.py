@@ -67,6 +67,8 @@ class AgentService:
             cfg = chat_provider_config(self.settings) or {}
             if not cfg.get("api_key"):
                 raise RuntimeError("未配置对话模型 API Key，请在设置中配置供应商")
+            from ..runtime_config import thinking_extra_body
+
             self._chat = ChatOpenAI(
                 api_key=cfg.get("api_key"),
                 base_url=cfg.get("base_url") or "https://api.deepseek.com",
@@ -74,6 +76,8 @@ class AgentService:
                 temperature=effective(self.settings, "chat_temperature"),
                 request_timeout=180,
                 max_retries=2,
+                # 思考模式/强度（DeepSeek V4：thinking + reasoning_effort）
+                extra_body=thinking_extra_body(cfg),
             )
         return self._chat
 
@@ -90,6 +94,8 @@ class AgentService:
                 or "deepseek-v4-flash",
                 temperature=0.0,
                 request_timeout=60,
+                # 标题/摘要等辅助调用关闭思考：更快更省，且不影响主循环
+                extra_body={"thinking": {"type": "disabled"}},
             )
         return self._title_chat
 

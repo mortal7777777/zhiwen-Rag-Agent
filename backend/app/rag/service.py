@@ -157,6 +157,8 @@ class RAGService:
                 api_key=cfg.get("api_key"),
                 base_url=cfg.get("base_url") or "https://api.deepseek.com",
                 model=cfg.get("model") or "deepseek-v4-flash",
+                thinking_enabled=cfg.get("thinking_enabled", True),
+                thinking_effort=cfg.get("thinking_effort", "high"),
             )
         return self._chat
 

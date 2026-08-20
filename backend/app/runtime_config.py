@@ -244,6 +244,10 @@ def _validate_providers(value, settings=None) -> list[dict]:
         raw_models = raw.get("models") or []
         models = [str(m).strip() for m in raw_models if str(m).strip()]
         model = str(raw.get("model") or "").strip() or (models[0] if models else "")
+        # 思考模式/强度（DeepSeek V4 等支持；disabled 时不发 reasoning_effort）
+        effort = str(raw.get("thinking_effort") or "high").strip().lower()
+        if effort not in ("low", "medium", "high", "max"):
+            effort = "high"
         cleaned.append(
             {
                 "id": pid,
@@ -255,6 +259,8 @@ def _validate_providers(value, settings=None) -> list[dict]:
                 "models": models or ([model] if model else []),
                 "enabled": bool(raw.get("enabled", True)),
                 "note": str(raw.get("note") or "").strip()[:200],
+                "thinking_enabled": bool(raw.get("thinking_enabled", True)),
+                "thinking_effort": effort,
             }
         )
     return cleaned
@@ -293,6 +299,23 @@ def _fix_active_provider_ids() -> None:
             continue
         if current not in ids:
             _overrides[active_key] = ids[0]
+
+
+def thinking_extra_body(cfg: dict) -> dict | None:
+    """根据供应商配置生成思考模式/强度的 extra_body 参数。
+
+    DeepSeek V4 系：`thinking: {type: enabled|disabled}` + `reasoning_effort`
+    （low/medium/high/max，默认 high）；disabled 时不发送 reasoning_effort
+    （官方文档：两者互斥）。非思考模型可忽略该参数。
+    """
+    if cfg is None:
+        return None
+    if cfg.get("thinking_enabled") is False:
+        return {"thinking": {"type": "disabled"}}
+    effort = str(cfg.get("thinking_effort") or "high").strip().lower()
+    if effort not in ("low", "medium", "high", "max"):
+        effort = "high"
+    return {"thinking": {"type": "enabled"}, "reasoning_effort": effort}
 
 
 def effective(settings, key: str, default=None):

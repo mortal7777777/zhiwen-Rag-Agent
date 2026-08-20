@@ -216,7 +216,16 @@
                   </div>
                   <div class="field wide">
                     <label>模型列表（逗号分隔）</label>
-                    <el-input v-model="p._modelsText" placeholder="model-a, model-b" />
+                    <div style="display: flex; gap: 8px">
+                      <el-input v-model="p._modelsText" placeholder="model-a, model-b" />
+                      <el-button
+                        size="small"
+                        :loading="p._modelsLoading"
+                        @click="fetchChatModels(p)"
+                      >
+                        拉取模型
+                      </el-button>
+                    </div>
                   </div>
                   <div class="field">
                     <label>API Key</label>
@@ -226,6 +235,19 @@
                       show-password
                       :placeholder="p.api_key ? `已设置 ${p.api_key}（留空保持不变）` : '未设置'"
                     />
+                  </div>
+                  <div class="field">
+                    <label>思考模式（DeepSeek V4 等支持）</label>
+                    <el-switch v-model="p.thinking_enabled" />
+                  </div>
+                  <div class="field">
+                    <label>思考强度</label>
+                    <el-select v-model="p.thinking_effort" :disabled="!p.thinking_enabled" style="width: 100%">
+                      <el-option label="低 low" value="low" />
+                      <el-option label="中 medium" value="medium" />
+                      <el-option label="高 high（默认）" value="high" />
+                      <el-option label="最高 max" value="max" />
+                    </el-select>
                   </div>
                 </div>
               </div>
@@ -826,6 +848,19 @@
         <el-form-item label="API Key">
           <el-input v-model="providerForm.apiKey" type="password" show-password placeholder="sk-..." />
         </el-form-item>
+        <template v-if="providerDialogType === 'chat'">
+          <el-form-item label="思考模式（DeepSeek V4 等支持）">
+            <el-switch v-model="providerForm.thinkingEnabled" />
+          </el-form-item>
+          <el-form-item v-if="providerForm.thinkingEnabled" label="思考强度">
+            <el-select v-model="providerForm.thinkingEffort" style="width: 100%">
+              <el-option label="低 low" value="low" />
+              <el-option label="中 medium" value="medium" />
+              <el-option label="高 high（默认）" value="high" />
+              <el-option label="最高 max" value="max" />
+            </el-select>
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="providerDialogVisible = false">取消</el-button>
@@ -906,6 +941,7 @@ import {
   exportProjectMemory as apiExportProjectMemory,
   getProjectMemory,
   getSettings,
+  listChatModels,
   listSkills,
   listMcpServers,
   resetSkillPrefs,
@@ -1034,7 +1070,15 @@ const rerankerApi = ref({ base_url: '', api_key: '', model: '' })
 const providerDialogVisible = ref(false)
 const providerDialogType = ref('chat')
 const providerSaving = ref(false)
-const providerForm = ref({ name: '', base_url: '', model: '', modelsText: '', apiKey: '' })
+const providerForm = ref({
+  name: '',
+  base_url: '',
+  model: '',
+  modelsText: '',
+  apiKey: '',
+  thinkingEnabled: true,
+  thinkingEffort: 'high',
+})
 
 const chatProviders = computed(() => providers.value.filter((p) => p.type === 'chat'))
 const visionProviders = computed(() => providers.value.filter((p) => p.type === 'vision'))
@@ -1047,6 +1091,8 @@ async function loadSettings() {
       ...p,
       _keyInput: '',
       _modelsText: (p.models || []).join(', '),
+      thinking_enabled: p.thinking_enabled !== false,
+      thinking_effort: p.thinking_effort || 'high',
     }))
     activeChatId.value =
       settingsModel.value.active_chat_provider || chatProviders.value[0]?.id || ''
@@ -1110,6 +1156,8 @@ function openProviderDialog(type) {
     model: '',
     modelsText: '',
     apiKey: '',
+    thinkingEnabled: true,
+    thinkingEffort: 'high',
   }
   providerDialogVisible.value = true
 }
@@ -1138,6 +1186,8 @@ async function confirmAddProvider() {
       note: '',
       _keyInput: '',
       _modelsText: models.join(', '),
+      thinking_enabled: providerDialogType.value !== 'chat' || form.thinkingEnabled,
+      thinking_effort: providerDialogType.value === 'chat' ? form.thinkingEffort : 'high',
     })
     const added = providers.value[providers.value.length - 1]
     if (providerDialogType.value === 'chat') activeChatId.value = added.id
@@ -1149,6 +1199,25 @@ async function confirmAddProvider() {
     ElMessage.error(error.response?.data?.detail || '添加失败')
   } finally {
     providerSaving.value = false
+  }
+}
+
+async function fetchChatModels(p) {
+  p._modelsLoading = true
+  try {
+    const res = await listChatModels()
+    if (res.ok && res.models.length) {
+      const ids = res.models.map((m) => m.id)
+      p._modelsText = ids.join(', ')
+      if (!ids.includes(p.model)) p.model = ids[0]
+      ElMessage.success(`拉取到 ${ids.length} 个模型`)
+    } else {
+      ElMessage.warning(res.error || '未拉取到模型')
+    }
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '拉取模型失败')
+  } finally {
+    p._modelsLoading = false
   }
 }
 
@@ -1196,6 +1265,8 @@ async function saveModelSettings(silent = false) {
           : [p.model],
         enabled: p.enabled,
         note: p.note || '',
+        thinking_enabled: p.type === 'chat' ? p.thinking_enabled !== false : true,
+        thinking_effort: p.type === 'chat' ? p.thinking_effort || 'high' : 'high',
       })),
       active_chat_provider: activeChatId.value,
       active_vision_provider: activeVisionId.value,

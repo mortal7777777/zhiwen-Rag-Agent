@@ -65,19 +65,30 @@ class DeepSeekChat:
         model: str,
         temperature: float = 0.3,
         rewrite_temperature: float = 0.0,
+        thinking_enabled: bool = True,
+        thinking_effort: str = "high",
     ):
+        from ..runtime_config import thinking_extra_body
+
+        cfg = {
+            "thinking_enabled": thinking_enabled,
+            "thinking_effort": thinking_effort,
+        }
         self._llm = ChatOpenAI(
             api_key=api_key,
             base_url=base_url,
             model=model,
             temperature=temperature,
+            extra_body=thinking_extra_body(cfg),
         )
-        # 改写用温度 0：同样的输入必须产出同样的改写查询，保证检索结果可复现
+        # 改写用温度 0：同样的输入必须产出同样的改写查询，保证检索结果可复现。
+        # 检索改写是确定性输出，关闭思考（思考模式下 temperature 无效）
         self._rewrite_llm = ChatOpenAI(
             api_key=api_key,
             base_url=base_url,
             model=model,
             temperature=rewrite_temperature,
+            extra_body={"thinking": {"type": "disabled"}},
         )
 
     @staticmethod
