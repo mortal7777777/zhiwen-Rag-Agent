@@ -70,9 +70,16 @@ def _load_messages(data: list) -> list:
                     AIMessage(
                         content=item.get("c", ""),
                         tool_calls=item.get("tool_calls") or [],
-                        additional_kwargs={"reasoning_content": reasoning}
-                        if reasoning
-                        else {},
+                        # 无条件回传（含空串），旧快照缺字段时补空串
+                        additional_kwargs=(
+                            {
+                                "reasoning_content": (
+                                    reasoning if reasoning is not None else ""
+                                )
+                            }
+                            if item.get("tool_calls")
+                            else {}
+                        ),
                     )
                 )
             elif t == "tool":

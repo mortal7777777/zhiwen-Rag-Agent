@@ -1390,10 +1390,11 @@ def _agent_node(state: AgentState) -> dict:
         stored_content = _strip_xml_tool_tags(merged_text).strip()
     else:
         stored_content = merged_text
-    # DeepSeek 思考模式：模型输出带 reasoning_content 时，下一轮请求必须
-    # 原样传回，否则 API 报 "The reasoning_content in the thinking mode must
-    # be passed back to the API"。工具轮 content 被清空时尤其容易丢——
-    # 把 reasoning_content 保留在 additional_kwargs 里随消息传回。
+    # DeepSeek 思考模式：带 tool_calls 的 assistant 消息必须把
+    # reasoning_content 原样回传（**空字符串也要回传空串**），否则 API 报
+    # "The reasoning_content in the thinking mode must be passed back to
+    # the API"。约 59% 工具轮的 reasoning 为空串，用 if reasoning 判断会
+    # 丢掉字段 → 间歇性 400。这里无条件写入（模型未输出时用空串）。
     reasoning = (getattr(merged, "additional_kwargs", {}) or {}).get(
         "reasoning_content"
     )
@@ -1401,9 +1402,16 @@ def _agent_node(state: AgentState) -> dict:
         AIMessage(
             content=stored_content,
             tool_calls=tool_calls,
-            additional_kwargs={"reasoning_content": reasoning}
-            if reasoning
-            else {},
+            # 仅工具轮（带 tool_calls）必须回传 reasoning_content
+            additional_kwargs=(
+                {
+                    "reasoning_content": (
+                        reasoning if reasoning is not None else ""
+                    )
+                }
+                if tool_calls
+                else {}
+            ),
         )
     )
     state["pending_tool_calls"] = tool_calls
@@ -1865,9 +1873,13 @@ def _rows_to_history(rows: list[dict], history_messages: list | None = None) -> 
                     AIMessage(
                         content="",
                         tool_calls=calls,
-                        additional_kwargs={"reasoning_content": reasoning}
-                        if reasoning
-                        else {},
+                        # 无条件回传（含空串）：旧数据缺 __reasoning__ 时
+                        # 补空串，避免工具轮消息无字段触发 API 400
+                        additional_kwargs={
+                            "reasoning_content": (
+                                reasoning if reasoning is not None else ""
+                            )
+                        },
                     )
                 )
             else:
@@ -2669,12 +2681,15 @@ def _finalize_node(state: AgentState) -> dict:
                     )
                 elif isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
                     marker = {"__tool_calls__": list(m.tool_calls)}
-                    # DeepSeek 思考模式的 reasoning_content 需随消息原样传回
+                    # DeepSeek 思考模式的 reasoning_content 需随消息原样传回，
+                    # **空字符串也必须回传空串**（否则下次请求 400）——
+                    # 无条件写入 marker（模型未输出时存空串）
                     reasoning = (getattr(m, "additional_kwargs", {}) or {}).get(
                         "reasoning_content"
                     )
-                    if reasoning:
-                        marker["__reasoning__"] = reasoning
+                    marker["__reasoning__"] = (
+                        reasoning if reasoning is not None else ""
+                    )
                     repo.add_message(
                         db,
                         conv_id,

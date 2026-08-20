@@ -79,11 +79,13 @@ def messages_to_history_rows(messages: list) -> list[dict]:
             calls = list(getattr(m, "tool_calls", None) or [])
             if calls:
                 marker = {"__tool_calls__": calls}
+                # 无条件写入（含空串）：工具轮消息必须回传 reasoning_content
                 reasoning = (getattr(m, "additional_kwargs", {}) or {}).get(
                     "reasoning_content"
                 )
-                if reasoning:
-                    marker["__reasoning__"] = reasoning
+                marker["__reasoning__"] = (
+                    reasoning if reasoning is not None else ""
+                )
                 rows.append(
                     {
                         "role": "assistant",
