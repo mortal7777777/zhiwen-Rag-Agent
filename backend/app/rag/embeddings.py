@@ -48,7 +48,14 @@ class LocalBGEEmbeddings:
     def _ensure_model(self) -> SentenceTransformer:
         """首次使用时才加载模型，避免无谓启动开销。"""
         if self._model is None:
-            from sentence_transformers import SentenceTransformer
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError as exc:
+                raise RuntimeError(
+                    "本地 Embedding 不可用（lite 镜像未安装 torch/sentence-transformers）。"
+                    "请配置 EMBEDDING_API_BASE_URL / EMBEDDING_API_KEY 使用 API 嵌入，"
+                    "或改用 full 模式（docker-compose.full.yml）。"
+                ) from exc
 
             self._maybe_retry_cuda()
             self._model = SentenceTransformer(str(self.model_dir), device=self.device)

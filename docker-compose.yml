@@ -15,7 +15,7 @@ services:
       - http.port=9200
       - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
     ports:
-      - "9200:9200"
+      - "${OPENSEARCH_PORT:-9200}:9200"
     volumes:
       - opensearch-data:/usr/share/opensearch/data
     healthcheck:
@@ -30,7 +30,7 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ragassistant123}
       MYSQL_DATABASE: rag_assistant
     ports:
-      - "3306:3306"
+      - "${MYSQL_PORT:-3306}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
@@ -45,6 +45,7 @@ services:
       dockerfile: Dockerfile
       args:
         PROFILE: ${PROFILE:-lite}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     environment:
       # 必填：对话模型 API Key（OpenAI 兼容，也可在设置页改供应商）
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?请在 .env 中设置 DEEPSEEK_API_KEY}
@@ -73,7 +74,7 @@ services:
       - app-data:/data
       - app-meta:/meta
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     depends_on:
       opensearch:
         condition: service_healthy
@@ -85,7 +86,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "5173:80"
+      - "${FRONTEND_PORT:-5173}:80"
     depends_on:
       - backend
 

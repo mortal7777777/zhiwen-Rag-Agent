@@ -55,7 +55,14 @@ class LocalReranker:
 
     def _ensure_model(self) -> CrossEncoder:
         if self._model is None:
-            from sentence_transformers import CrossEncoder
+            try:
+                from sentence_transformers import CrossEncoder
+            except ImportError as exc:
+                raise RuntimeError(
+                    "本地 Reranker 不可用（lite 镜像未安装 torch/sentence-transformers）。"
+                    "请配置 RERANKER_API_BASE_URL / RERANKER_API_KEY 使用 API 重排，"
+                    "或改用 full 模式（docker-compose.full.yml）。"
+                ) from exc
 
             self._maybe_retry_cuda()
             model_dir = resolve_snapshot_dir(self.cache_dir)
