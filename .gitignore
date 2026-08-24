@@ -52,3 +52,18 @@ cache_opt_test.py
 cache_verify.py
 final_verify.py
 verify_final.py
+
+# 本地开发向文档 / 一次性实验脚本（保留在磁盘，不入库）
+docs/PROJECT_HANDOFF.md
+docs/DEV_PITFALLS.md
+docs/GIT_GUIDE.md
+docs/DOCUMENT_VIEWER_PLAN.md
+docs/RESUME_TECH_DETAILS.md
+backend/chunk_experiment.py
+backend/compare_retrieval.py
+backend/concurrency_test.py
+backend/expansion_demo.py
+backend/http_smoke.py
+backend/retrieval_summary.py
+backend/rewrite_demo.py
+backend/stability_test.py

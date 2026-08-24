@@ -1,9 +1,7 @@
 # 个人知识库 RAG 智能助手（LangChain / LangGraph Agent）
 
-> **新会话快速上手**：先读 [docs/PROJECT_HANDOFF.md](docs/PROJECT_HANDOFF.md)
-> （项目现状 / 架构 / 环境 / 最近改动 / 待办一次性交底），再看
-> [docs/AGENT_COMPARISON.md](docs/AGENT_COMPARISON.md) 与
-> [docs/HERMES_STYLE_AGENT.md](docs/HERMES_STYLE_AGENT.md)。
+> 与主流 Agent 应用（Claude Code / Codex / Hermes）的架构与功能对比，见
+> [docs/AGENT_COMPARISON.md](docs/AGENT_COMPARISON.md)。
 
 前后端分离的个人知识库 + 智能助手：基于 **LangChain 框架**，Agent 编排层使用
 **LangGraph 状态图**（4 节点 + 条件路由）实现按需工具调用，支持个人知识库问答、
@@ -12,9 +10,6 @@
 
 - **后端**：FastAPI + LangChain / LangGraph + OpenSearch + 本地 BGE Embedding/Reranker + DeepSeek / 任意 OpenAI 兼容模型 + SenseNova 视觉 + MySQL
 - **前端**：Vue 3 + Vite + Element Plus（浅色/深色主题、打字机流式、引用索引、设置面板）
-
-> 与主流 Agent 应用（Claude Code / Codex / Hermes）的架构与功能对比，见
-> [docs/AGENT_COMPARISON.md](docs/AGENT_COMPARISON.md)。
 
 ## 核心能力
 
@@ -540,8 +535,7 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 ## 注意事项
 
 - **版本保护**：项目已初始化 git（仓库根 = `rag_knowledge_base/`），
-  基础操作见 [docs/GIT_GUIDE.md](docs/GIT_GUIDE.md)；运行数据（`data/`、
-  `opensearch_meta/`、日志）已加入 `.gitignore` 不入库；
+  运行数据（`data/`、`opensearch_meta/`、日志）已加入 `.gitignore` 不入库；
 - **提示词模板**：预设模板已按 Claude Code 风格重写（角色/原则/流程/安全边界），
   含“学习助手”模板；后端启动时自动同步到数据库（系统模板只读，用户模板不受影响）；
 - **MySQL 直启**：`python run.py` 会读取 gitignore 的 `backend/.env.local`
