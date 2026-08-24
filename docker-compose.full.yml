@@ -1,0 +1,28 @@
+# full 模式覆盖：本地 BGE 嵌入/重排（挂载 langchain01/local_models，可选 GPU）
+# 用法：docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
+#
+# 注意：
+# - 本地模型目录位于仓库上一级（langchain01/local_models），必须存在；
+# - GPU 直通依赖 Docker Desktop 的 WSL2 + NVIDIA 驱动；无 GPU 时 CPU 推理也可用；
+# - 若本机曾用 lite 模式建过索引，切换后请删除 app-meta 卷重来（索引维度不同）。
+
+services:
+  backend:
+    build:
+      args:
+        PROFILE: full
+    environment:
+      EMBEDDING_PROVIDER: local
+      EMBEDDING_MODEL_DIR: /models/bge-base-zh-v1.5
+      RERANKER_PROVIDER: local
+      RERANKER_CACHE_DIR: /models/models--BAAI--bge-reranker-v2-m3
+      EMBEDDING_FP16: "1"
+    volumes:
+      - ../local_models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

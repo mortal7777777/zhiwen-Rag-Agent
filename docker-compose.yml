@@ -1,0 +1,96 @@
+# 一键启动（lite 模式：嵌入/重排走 OpenAI 兼容 API，不依赖本地模型与 torch）
+#
+#   1. cp .env.example .env   并在 .env 里填 DEEPSEEK_API_KEY（及可选 EMBEDDING_API_KEY）
+#   2. docker compose up -d --build
+#   3. 打开 http://localhost:5173
+#
+# full 模式（本地 BGE 模型 + GPU）：docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.19.0
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - plugins.security.disabled=true
+      - http.port=9200
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ragassistant123}
+      MYSQL_DATABASE: rag_assistant
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PROFILE: ${PROFILE:-lite}
+    environment:
+      # 必填：对话模型 API Key（OpenAI 兼容，也可在设置页改供应商）
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?请在 .env 中设置 DEEPSEEK_API_KEY}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      # 可选：视觉模型（识图/OCR）
+      SENSENOVA_API_KEY: ${SENSENOVA_API_KEY:-}
+      # 依赖服务
+      MYSQL_URL: mysql+pymysql://root:${MYSQL_ROOT_PASSWORD:-ragassistant123}@mysql:3306/rag_assistant?charset=utf8mb4
+      OPENSEARCH_URL: http://opensearch:9200
+      DATA_DIR: /data
+      META_DIR: /meta
+      # lite 模式：嵌入/重排走 OpenAI 兼容 API（如 SiliconFlow 免费档 bge-m3）
+      EMBEDDING_PROVIDER: api
+      EMBEDDING_API_BASE_URL: ${EMBEDDING_API_BASE_URL:-https://api.siliconflow.cn/v1}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_API_MODEL: ${EMBEDDING_API_MODEL:-BAAI/bge-m3}
+      RERANKER_PROVIDER: api
+      RERANKER_API_BASE_URL: ${RERANKER_API_BASE_URL:-https://api.siliconflow.cn/v1}
+      RERANKER_API_KEY: ${RERANKER_API_KEY:-}
+      RERANKER_API_MODEL: ${RERANKER_API_MODEL:-BAAI/bge-reranker-v2-m3}
+      # 文件/命令工具的边界目录
+      TOOL_WORKSPACE: /app
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    volumes:
+      - app-data:/data
+      - app-meta:/meta
+    ports:
+      - "8000:8000"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  opensearch-data:
+  mysql-data:
+  app-data:
+  app-meta:

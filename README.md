@@ -271,6 +271,10 @@ rag_knowledge_base/
 ├── data/                            # 知识库文档目录（可配置 DATA_DIR）
 ├── opensearch_meta/                 # 索引账本 + traces/
 ├── docs/AGENT_COMPARISON.md         # 与主流 Agent 的架构/功能对比
+├── Dockerfile                       # 后端镜像（lite/full 两档，见下方 Docker 章节）
+├── docker-compose.yml               # 一键启动（lite 模式）
+├── docker-compose.full.yml          # full 模式覆盖（本地模型 + GPU）
+├── .env.example                     # docker compose 环境变量模板
 └── README.md
 ```
 
@@ -297,6 +301,8 @@ rag_knowledge_base/
 4. Python 3.10+ 与 Node.js 18+（依赖含 `langgraph`，见 `backend/requirements.txt`）。
 
 ## 快速开始
+
+> 不想装 Python / Node / OpenSearch / MySQL 环境？直接看 [Docker 一键启动](#docker-一键启动推荐开箱即用)。
 
 ### 1. 安装依赖
 
@@ -333,6 +339,45 @@ python run.py
 cd ..\frontend
 npm run dev
 ```
+
+## Docker 一键启动（推荐，开箱即用）
+
+> 不需要本机装 Python / Node / OpenSearch / MySQL：四个容器由 docker compose 拉起。
+> 所有密钥经 `.env` 注入，代码内无任何硬编码；`data/`、`opensearch_meta/`、MySQL 均用独立数据卷。
+
+### lite 模式（默认，镜像最小）
+
+嵌入/重排走 OpenAI 兼容 API（默认 SiliconFlow 免费档 `bge-m3`），镜像**不包含 torch 与本地模型**，只有对话模型需要 API Key：
+
+```bash
+cp .env.example .env                  # 填 DEEPSEEK_API_KEY（必填）；EMBEDDING_API_KEY 推荐填（不填则无法建知识库索引）
+docker compose up -d --build          # 首次构建约 5~10 分钟
+# 打开 http://localhost:5173
+```
+
+- 后端 API 文档：http://localhost:8000/docs
+- OpenSearch：http://localhost:9200；MySQL：`127.0.0.1:3306`（密码见 `.env` 的 `MYSQL_ROOT_PASSWORD`）
+
+### full 模式（本地 BGE 模型 + GPU）
+
+需要仓库上一级的 `local_models/` 目录（`bge-base-zh-v1.5` + `models--BAAI--bge-reranker-v2-m3`），嵌入与重排全部本地执行：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
+```
+
+无 GPU 时也可用（自动 CPU 推理）；GPU 直通依赖 Docker Desktop 的 WSL2 + NVIDIA 驱动。
+lite/full 切换后若提示索引维度冲突（768 vs 1024），`docker compose down -v` 清卷重来。
+
+### 停止与清理
+
+```bash
+docker compose down       # 保留数据卷
+docker compose down -v    # 连同数据卷删除（会话、索引全部清空）
+```
+
+> 备注：Linux 宿主机需先 `sudo sysctl -w vm.max_map_count=262144`（Windows/Mac 的 Docker Desktop 无需处理）；
+> nginx 已配置 SSE 关缓冲，打字机流式正常。
 
 ### 终端客户端（类 Claude CLI 体验）
 

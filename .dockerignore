@@ -1,0 +1,32 @@
+# 版本与元数据
+.git
+.gitignore
+.claude
+.zcode
+.agent_trash
+.pytest_cache
+__pycache__
+*.pyc
+docs
+
+# 敏感/运行时数据（绝不进镜像）
+.env
+.env.local
+data
+opensearch_meta
+local_models
+faiss_index
+local_chroma_db
+backend/.myragagent_history.json
+backend/app/agent/_persist_debug.txt
+
+# 前端（由 frontend 子上下文单独构建）
+frontend/node_modules
+frontend/dist
+
+# 调试残留
+backend/*.md
+dbg*.py
+dump*.py
+aux2.py
+*.log
