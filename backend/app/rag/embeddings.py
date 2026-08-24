@@ -1,15 +1,20 @@
-"""本地 BGE Embedding 封装（复用 day5_2 的思路，改为懒加载）。"""
+"""本地 BGE Embedding 封装（复用 day5_2 的思路，改为懒加载）。
+
+torch / sentence_transformers 仅在本地模型真正使用时才导入：
+lite 模式（纯 API 嵌入）不安装这两个包也能运行。
+"""
 
 from __future__ import annotations
 
 import logging
 import time
 from pathlib import Path
-
-import torch
-from sentence_transformers import SentenceTransformer
+from typing import TYPE_CHECKING
 
 from .utils import detect_device, is_cuda_error
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +48,8 @@ class LocalBGEEmbeddings:
     def _ensure_model(self) -> SentenceTransformer:
         """首次使用时才加载模型，避免无谓启动开销。"""
         if self._model is None:
+            from sentence_transformers import SentenceTransformer
+
             self._maybe_retry_cuda()
             self._model = SentenceTransformer(str(self.model_dir), device=self.device)
             if self.use_fp16 and self.device.startswith("cuda"):
@@ -57,6 +64,8 @@ class LocalBGEEmbeddings:
         if time.time() - self._cuda_failed_at < CUDA_RETRY_AFTER:
             return
         try:
+            import torch
+
             if not torch.cuda.is_available():
                 return
             # 小探针：真正触发一次 CUDA kernel，验证上下文未被污染
@@ -78,6 +87,8 @@ class LocalBGEEmbeddings:
         self.use_fp16 = False
         if self._model is not None:
             try:
+                import torch
+
                 del self._model
                 torch.cuda.empty_cache()
             except Exception:

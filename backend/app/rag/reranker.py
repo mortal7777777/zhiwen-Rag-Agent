@@ -1,16 +1,22 @@
-"""本地 BGE Reranker 封装（CrossEncoder），模型懒加载且只加载一次。"""
+"""本地 BGE Reranker 封装（CrossEncoder），模型懒加载且只加载一次。
+
+torch / sentence_transformers 仅在本地模型真正使用时才导入：
+lite 模式（纯 API 重排）不安装这两个包也能运行。
+"""
 
 from __future__ import annotations
 
 import logging
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import torch
 from langchain_core.documents import Document
-from sentence_transformers import CrossEncoder
 
 from .utils import detect_device, is_cuda_error
+
+if TYPE_CHECKING:
+    from sentence_transformers import CrossEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +55,8 @@ class LocalReranker:
 
     def _ensure_model(self) -> CrossEncoder:
         if self._model is None:
+            from sentence_transformers import CrossEncoder
+
             self._maybe_retry_cuda()
             model_dir = resolve_snapshot_dir(self.cache_dir)
             self._model = CrossEncoder(str(model_dir), device=self.device)
@@ -61,6 +69,8 @@ class LocalReranker:
         if time.time() - self._cuda_failed_at < CUDA_RETRY_AFTER:
             return
         try:
+            import torch
+
             if not torch.cuda.is_available():
                 return
             probe = torch.zeros(1, device="cuda")
@@ -78,6 +88,8 @@ class LocalReranker:
         self.device = "cpu"
         if self._model is not None:
             try:
+                import torch
+
                 del self._model
                 torch.cuda.empty_cache()
             except Exception:

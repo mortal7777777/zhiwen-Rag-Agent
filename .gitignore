@@ -7,6 +7,7 @@ venv/
 
 # 日志与运行产物
 *.log
+.env
 backend/_*.py
 backend/eval_report.jsonl
 backend/ragas_baseline.jsonl
@@ -33,3 +34,21 @@ backend/app/user_tools/*.py
 .vscode/
 *.swp
 Thumbs.db
+
+# CLI 会话历史 / Agent 运行产物（含对话内容，勿上传）
+.myragagent_history.json
+.zcode/
+backend/app/agent/_persist_debug.txt
+backend/snap.md
+backend/check_snapshot.md
+backend/test-snap.md
+backend/snapshot-*.md
+
+# 临时调试脚本
+dbg*.py
+dump*.py
+aux2.py
+cache_opt_test.py
+cache_verify.py
+final_verify.py
+verify_final.py

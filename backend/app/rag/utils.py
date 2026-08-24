@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-import torch
+try:
+    import torch
+except ImportError:  # lite 模式（纯 API 嵌入/重排）不安装 torch
+    torch = None  # type: ignore[assignment]
 
 
 def detect_device() -> str:
     """自动选择运行设备：有 CUDA 用 GPU，否则用 CPU。"""
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    return "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
 
 
 def is_cuda_error(exc: Exception) -> bool:
@@ -17,7 +20,7 @@ def is_cuda_error(exc: Exception) -> bool:
     一旦出现会污染整个 CUDA 上下文，后续调用持续失败直到进程重启；
     因此上层需要识别这类错误并降级到 CPU。
     """
-    if isinstance(exc, torch.cuda.OutOfMemoryError):
+    if torch is not None and isinstance(exc, torch.cuda.OutOfMemoryError):
         return True
     msg = str(exc).lower()
     return (
