@@ -114,11 +114,11 @@ def main() -> None:
         # 评测模式：临时切到“自动批准”，跑完恢复“每次确认”
         _post("/settings", {"updates": {"tool_permission_mode": "allow"}}, method="PUT")
         print("已临时切换 tool_permission_mode=allow", flush=True)
-    questions = json.loads(
-        (Path(__file__).resolve().parent / "eval_questions.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    # 优先本地题库（含知识库书目等个人内容，gitignored）；不存在才用公开题库
+    qpath = Path(__file__).resolve().parent / "eval_questions.local.json"
+    if not qpath.exists():
+        qpath = Path(__file__).resolve().parent / "eval_questions.json"
+    questions = json.loads(qpath.read_text(encoding="utf-8"))
     if args.category:
         questions = [q for q in questions if q["category"] == args.category]
     if args.limit:

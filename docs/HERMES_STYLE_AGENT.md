@@ -56,11 +56,11 @@ Claude Code / Codex / OpenCode 等本就支持 ACP 的客户端就能直接驱�
 | Web 前端 | ✅ Vue 3 + SSE（主题/打字机/设置面板/运行记录） |
 | 文件/命令工具 | ✅ `file_tool` / `command_tool`（白名单 + 超时 + 确认） |
 | 技能 | ✅ 扫描 Codex/Claude/Hermes skills，结构化目录 |
-| 终端对话 | ⚠️ 仅有最小客户端 `backend/cli_agent.py`（纯标准库，可对话/看工具事件） |
+| 终端对话 | ✅ 完整 CLI（`myragagent` 命令）：/new /tools /todos /memory 等命令菜单、审批弹窗（数字键 1/2/3）、Markdown 渲染、Tab 补全、Ctrl+C 打断、历史持久化、按目录加载 AGENTS.md、task_mode |
 | ACP 桥 | ❌ 无（不能用 Claude Code / Codex 客户端驱动本 agent） |
-| TUI | ❌ 无（无 Textual/Ink 交互界面） |
+| TUI | ⚠️ 终端 CLI 已类 TUI（prompt_toolkit），未上 Textual/Ink 框架 |
 | 桌面应用 | ❌ 无（未做 PWA/Tauri 打包） |
-| 子代理并行 | ⚠️ 工具级并行已有，子代理图尚无 |
+| 子代理并行 | ✅ 计划内工具型步骤经 LangGraph `Send` fan-out 到独立上下文子代理，merge 汇总（详见 docs/ORCHESTRATION.md 场景 B） |
 
 ## 3. 演进路线图
 
@@ -89,9 +89,10 @@ Claude Code / Codex / OpenCode 等本就支持 ACP 的客户端就能直接驱�
 - 后端已支持 `--host 127.0.0.1` 独立进程，Tauri 只需负责拉起与关停。
 
 ### 阶段五：执行与并行能力对齐 Claude Code
-- 已有：`command_tool`（白名单+超时）、`file_tool`（目录内读写）；
-- 待补：代码搜索（ripgrep）、Git 操作、浏览器工具、MCP 已接入、子代理图
-  （LangGraph 并行节点 + 结果汇总）。
+- 已有：`command_tool`（白名单+超时）、`file_tool`（目录内读写）、
+  `grep_search`（代码搜索）、Playwright 浏览器工具（MCP）、
+  Send 子代理并行（独立上下文 + HITL + merge 汇总）；
+- 待补：Git 操作工具、TUI（Textual）。
 
 ## 4. 关于"在代码块上执行"与"在终端执行"的区别
 

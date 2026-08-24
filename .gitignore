@@ -9,6 +9,7 @@ venv/
 *.log
 .env
 backend/_*.py
+backend/eval_questions.local.json
 backend/eval_report.jsonl
 backend/ragas_baseline.jsonl
 .git/pytest-tmp/

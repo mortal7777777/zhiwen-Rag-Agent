@@ -3,8 +3,16 @@
 ## 当前编排（backend/app/agent/langgraph_agent.py）
 
 ```text
-START → prepare → [fanout] → agent ⇄ tools → finalize → END
+START → prepare → [dispatch → subagent×N → merge]   （计划含工具型步骤时）
+              ↘  agent ⇄ tools（循环）→ finalize → END
 ```
+
+- `prepare`：会话/历史/记忆/规划/工具组装（见下）；
+- `dispatch`：把计划中的"工具型步骤"拆成子任务，`Send` 扇出；
+- `subagent`：每个子任务独立上下文、受限工具集，并行执行（最多 2 轮）；
+- `merge`：合并各分支结论摘要、重排引用编号、回填工具轨迹、同步任务清单；
+- `agent ⇄ tools`：主循环（模型生成 → 有工具调用就执行 → 再生成）；
+- `finalize`：来源去重、持久化、运行记录 + trace。
 
 ### prepare（每轮开头）
 
@@ -101,9 +109,12 @@ LLM 流式生成；有 tool_calls → tools，无则收尾。计划硬约束：�
 
 ### 场景 E：长任务 / 中断恢复
 
-当前是自写 SQLite checkpoint（含 todos/plan/tool_trace）。下一步迁移
-LangGraph 原生 checkpointer（`langgraph-checkpoint-sqlite`），
-获得时间旅行/回滚；自写状态继续作为业务态保留。
+- 自写 SQLite checkpoint（`checkpoint.py`，含 todos/plan/tool_trace）负责
+  **跨轮中断恢复**：prepare 检测 pending 快照 → 恢复消息链继续执行；
+- LangGraph 原生 checkpointer（`native_checkpoint.py`，2026-08-13 接入）
+  每个 superstep 自动落快照，`GET /api/conversations/{id}/timeline` 提供
+  时间线审计，`POST .../rollback` 可回滚会话消息与任务清单；
+- 消息级 rewind（2026-08-16）：删除某条消息及之后全部消息，原文预填回输入框。
 
 ## 演进目标图
 
@@ -138,8 +149,8 @@ Task 工具 = 派生 subagent（独立上下文、受限工具集），完成后
 |---|---|---|
 | 主循环 | `agent ⇄ tools` 状态图 | 已等价 |
 | 权限规则 allow/ask/deny | `permissions.py` HITL + 白名单 | 已等价 |
-| hooks（Pre/PostToolUse） | 无 | 在 tools 节点前后加 hook 注册表 |
-| Task subagents | 无 | 用 `Send` 做 fan-out/fan-in 子图 |
+| hooks（Pre/PostToolUse） | `hooks.py` + `GET/PUT /api/hooks`（Pre 可 deny 拦截、Post 可回填上下文） | 已等价 |
+| Task subagents | `dispatch/subagent/merge` 节点（Send fan-out，独立上下文 + HITL） | 已等价 |
 | CLAUDE.md | AGENTS.md 项目记忆 | 已等价 |
 | 上下文压缩 | 滚动摘要 + 轨迹压缩 | 已等价 |
 | 沙箱 | Docker bash + 文件工具 | 已落地，继续加 verify |

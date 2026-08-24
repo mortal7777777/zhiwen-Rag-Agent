@@ -1,21 +1,5 @@
 [
   {
-    "id": "l1-kb-001",
-    "difficulty": 1,
-    "category": "kb",
-    "tool_mode": "knowledge",
-    "question": "“实事求是”的含义是什么？",
-    "expect": "一句话直接回答并引用知识库原文"
-  },
-  {
-    "id": "l1-kb-002",
-    "difficulty": 1,
-    "category": "kb",
-    "tool_mode": "knowledge",
-    "question": "《示例书》的主要观点是什么？",
-    "expect": "引用知识库，给出实践与认识关系"
-  },
-  {
     "id": "l1-gen-001",
     "difficulty": 1,
     "category": "general",
@@ -32,36 +16,12 @@
     "expect": "调用 list_dir，只读，不触发审批"
   },
   {
-    "id": "l2-kb-003",
-    "difficulty": 2,
-    "category": "kb",
-    "tool_mode": "knowledge",
-    "question": "《示例书》中主要矛盾和次要矛盾是什么关系？",
-    "expect": "检索并解释主次矛盾与转化"
-  },
-  {
-    "id": "l2-kb-004",
-    "difficulty": 2,
-    "category": "kb",
-    "tool_mode": "knowledge",
-    "question": "《示例书》如何分析抗日战争的三个阶段？",
-    "expect": "列出三阶段并引用出处"
-  },
-  {
     "id": "l2-kb-005",
     "difficulty": 2,
     "category": "kb",
     "tool_mode": "knowledge",
-    "question": "《示例书》这本书主要讲了什么？知识库里没有相关内容时如实说明",
+    "question": "《一本未收录的冷门书》这本书主要讲了什么?知识库里没有相关内容时如实说明",
     "expect": "区分文档内容与事实，检索不到不编造"
-  },
-  {
-    "id": "l2-kb-006",
-    "difficulty": 2,
-    "category": "kb",
-    "tool_mode": "knowledge",
-    "question": "结合《示例书》和《示例书》，说明认识与实践的关系以及主要矛盾的地位",
-    "expect": "多跳检索两篇文档后综合，标注两个来源"
   },
   {
     "id": "l2-web-001",
