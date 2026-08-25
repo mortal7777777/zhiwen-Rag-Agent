@@ -283,9 +283,15 @@ class RAGService:
         self,
         documents: list[Document],
     ) -> tuple[list[Document], list[Document]]:
-        """把文档切成 parent（段落分组，上下文）和 child（小窗口，定位精度）。"""
+        """把文档切成 parent（段落分组，上下文）和 child（小窗口，定位精度）。
+
+        跨文档块级去重：内容 md5 已见过的 child 直接跳过（重复段落主要来自
+        同一书内反复出现的段落），保留首次出现的 parent 上下文归属。
+        """
         parents: list[Document] = []
         children: list[Document] = []
+        seen_child_md5: set[str] = set()
+        skipped = 0
         for document in documents:
             for parent_text in self._parent_splitter.split_text(document.page_content):
                 parent_id = hashlib.md5(parent_text.encode("utf-8")).hexdigest()
@@ -294,11 +300,18 @@ class RAGService:
                 parents.append(Document(page_content=parent_text, metadata=parent_meta))
 
                 for child_text in self._child_splitter.split_text(parent_text):
+                    child_md5 = hashlib.md5(child_text.encode("utf-8")).hexdigest()
+                    if child_md5 in seen_child_md5:
+                        skipped += 1
+                        continue
+                    seen_child_md5.add(child_md5)
                     child_meta = dict(parent_meta)
                     child_meta["parent_content"] = parent_text
                     children.append(
                         Document(page_content=child_text, metadata=child_meta)
                     )
+        if skipped:
+            logger.info("块级去重：跳过 %d 个重复 child", skipped)
         return parents, children
 
     # ============================================================

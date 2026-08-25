@@ -25,6 +25,9 @@ COMPLEX_KEYWORDS = (
     "总结", "分析", "对比", "区别", "原理", "步骤", "方案", "如何", "为什么",
     "优缺点", "推荐", "建议", "比较", "原因", "影响", "关系", "含义", "评价",
     "整理", "综述", "概括", "详细", "介绍",
+    # 2026-08 补:书名/主题类问法也走扩展(实测 13~15 字书名题因跳过扩展,
+    # 原查询与库内表述错位,context_recall 归零)
+    "观点", "主题", "内容", "主要", "核心", "讲什么", "是什么", "属于",
 )
 
 # 指代词：出现则说明问题依赖上下文，需要多轮补全
@@ -136,6 +139,10 @@ class QueryExpander:
     def _is_simple(question: str, history: list[dict] | None) -> bool:
         q = question.strip()
         if len(q) > 16:
+            return False
+        # 书名/篇名查询强制扩展:原查询常与库内表述错位(如"《示例书》的主要
+        # 观点是什么?"),Multi-Query 改写能补上"篇名+术语"角度,提高召回
+        if "《" in q or "》" in q:
             return False
         if any(k in q for k in COMPLEX_KEYWORDS):
             return False

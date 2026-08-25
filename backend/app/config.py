@@ -126,8 +126,8 @@ class Settings:
     reranker_api_model: str = ""          # 如 BAAI/bge-reranker-v2-m3
 
     # ---- 检索参数 ----
-    recall_k: int = 40       # 每路检索器各取前 N 条
-    candidate_pool: int = 24 # 每路 RRF 融合后送重排序的候选数
+    recall_k: int = 60       # 每路检索器各取前 N 条（2026-08:40→60 提升召回候选）
+    candidate_pool: int = 32 # 每路 RRF 融合后送重排序的候选数（2026-08:24→32）
     rerank_top_k: int = 4    # 精排后最终保留条数
 
     # ---- 切分参数（Parent-Child）----
@@ -135,8 +135,8 @@ class Settings:
     # parent 按段落分组（约 600 字，最多 900），child 为句内窗口（约 220 字）。
     parent_chunk_size: int = 600
     parent_max_chunk_size: int = 900
-    child_chunk_size: int = 220
-    child_overlap: int = 40
+    child_chunk_size: int = 320   # 2026-08:220→320,避免概念被切散(低 recall 根因之一)
+    child_overlap: int = 64       # 2026-08:40→64(约 20% 重叠,覆盖切分边界信息)
     max_parents: int = 6       # 检索后最多返回几个 parent 作为上下文
 
     # ---- 检索增强开关 ----
@@ -274,8 +274,8 @@ class Settings:
             embed_batch_size=int(_env("EMBED_BATCH_SIZE", "128")),
             parent_chunk_size=int(_env("PARENT_CHUNK_SIZE", "600")),
             parent_max_chunk_size=int(_env("PARENT_MAX_CHUNK_SIZE", "900")),
-            child_chunk_size=int(_env("CHILD_CHUNK_SIZE", "220")),
-            child_overlap=int(_env("CHILD_OVERLAP", "40")),
+            child_chunk_size=int(_env("CHILD_CHUNK_SIZE", "320")),
+            child_overlap=int(_env("CHILD_OVERLAP", "64")),
             max_parents=int(_env("MAX_PARENTS", "6")),
             query_expansion_enabled=_env("QUERY_EXPANSION_ENABLED", "1") == "1",
             expansion_multi_query=_env("EXPANSION_MULTI_QUERY", "1") == "1",
