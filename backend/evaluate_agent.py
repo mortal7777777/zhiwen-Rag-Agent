@@ -33,12 +33,36 @@ JUDGE_RUBRIC = """评分标准：
 
 
 def _load_judge_llm():
-    """裁判模型：当前对话供应商 + 低温 + 关闭思考（与标题模型同策略）。"""
+    """裁判模型：当前对话供应商 + 低温 + 关闭思考（与标题模型同策略）。
+
+    评测脚本是独立进程,必须先从 MySQL 加载设置页保存的覆盖值
+    (load_overrides),否则 chat_provider_config 只会读到环境变量,
+    设置页换过 key 后会拿旧 key 打评测,报 402 Insufficient Balance。
+    """
     from langchain_openai import ChatOpenAI
 
     from app.config import get_settings
-    from app.runtime_config import chat_provider_config, thinking_extra_body
+    from app.runtime_config import (
+        chat_provider_config,
+        load_overrides,
+        thinking_extra_body,
+    )
 
+    try:
+        from run import load_local_env
+
+        load_local_env()  # 独立进程先加载 backend/.env.local(MYSQL_URL 等)
+        import app.db.database as db_mod
+
+        db_mod.init_db()  # 初始化数据库连接(SessionLocal 由 init_db 赋值)
+        if db_mod.SessionLocal is not None:
+            s = db_mod.SessionLocal()
+            try:
+                load_overrides(s)
+            finally:
+                s.close()
+    except Exception:
+        pass
     cfg = chat_provider_config(get_settings()) or {}
     if not cfg.get("api_key"):
         raise RuntimeError("未配置对话模型 API Key，无法启动 judge（可用 --no-judge 跳过）")

@@ -30,7 +30,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from openai import OpenAI
 from ragas import EvaluationDataset, SingleTurnSample, evaluate
+from ragas.embeddings.base import Embeddings
 from ragas.llms import llm_factory
+# 注意:必须用 ragas.metrics(legacy)而非 ragas.metrics.collections——
+# 0.4.x 的 evaluate() 校验 isinstance(m, Metric),collections 里是 BaseMetric,
+# 会报 "All metrics must be initialised metric objects"(有 DeprecationWarning,无害)
 from ragas.metrics import (
     AnswerCorrectness,
     ContextPrecision,
@@ -50,20 +54,76 @@ def load_questions() -> list[dict]:
     return [q for q in data if q["category"] == "kb"]
 
 
-def load_judge():
+class ProjectEmbeddingsAdapter(Embeddings):
+    """把项目本地 BGE 嵌入包装成 ragas Embeddings（四个指标本身不需要嵌入，
+    但 evaluate() 会实例化默认嵌入器——DeepSeek 无嵌入端点且同步客户端
+    无法 aembed_text，用本地模型兜底，离线可用）。"""
+
+    def __init__(self, embeddings) -> None:
+        self._emb = embeddings
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._emb.embed_documents(list(texts))
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._emb.embed_query(text)
+
+    async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self.embed_documents(texts)
+
+    async def aembed_query(self, text: str) -> list[float]:
+        return self.embed_query(text)
+
+
+def load_embeddings():
+    """加载本地 BGE 嵌入（用于 ragas 的 embeddings 参数）。"""
     from app.config import get_settings
-    from app.runtime_config import get_providers
+    from app.rag.embeddings import LocalBGEEmbeddings
 
     settings = get_settings()
-    providers = get_providers(settings)
-    cfg = next((p for p in providers if p.get("id") == "deepseek"), None)
-    api_key = (cfg or {}).get("api_key") or os.environ.get("DEEPSEEK_API_KEY") or ""
+    return ProjectEmbeddingsAdapter(
+        LocalBGEEmbeddings(settings.embedding_model_dir)
+    )
+
+
+def load_judge():
+    """裁判模型：跟随当前激活的对话供应商（与主对话同一账户/余额）。
+    注意:runtime_config 的覆盖值(设置页保存的供应商/key)只在后端进程
+    启动时从 MySQL 加载;评测脚本是独立进程,必须自己先 load_overrides,
+    否则会回退到环境变量里的旧 key(常见坑:设置页换了新 key,评测仍打
+    旧账户报 402 Insufficient Balance)。"""
+    from app.config import get_settings
+    from app.runtime_config import chat_provider_config, load_overrides
+
+    try:
+        from run import load_local_env
+
+        load_local_env()  # 独立进程先加载 backend/.env.local(MYSQL_URL 等)
+        import app.db.database as db_mod
+
+        db_mod.init_db()  # 初始化数据库连接(SessionLocal 由 init_db 赋值)
+        if db_mod.SessionLocal is not None:
+            s = db_mod.SessionLocal()
+            try:
+                load_overrides(s)
+            finally:
+                s.close()
+    except Exception:
+        pass
+    cfg = chat_provider_config(get_settings()) or {}
+    api_key = (cfg.get("api_key") or "").strip()
+    base_url = (cfg.get("base_url") or "https://api.deepseek.com").strip()
+    model = (cfg.get("model") or "deepseek-v4-flash").strip()
+    if not api_key:
+        api_key = os.environ.get("DEEPSEEK_API_KEY") or ""
+    if not api_key:
+        raise RuntimeError("未配置对话模型 API Key，无法启动 judge")
     client = OpenAI(
         api_key=api_key,
-        base_url="https://api.deepseek.com",
+        base_url=base_url,
     )
     return llm_factory(
-        "deepseek-chat",
+        model,
         client=client,
         max_tokens=8192,
         temperature=0,
@@ -96,6 +156,7 @@ def main() -> None:
         kb = kb[: args.limit]
 
     judge = load_judge()
+    embeddings = load_embeddings()
     samples = []
     rows = []
     for q in kb:
@@ -133,7 +194,8 @@ def main() -> None:
     metrics = [Faithfulness(llm=judge)]
     if any(r["has_reference"] for r in rows):
         metrics += [
-            AnswerCorrectness(llm=judge),
+            # weights=[1.0, 0.0] = 纯事实性对比,不依赖语义相似度嵌入
+            AnswerCorrectness(llm=judge, weights=[1.0, 0.0]),
             ContextPrecision(llm=judge),
             ContextRecall(llm=judge),
         ]
@@ -152,6 +214,7 @@ def main() -> None:
         dataset,
         metrics=metrics,
         llm=judge,
+        embeddings=embeddings,
     )
     df = result.to_pandas()
     print(df.to_string(index=False))
@@ -160,7 +223,8 @@ def main() -> None:
         for name in metric_names:
             key = COLUMN_KEYS[name]
             value = mrow.get(key)
-            row[key] = None if value is None else float(value)
+            # pandas 缺失值是 float('nan') 而非 None,统一归一为 None
+            row[key] = None if value is None or (isinstance(value, float) and value != value) else float(value)
     with REPORT.open("a", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
