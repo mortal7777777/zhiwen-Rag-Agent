@@ -23,6 +23,24 @@ services:
       timeout: 5s
       retries: 30
 
+  searxng:
+    image: searxng/searxng:latest
+    environment:
+      # 国内网络可选:SEARXNG_PROXY=http://host.docker.internal:7890(走宿主机 Clash)
+      HTTP_PROXY: ${SEARXNG_PROXY:-}
+      HTTPS_PROXY: ${SEARXNG_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng-data:/etc/searxng
+    ports:
+      - "${SEARXNG_PORT:-8888}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
   mysql:
     image: mysql:8.0
     environment:
@@ -55,6 +73,8 @@ services:
       # 依赖服务
       MYSQL_URL: mysql+pymysql://root:${MYSQL_ROOT_PASSWORD:-ragassistant123}@mysql:3306/rag_assistant?charset=utf8mb4
       OPENSEARCH_URL: http://opensearch:9200
+      # 联网搜索:SearXNG 容器内网地址(compose 自带);provider 需设为 searxng
+      SEARXNG_BASE_URL: http://searxng:8888
       DATA_DIR: /data
       META_DIR: /meta
       # lite 模式：嵌入/重排走 OpenAI 兼容 API（如 SiliconFlow 免费档 bge-m3）
@@ -92,5 +112,6 @@ services:
 volumes:
   opensearch-data:
   mysql-data:
+  searxng-data:
   app-data:
   app-meta:

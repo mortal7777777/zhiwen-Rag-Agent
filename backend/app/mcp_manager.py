@@ -318,12 +318,21 @@ def make_mcp_tool(
                 "error": str(exc),
             }
 
+    # 快照类工具:完整内容已在工具输出中(仅截断版),模型无需再读快照文件
+    # (Playwright MCP 会把快照写到自己的目录,工作区内 read_file 读不到)
+    extra_hint = (
+        " 快照/页面内容已包含在本工具的输出中，直接使用输出即可，"
+        "不要再尝试读取快照文件。"
+        if tool_name == "browser_snapshot"
+        else ""
+    )
     return StructuredTool.from_function(
         func=_invoke,
         name=f"mcp_{tool_name}",
         description=(
             f"MCP 工具（服务器：{server.name}）：{description or tool_name}。"
             "当用户要求使用该能力、或任务需要该工具时调用。"
+            f"{extra_hint}"
         ),
         args_schema=_schema_to_model(input_schema),
     )

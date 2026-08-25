@@ -71,7 +71,15 @@ def update_settings(
     merged = save_overrides(db, updates or {}, settings=get_settings())
     agent.refresh()
     service.refresh()
-    return {"ok": True, "overrides": merged}
+    # 响应脱敏:providers 里的 api_key 只留后 4 位(与 GET 一致),
+    # 避免保存设置后响应把完整密钥明文带回浏览器/日志
+    masked = dict(merged)
+    if isinstance(masked.get("providers"), list):
+        masked["providers"] = [_mask_provider(p) for p in masked["providers"]]
+    for key in list(masked):
+        if key.endswith("api_key"):
+            masked[key] = mask_key(masked[key])
+    return {"ok": True, "overrides": masked}
 
 
 @router.get("/settings/models")
