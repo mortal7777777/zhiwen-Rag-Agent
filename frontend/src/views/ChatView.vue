@@ -1059,7 +1059,7 @@ async function loadSuggestions() {
     }))
   } catch {
     suggestions.value = [
-      { icon: Collection, text: '《示例书》的主要观点是什么？' },
+      { icon: Collection, text: '知识库里的文档主要讲了什么？' },
       { icon: MagicStick, text: '帮我写一封简洁的工作周报' },
       { icon: Position, text: '今天有什么值得关注的新闻？' },
     ]

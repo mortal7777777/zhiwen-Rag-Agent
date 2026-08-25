@@ -46,7 +46,7 @@ def _kb_question(service: RAGService, day_index: int) -> str:
             return f"知识库里的《{base}》主要讲了什么？"
     except Exception as exc:
         logger.warning("生成知识库建议失败：%s", exc)
-    return "帮我总结一下知识库里《示例书》的核心观点"
+    return "帮我总结一下知识库里文档的核心观点"
 
 
 def _news_question(agent: AgentService) -> str:
