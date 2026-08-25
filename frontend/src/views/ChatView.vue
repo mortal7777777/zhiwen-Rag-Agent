@@ -1153,9 +1153,16 @@ async function decidePermission(p, optionIndex) {
   }
 }
 
-/** 待审批的请求：当前消息里第一个 pending 卡片 */
+/** 待审批的请求：当前查看会话的消息里第一个 pending 卡片。
+ * 不能用 streamMsg（它是"最近一次发送"的流）：并行会话时用户在 A 会话
+ * 看审批卡，键盘快捷会落到 B 会话的流上甚至失效；按会话扫描才对。 */
 function pendingPermission() {
-  return (streamMsg?.permissions || []).find((p) => p.status === 'pending') || null
+  if (!messages.value) return null
+  for (const msg of messages.value) {
+    const p = (msg.permissions || []).find((x) => x.status === 'pending')
+    if (p) return p
+  }
+  return null
 }
 
 /** 跳到审批选项卡：焦点移入卡片，方便用 ↑↓/数字/Enter 操作 */
