@@ -128,7 +128,7 @@ class Settings:
     # ---- 检索参数 ----
     recall_k: int = 60       # 每路检索器各取前 N 条（2026-08:40→60 提升召回候选）
     candidate_pool: int = 32 # 每路 RRF 融合后送重排序的候选数（2026-08:24→32）
-    rerank_top_k: int = 4    # 精排后最终保留条数
+    rerank_top_k: int = 6    # 精排后最终保留条数（2026-08:4→6,多跳题第二篇文档更稳进上下文）
 
     # ---- 切分参数（Parent-Child）----
     # 实验结论：递归切分 8% 的块能落在句子边界；按段落分组约 47%。
@@ -137,7 +137,7 @@ class Settings:
     parent_max_chunk_size: int = 900
     child_chunk_size: int = 320   # 2026-08:220→320,避免概念被切散(低 recall 根因之一)
     child_overlap: int = 64       # 2026-08:40→64(约 20% 重叠,覆盖切分边界信息)
-    max_parents: int = 6       # 检索后最多返回几个 parent 作为上下文
+    max_parents: int = 10      # 检索后最多返回几个 parent 作为上下文（2026-08:6→10,增大 rerank 选择面）
 
     # ---- 检索增强开关 ----
     query_expansion_enabled: bool = True  # 总开关：是否启用查询扩展
@@ -276,7 +276,7 @@ class Settings:
             parent_max_chunk_size=int(_env("PARENT_MAX_CHUNK_SIZE", "900")),
             child_chunk_size=int(_env("CHILD_CHUNK_SIZE", "320")),
             child_overlap=int(_env("CHILD_OVERLAP", "64")),
-            max_parents=int(_env("MAX_PARENTS", "6")),
+            max_parents=int(_env("MAX_PARENTS", "10")),
             query_expansion_enabled=_env("QUERY_EXPANSION_ENABLED", "1") == "1",
             expansion_multi_query=_env("EXPANSION_MULTI_QUERY", "1") == "1",
             expansion_hyde=_env("EXPANSION_HYDE", "1") == "1",

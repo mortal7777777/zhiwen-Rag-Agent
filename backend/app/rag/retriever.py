@@ -52,6 +52,10 @@ def merge_query_results(
 
     每个查询内部已经做过 kNN+BM25 的 RRF，这里按"查询内排名"再融合一次，
     让多个角度的查询都能贡献候选，同时抑制单个查询的噪声。
+
+    2026-08 加 source 保底分流：融合后按来源轮流取候选，避免同一本书的
+    多格式（如示例选集 epub+pdf）垄断整个候选池，把多跳题第二篇文档的内容
+    挤出候选（l2-kb-006 recall=0 根因之一）。
     """
     merged: dict[str, dict] = {}
     for docs in query_results:
@@ -59,11 +63,29 @@ def merge_query_results(
             item = merged.setdefault(doc.page_content, {"doc": doc, "rrf": 0.0})
             item["rrf"] += 1.0 / (RRF_K + rank)
     ranked = sorted(merged.values(), key=lambda item: item["rrf"], reverse=True)
+
+    # 按 source 分组后轮流取队首：单源题退化为纯 RRF 序，多源题保证每源必进
+    from collections import deque
+
+    buckets: dict[str, deque] = {}
+    for item in ranked:
+        src = item["doc"].metadata.get("source") or "?"
+        buckets.setdefault(src, deque()).append(item)
+
+    score_by_content = {item["doc"].page_content: item["rrf"] for item in ranked}
     result: list[Document] = []
-    for item in ranked[:limit]:
-        doc = item["doc"]
-        doc.metadata["query_merge_score"] = round(item["rrf"], 4)
-        result.append(doc)
+    pending = deque(buckets.keys())
+    while len(result) < limit and pending:
+        src = pending.popleft()
+        bucket = buckets[src]
+        if bucket:
+            doc = bucket.popleft()["doc"]
+            doc.metadata["query_merge_score"] = round(
+                score_by_content.get(doc.page_content, 0.0), 4
+            )
+            result.append(doc)
+            if bucket:
+                pending.append(src)
     return result
 
 

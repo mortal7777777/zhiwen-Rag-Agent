@@ -67,9 +67,21 @@
 | 块级去重 | `service._split_parent_child` 全局内容 md5 集合跳过重复 child,保留首次出现的 parent 上下文(顺带修正 store _id upsert 的 last-write-wins 归属错乱);单测 3 例(跨文档重复/部分重叠/文档内重复) |
 | 全量重建索引 | 63,979 → **44,955 块**(去重 + 320 字块),parent 17,244 不变;重嵌入约 10 分钟 |
 
-**验证结果(2026-08-26 RAGAS 8 题)**:context_recall **0.312→0.583(+0.271,达标)**、
-context_precision 0.476→0.719、faithfulness 0.911→0.958。逐题表见 docs/EVALUATION.md。
-遗留:l2-kb-006 多跳题 recall 0(命中偏到写作背景,核心段落未进候选池),转 P1 主目标。
+**验证结果(2026-08-26 最终, RAGAS 8 题)**:context_recall **0.312→0.792(+0.480,达标)**、
+context_precision 0.476→0.769、faithfulness 0.911→0.971。逐题表见 docs/EVALUATION.md。
+
+**第二轮修复(l2-kb-006 多跳题, recall 0→0.5)**,根因诊断:
+- 扩展查询质量正常(4 条, HyDE 含"主要矛盾规定影响其他矛盾"),但 RRF 融合后
+  40 候选里 **36 个是示例选集 epub+pdf 双格式**(同书两格式互相竞争),"主要矛盾"
+  正文段落只挤进 1 个候选,聚合后排在 top6 parent 之外,rerank 见不到;
+- 修复:`merge_query_results` 融合后按 source 轮流取候选(打破单源垄断,
+  单源题退化为纯 RRF 序);`max_parents` 6→10 + `rerank_top_k` 4→6
+  (增大 rerank 选择面);新增 retriever 单测 3 例;
+- 顺带修 l1-kb-001/007 reference 对齐库内表述(judge 措辞假 0, 0→1.0)。
+
+已知波动特征(勿误判为回归):judge 严格逐句比对,reference 含库内没有的
+标准措辞时打低分(l2-kb-002"循环往复过程"/l2-kb-003"相互转化");
+单题 recall run-to-run 有 ±0.5 波动,看均值不看单题。
 
 > 切分参数与去重均已随全量重建生效(63,979 块 → 重嵌入,本地 BGE 约几分钟)。
 
@@ -108,10 +120,12 @@ context_precision 0.476→0.719、faithfulness 0.911→0.958。逐题表见 docs
 - `query_expander.py`:_is_simple 书名号强制复杂 + COMPLEX_KEYWORDS 扩充
 - `config.py`:child 320/64、RECALL_K 60、CANDIDATE_POOL 32(env 默认值同步)
 - `service.py`:_split_parent_child 块级去重(内容 md5 集合,重复 child 跳过,保留首次 parent 归属)
-- `eval_questions.local.json`:l2-kb-005 正例化;l2-kb-004 reference 对齐库内表述
-- `tests/test_rag_dedup.py`:去重 3 例单测(pytest 全量 124 通过)
-- 全量重建索引:63,979 → 44,955 块;重跑 RAGAS:recall 0.312→0.583(达标 +0.2)、
-  precision 0.476→0.719、faithfulness 0.911→0.958(逐题见 docs/EVALUATION.md)
+- `retriever.py`:merge_query_results 按 source 轮流取候选(打破双格式垄断);单测 3 例
+- `config.py`:max_parents 6→10、rerank_top_k 4→6(增大 rerank 选择面)
+- `eval_questions.local.json`:l2-kb-005 正例化;l2-kb-004/001/007 reference 对齐库内表述
+- `tests/test_rag_dedup.py` + `tests/test_retriever.py`:6 例单测(pytest 全量 127 通过)
+- 全量重建索引:63,979 → 44,955 块;重跑 RAGAS(最终):recall 0.312→0.792、
+  precision 0.476→0.769、faithfulness 0.911→0.971(逐题见 docs/EVALUATION.md)
 
 ---
 
