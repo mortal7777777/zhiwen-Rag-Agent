@@ -4,7 +4,7 @@
 > [docs/AGENT_COMPARISON.md](docs/AGENT_COMPARISON.md)。
 
 前后端分离的个人知识库 + 智能助手：基于 **LangChain 框架**，Agent 编排层使用
-**LangGraph 状态图**（4 节点 + 条件路由）实现按需工具调用，支持个人知识库问答、
+**LangGraph 状态图**（7 节点 + 条件路由）实现按需工具调用，支持个人知识库问答、
 联网搜索、视觉识别、本机 Skills 复用、三层对话记忆（MySQL）、预设提示词模板、
 多供应商模型管理与可视化设置。
 
@@ -15,11 +15,12 @@
 
 ### Agent 编排（LangGraph）
 
-编排不是手工循环，而是显式状态图（见"架构设计"）：`prepare → agent → tools → (循环) → finalize`。
+编排不是手工循环，而是显式状态图（见"架构设计"）：
+`prepare → [dispatch → subagent → merge] → agent → tools → (循环) → finalize`。
 
 - 输入框上方开关控制：
   - **知识库检索** `knowledge_base_search`：复用完整 RAG 管道（查询扩展 + 混合检索 + Parent-Child + 本地重排），内置 CRAG 兜底；
-  - **联网搜索** `web_search`：provider 可插拔（DuckDuckGo 免 key / Tavily 需 key / 关闭）；
+  - **联网搜索** `web_search`：provider 可插拔（DuckDuckGo 免 key / Tavily 需 key / SearXNG 自托管 / 关闭）；
   - **识图** `image_to_text`：主模型无视觉时按需调用 SenseNova；
   - **技能检索** `skill_lookup`：按需取回本机已启用的 Skills 指令（结构化分节）。
 - 四种模式：**自动**（模型按需决定）/ **知识库** / **联网** / **不启用**（纯对话）；
@@ -40,10 +41,10 @@
   图路由会把任务推回 agent 继续执行（最多提示 3 次，超限或达调用上限才强制收尾）；
 - **可审计**：运行 trace（JSONL）记录每次运行的 todos 快照与 `plan_done_count`；
 - **计划-工具映射**：复杂问题先规划，每步解析建议工具，工具调用后回填"已完成 x/y 步、当前步骤、剩余步骤"；
-- 工具调用上限（默认 6 次），剩余最后一次时提示"补充检索后必须作答"，超限强制收尾；
+- 工具调用上限（默认 12 次，task_mode 30），剩余最后一次时提示"补充检索后必须作答"，超限强制收尾；
 - 空参数工具调用兜底（返回"参数缺失"，不浪费调用）；`recursion_limit` 超限时自动兜底收尾；
 - **停止生成**：客户端断开后后端感知并置停止信号，只保存问题、不落半截回答；
-- **打字机流式**：后端逐 token SSE，前端 28ms 节流 + 积压自适应加速，观感连续不拖沓；
+- **打字机流式**：后端逐 token SSE，前端 24ms 节流 + 积压自适应加速，观感连续不拖沓；
 - **SSE 心跳**：工具长执行（10~20s）时发送 `: keepalive` 注释行保活；
 - **标题后置**：新会话首 token 不被标题阻塞，后台生成后经 `title` 事件更新；
 - **引用溯源**：知识库/联网结果带全局 index，回答用 `[n]` 标注，前端可点击高亮来源卡片；
@@ -85,7 +86,8 @@
 - 命令白名单（如 `python, git status`）= **自动放行前缀**，命中无需确认；
   未命中命令在 `ask` 模式下仍弹窗批准。模式可切换为 `allow`（全自动批准，
   等价 Claude Code 的 `--dangerously-skip-permissions`，谨慎使用）；
-- 等待确认超时（默认 300s）自动取消，用户停止回答也会自动拒绝并收尾；
+- 等待确认超时默认 0 = 无限等待（类 Claude Code；`PERMISSION_TIMEOUT` 可配），
+  用户停止回答也会自动拒绝并收尾；
 - 安全边界：文件操作限制在 `tool_workspace`（默认项目根）内、拒绝路径穿越；
   命令带超时（默认 60s）与输出截断；删除不物理销毁，移入 `.agent_trash/` 可恢复；
   写文件使用原子写入（临时文件 + 替换），避免半截文件；
@@ -123,8 +125,9 @@
 
 ### RAG 检索质量
 
-- Parent-Child 切分：child（约 220 字，重叠 40）精确检索，parent（段落分组约 600 字）完整上下文；
-- 查询扩展：Multi-Query + HyDE + 多轮补全；**简单问题自动跳过扩展**（≤16 字、无复杂词、无指代）；
+- Parent-Child 切分：child（约 320 字，重叠 64）精确检索，parent（段落分组约 600 字）完整上下文；
+- 查询扩展：Multi-Query + HyDE + 多轮补全；**简单问题自动跳过扩展**（≤16 字、无复杂词、无指代；
+  含《》书名号的书名/篇名题强制扩展）；
 - 混合检索：kNN + BM25 → RRF 融合 → Small-to-Big 聚合 → 本地 bge-reranker 精排；
 - 支持 txt / md / csv / doc / docx / xlsx / pdf / epub；
 - 增量索引：文件没变直接复用，只新增只嵌入新文件，修改/删除才全量重建；
@@ -152,16 +155,17 @@
 
 ### 技能（Skills）
 
-- 扫描本机 **Codex / Claude / Hermes**（含 optional-skills）技能，去重后约 146 个；
+- 扫描本机 **Codex / Claude / Hermes**（含 optional-skills）技能，去重后数百个（随本机目录动态变化）；
 - 设置页支持搜索、**按功能筛选**（文档/写作/研究/效率/设计/编程/GitHub/数据/媒体/邮件）、来源筛选、
   启用开关与"从本助手移除"（只影响本助手，不修改其他 Agent 的文件）；
-- **自动注入**：每轮对话自动把"技能目录"注入系统提示词，并按当前问题关键词
-  匹配 Top 2 技能、注入清洗后的分节说明（When to Use / Prerequisites / Steps），
-  不需要模型先想起调用 `skill_lookup`；
+- **目录索引 + 按需加载（类 Anthropic Agent Skills）**：系统提示词常驻"技能目录"
+  （名字 + 一句话，内容经清洗防注入），模型认为需要某技能时主动调用
+  `skill_lookup` 工具取回全文；不再每轮自动注入匹配技能的全文——避免每轮
+  内容变化破坏 DeepSeek 前缀缓存；
 - Agent 的 `skill_lookup` 只检索已启用技能，返回 **分节目录**；
 - **防注入**：技能内容视为不可信参考数据，高风险指令行（覆盖指令、索要凭据、
   绕过审批、外传数据、破坏性命令）会被过滤替换，系统提示词中固化安全边界；
-- 默认精选手集 27 个（文档/写作/研究/设计/编程/数据），集成类（notion、
+- 默认精选手集 26 个（文档/写作/研究/设计/编程/数据），集成类（notion、
   google-workspace、github 全家桶等）默认关闭，可在设置页按需开启。
 
 ### 可观测性
@@ -201,10 +205,15 @@ START ──> prepare ──> agent ──> tools ──> agent ──> ...
                         │            ▲
                         └──有工具调用──┘   （循环，直到无工具调用 / 超限 / 停止）
                     无工具调用 / 停止 ──> finalize ──> END
+
+   prepare 有可拆子任务 ──> dispatch ──> subagent（Send 并行分支）──> merge ──> agent
 ```
 
 - **prepare**：会话/历史/滚动摘要、标题后台线程、计划（含工具映射）、KB 文档清单、
   记忆召回（GPU 锁内）、视觉识别、时间注入，组装分层消息与工具；广播 `session/plan/vision`。
+- **dispatch / subagent / merge**：计划里有多个"工具型步骤"时，dispatch 用 LangGraph `Send`
+  把每个步骤派给独立上下文的子代理（只读/检索类工具）并行执行，merge 合并各分支
+  结论摘要、来源重编号并同步任务清单；
 - **agent**：LLM 并发锁内流式生成（token 聚合），有 `tool_calls` 走 tools，否则收尾。
 - **tools**：执行工具、回填 `ToolMessage`、注入计划进度、检查调用上限、空参数兜底；广播 `tool_start/tool_result`。
 - **finalize**：来源去重、联网附录、持久化消息、运行记录 + trace、标题事件、`done`。
@@ -242,7 +251,7 @@ rag_knowledge_base/
 │   │   │                            #        documents / memories / vision / settings / skills /
 │   │   │                            #        suggestions / runs
 │   │   ├── agent/
-│   │   │   ├── langgraph_agent.py   # LangGraph 编排（4 节点 + 条件路由）
+│   │   │   ├── langgraph_agent.py   # LangGraph 编排（7 节点 + 条件路由）
 │   │   │   ├── agent.py             # AgentService 基础（模型/上下文/视觉懒加载）
 │   │   │   ├── context.py           # 记忆/摘要/规划/上下文工程
 │   │   │   ├── tools.py             # @tool 工具（KB / Web / Vision / Skill）
@@ -337,7 +346,8 @@ npm run dev
 
 ## Docker 一键启动（推荐，开箱即用）
 
-> 不需要本机装 Python / Node / OpenSearch / MySQL：四个容器由 docker compose 拉起。
+> 不需要本机装 Python / Node / OpenSearch / MySQL：五个服务（opensearch / mysql /
+> backend / frontend+nginx / searxng）由 docker compose 拉起。
 > 所有密钥经 `.env` 注入，代码内无任何硬编码；`data/`、`opensearch_meta/`、MySQL 均用独立数据卷。
 
 ### lite 模式（默认，镜像最小）
@@ -403,7 +413,7 @@ AGENTS.md 加载链、`/clear` 清屏、`/help` 帮助；
 会话记录在目录内 `.myragagent_session.json`，`/resume` 列出最近 10 轮对话供选择，
 换目录即换上下文。
 
-项目级任务（如“完成整个项目”）会自动进入 task_mode：工具预算 6→24、
+项目级任务（如“完成整个项目”）会自动进入 task_mode：工具预算 12→30、
 失败上限 3→6；预算用尽时输出“进度汇报”并保留进度，回复“继续”即可接着做，
 而不是被硬停。
 
@@ -415,7 +425,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-当前 118 个用例覆盖：任务清单（播种/同步/跨轮刷新/模糊完成/修订/进度）、文件工具
+当前 127 个用例覆盖：任务清单（播种/同步/跨轮刷新/模糊完成/修订/进度）、文件工具
 安全边界与命令白名单、CUDA 降级逻辑、技能内容清洗、联网可信度标注、
 RAG 工具纯函数、CLI 交互（Ctrl+C/行编辑/审批弹窗）、文档文件服务、
 取消机制（run_id 注入 + 逐帧停流）、hooks 门禁、用户工具加载、
@@ -429,8 +439,10 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 - `backend/eval_questions.json`：14 题种子集（知识库/通用/联网/工具/安全/规划）；
 - `backend/evaluate_agent.py`：逐题调用 Agent 流式接口，记录延迟/工具/计划/
   token/状态到 `eval_report.jsonl`，改动前后对比可发现回归；
-- `backend/eval_ragas.py`：RAGAS `faithfulness` 基线（DeepSeek 裁判），
-  结果写入 `ragas_baseline.jsonl`（基线示例：kb-001 faithfulness=1.0）；
+- `backend/eval_ragas.py`：RAGAS 四指标基线（faithfulness / answer_correctness /
+  context_precision / context_recall，DeepSeek 裁判，8 道 KB 题），
+  结果写入 `ragas_baseline.jsonl`（2026-08-26 最新基线：context_recall 0.792 /
+  context_precision 0.769 / faithfulness 0.971 / answer_correctness 0.464）；
 - 评测方案与开源集建议（RAGAS / BEIR / C-MTEB / GAIA / AgentBench）见
   [docs/EVALUATION.md](docs/EVALUATION.md)。
 
@@ -447,11 +459,12 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 | `SENSENOVA_MODEL` | `sensenova-6.8-flash-lite` | 视觉模型名 |
 | `VISION_AUTO_DESCRIBE` / `VISION_MAX_IMAGES` | `1` / `6` | 自动识图开关 / 单次最多图片数 |
 | `MYSQL_URL` | `mysql+pymysql://root:@127.0.0.1:3306/rag_assistant?charset=utf8mb4` | MySQL 连接串 |
-| `WEB_SEARCH_PROVIDER` | `duckduckgo` | `duckduckgo` / `tavily` / `off` |
+| `WEB_SEARCH_PROVIDER` | `duckduckgo` | `duckduckgo` / `tavily` / `searxng` / `off` |
 | `TAVILY_API_KEY` | 空 | 使用 Tavily 时填写 |
 | `WEB_SEARCH_MAX_RESULTS` | `6` | 单次联网搜索结果条数 |
-| `AGENT_MAX_ITERATIONS` | `6` | 工具调用循环上限 |
-| `AGENT_TASK_MAX_ITERATIONS` | `24` | 项目级任务（task_mode）的工具调用上限 |
+| `SEARXNG_BASE_URL` / `SEARXNG_ENGINES` | `http://localhost:8888` / 空 | 自托管 SearXNG 地址 / 指定引擎（如 bing,baidu,sogou） |
+| `AGENT_MAX_ITERATIONS` | `12` | 工具调用循环上限（参考 Claude Code 单轮约 10 次） |
+| `AGENT_TASK_MAX_ITERATIONS` | `30` | 项目级任务（task_mode）的工具调用上限 |
 | `AGENT_TASK_MAX_FAILURES` | `6` | 项目级任务的连续失败上限 |
 | `TASK_MODE_DETECT` | `1` | 自动识别项目级任务并使用独立预算 |
 | `AGENT_SUBAGENTS_ENABLED` | `1` | Send 子代理并行总开关 |
@@ -461,7 +474,7 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 | `VERIFY_MAX_RETRIES` | `1` | 验证失败后允许模型继续修复并复验的次数，超过则要求如实说明 |
 | `CHECKPOINT_NATIVE_ENABLED` | `1` | LangGraph 原生 checkpointer（快照时间线） |
 | `AGENT_MAX_FAILURES` | `3` | 工具失败重试上限（失败不占迭代预算） |
-| `AGENT_RECURSION_LIMIT` | `30` | LangGraph 图执行最大步数 |
+| `AGENT_RECURSION_LIMIT` | `40` | LangGraph 图执行最大步数（超限友好收尾） |
 | `CHAT_TEMPERATURE` | `0.5` | 回答温度 |
 | `AGENT_TITLE_MODEL` | `deepseek-v4-flash` | 标题生成模型 |
 | `HISTORY_MAX_MESSAGES` | `60` | 历史消息软窗口条数 |
@@ -475,9 +488,9 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 | `CRAG_FALLBACK_ENABLED` / `CRAG_MIN_SCORE` | `1` / `0.45` | 知识库不足时补联网 |
 | `QUERY_EXPANSION_ENABLED` / `EXPANSION_*` | `1` | 查询扩展各开关（含简单问题自动跳过） |
 | `PARENT_CHUNK_SIZE` / `PARENT_MAX_CHUNK_SIZE` | `600` / `900` | Parent 切分参数 |
-| `CHILD_CHUNK_SIZE` / `CHILD_OVERLAP` | `220` / `40` | Child 切分参数 |
-| `MAX_PARENTS` | `6` | 返回给模型的 Parent 数量 |
-| `RECALL_K` / `CANDIDATE_POOL` / `RERANK_TOP_K` | `40` / `24` / `4` | 召回/融合/精排参数 |
+| `CHILD_CHUNK_SIZE` / `CHILD_OVERLAP` | `320` / `64` | Child 切分参数 |
+| `MAX_PARENTS` | `10` | 返回给模型的 Parent 数量 |
+| `RECALL_K` / `CANDIDATE_POOL` / `RERANK_TOP_K` | `60` / `32` / `6` | 召回/融合/精排参数 |
 | `PDF_LAYOUT_ENABLED` / `PDF_VISION_OCR_ENABLED` | `1` / `0` | 布局 PDF 解析 / 扫描件视觉 OCR |
 | `EMBEDDING_FP16` / `EMBED_BATCH_SIZE` | `1` / `128` | 嵌入精度 / 批大小 |
 | `MAX_CONCURRENCY` | `4` | GPU（检索/重排）并发上限 |
@@ -489,7 +502,7 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 | `COMMAND_SANDBOX` | `subprocess` | 命令执行环境：`subprocess`（本机）/ `docker`（容器沙箱） |
 | `SANDBOX_IMAGE` | `python:3.11-slim` | Docker 沙箱镜像 |
 | `TOOL_PERMISSION_MODE` | `ask` | 敏感操作确认：`ask`（每次确认）/ `allow`（自动批准） |
-| `PERMISSION_TIMEOUT` | `300` | 等待人工确认超时（秒），超时自动取消 |
+| `PERMISSION_TIMEOUT` | `0` | 等待人工确认超时（秒），0=无限等待（类 Claude Code），>0 超时自动取消 |
 | `OPENSEARCH_URL` / `OPENSEARCH_INDEX` | `http://localhost:9200` / `rag_knowledge_base_v2` | OpenSearch 地址 / 索引名 |
 | `DATA_DIR` / `META_DIR` | `rag_knowledge_base/data` / `opensearch_meta` | 文档目录 / 账本目录 |
 | `EMBEDDING_MODEL_DIR` / `RERANKER_CACHE_DIR` | `../local_models/...` | 本地模型目录 |
@@ -545,7 +558,7 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 - **长期记忆提取**：默认只对“≥400 字回答或显式‘记住’”的对话做提取
   （`MEMORY_AUTO_EXTRACT_MIN_CHARS` 可调），短问答不再每轮多花一次 LLM 调用；
 - **MySQL 未连接时自动降级**：普通对话仍可用，但会话记忆、模板、运行记录不可用（日志给出明确错误）；
-- 联网搜索默认 DuckDuckGo（免 key），国内网络可能需要代理；也可配置 Tavily；
+- 联网搜索默认 DuckDuckGo（免 key），国内网络可能需要代理；也可配置 Tavily 或自托管 SearXNG；
 - 问答必须配置对话模型 API Key（可在设置页添加/切换供应商）；知识库检索与重排序全程本地；
 - 首次运行或删除文件后会全量嵌入，耗时取决于文档量；上传新文件只做增量追加；
 - EPUB 本质是 ZIP 压缩包（XHTML 章节 + OPF 元数据），用 ebooklib + BeautifulSoup 按章节解析；

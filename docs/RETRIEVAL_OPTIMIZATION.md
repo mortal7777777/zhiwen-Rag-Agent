@@ -25,7 +25,7 @@
 | 环节 | 行业标准 | 本项目 | 评价 |
 |---|---|---|---|
 | 混合检索 + RRF | ✅ 标配 | kNN+BM25,RRF_K=60 | ✅ 对齐 |
-| 交叉编码 reranker | ✅ 标配 | bge-reranker-v2-m3,Top4 | ✅ 对齐 |
+| 交叉编码 reranker | ✅ 标配 | bge-reranker-v2-m3,Top6 | ✅ 对齐 |
 | Parent-Child | ✅ 高分策略 | child 320/64/parent 600 | ✅ 对齐(2026-08 已调参+去重) |
 | 查询扩展 | ✅ 进阶 | Multi-Query+HyDE+多轮补全+简单跳过 | ✅ 超前 |
 | CRAG 门控 | ✅ 进阶 | 相关度+开关双门控 | ✅ 超前 |

@@ -9,7 +9,7 @@
 > checkpoint、AGENTS.md 文件记忆）后续已全部落地：受控执行工具 + HITL 审批、
 > Docker 命令沙箱、MCP client（stdio / streamable HTTP）、自定义 SQLite
 > checkpoint + LangGraph 原生 checkpointer（时间线/回滚）、文件型项目记忆
-> 均已实现；Send 子代理并行、hooks、轨迹压缩、pytest（121 用例）+ pre-commit
+> 均已实现；Send 子代理并行、hooks、轨迹压缩、pytest（127 用例）+ pre-commit
 > 也已补齐。当前主要差距收窄为：CI（无定时自动跑门槛）、Langfuse 级 trace
 > 下钻、cron 自动化、ACP 桥（见 §4 标注）。
 
@@ -32,7 +32,7 @@
 | 编排 | LangGraph 状态图（prepare → dispatch/subagent/merge → agent ⇄ tools → finalize） | 内部循环 + 子代理（subagents） | 内部编排器 + skills 按需注入 | Agent 抽象 + toolsets + ACP 多后端复用 |
 | 状态/检查点 | AgentState + MySQL + SQLite checkpoint + LangGraph 原生 checkpointer（时间线审计/回滚） | checkpoint / 会话恢复 | session restore / checkpoint | hermes_state 可移植状态 |
 | 工具 | KB 检索 / 联网 / 识图 / skill_lookup + 文件/命令受控工具（HITL） | 文件编辑 / Shell / 浏览 / MCP / Git | 文件 / Shell / 浏览 / MCP / sandbox | 大量内置工具 + MCP 市场 + 外部 skills |
-| 技能 | 扫描本机 Codex/Claude/Hermes（146 个去重），启停/隐藏、结构化目录 | 无开放 skills 体系（内部子代理） | `~/.codex/skills` + 市场 + AGENTS.md | 80+ 内置 + 114 optional SKILL.md |
+| 技能 | 扫描本机 Codex/Claude/Hermes（数百个去重），启停/隐藏、结构化目录 | 无开放 skills 体系（内部子代理） | `~/.codex/skills` + 市场 + AGENTS.md | 80+ 内置 + 114 optional SKILL.md |
 | 记忆 | 三层：滚动摘要（软窗口）/ 分类长期事实 / 画像摘要，MySQL | CLAUDE.md（静态 + 自动维护的项目记忆） | AGENTS.md + 会话历史 | trajectory 压缩 + state 移植 + routines |
 | 上下文工程 | 软窗口双条件、模板差异化预算、记忆粗筛+语义召回、查询扩展判定 | 长任务上下文压缩、子任务隔离 | 上下文管理 + 多文件索引 | trajectory_compressor 中间态压缩 |
 | 并行 | Send 子代理并行（工具型步骤 fan-out 独立上下文） | subagents 并行子任务 | 并行任务（部分场景） | 多 agent / 多后端并行 |
@@ -128,9 +128,10 @@
 11. **无自动化/cron**：Hermes 有 routines，本项目没有定时任务。
 12. ~~**无 hooks/事件系统**~~ **已落地（2026-08-13）**：PreToolUse/PostToolUse
     用户脚本回调（deny 拦截 / additional_context 回填）。
-13. ~~**评测与 CI（2026-08-12 新增）**~~ **大部分落地**：pytest（121 用例）+
-    pre-commit + RAGAS 基线（faithfulness≈0.975）+ `scripts/regression_gate.py`
-    回归门槛（2026-08-16）；仍无定时 CI 自动跑门槛。
+13. ~~**评测与 CI（2026-08-12 新增）**~~ **大部分落地**：pytest（127 用例）+
+    pre-commit + RAGAS 四指标基线（faithfulness 0.971 / recall 0.792 /
+    precision 0.769，2026-08-26）+ `scripts/regression_gate.py`
+    回归门槛；仍无定时 CI 自动跑门槛。
 
 ## 5. 改进路线（剩余未落地项；~~删除线~~ = 已落地）
 
