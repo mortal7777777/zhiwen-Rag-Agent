@@ -29,18 +29,27 @@ function escapeHtml(text) {
     .replace(/"/g, '&quot;')
 }
 
-// 自定义代码块渲染：直接生成"语言标签 + 复制 + 在终端执行"的悬浮头部，
-// 由 marked renderer 产出，避免 v-html 整体替换导致 DOM 注入丢失
+// 自定义代码块渲染：直接生成"语言标签 + 复制 + 在终端执行（仅 shell 类语言）"的悬浮头部，
+// 由 marked renderer 产出，避免 v-html 整体替换导致 DOM 注入丢失。
+// 非 shell 代码块（python 示例/JSON/SQL 等）不显示执行按钮——它们不是
+// 可直接执行的命令，点了只会让 bash 报错。
+const SHELL_LANGS = new Set([
+  'bash', 'sh', 'shell', 'zsh', 'cmd', 'bat', 'powershell', 'ps1',
+  'console', 'terminal',
+])
 const codeRenderer = new marked.Renderer()
 codeRenderer.code = (token) => {
   const lang = token.lang || 'text'
   const text = token.text || ''
+  const runBtn = SHELL_LANGS.has(lang.toLowerCase())
+    ? '<button type="button" class="code-btn exec" data-code-run>在终端执行</button>'
+    : ''
   return (
     '<div class="code-block">' +
     '<div class="code-head">' +
     `<span class="code-lang">${escapeHtml(lang)}</span>` +
     '<button type="button" class="code-btn" data-code-copy>复制</button>' +
-    '<button type="button" class="code-btn exec" data-code-run>在终端执行</button>' +
+    runBtn +
     '</div>' +
     `<pre><code class="language-${escapeHtml(lang)}">${escapeHtml(text)}</code></pre>` +
     '</div>'

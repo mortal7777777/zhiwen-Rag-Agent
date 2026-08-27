@@ -134,8 +134,19 @@ def _run_command(
             errors="replace",
         )
         output = (proc.stdout or "") + (("\n[stderr] " + proc.stderr) if proc.stderr else "")
+        # "伪成功"盲区提示：exit=0 但 stdout/stderr 全空——命令很可能没按预期
+        # 执行（Windows git-bash 下引号转义、python -c 多行参数、cmd 语法
+        # cd /d 等），不提示的话模型会换写法无限重试直到撞图步数上限。
+        if proc.returncode == 0 and not proc.stdout and not proc.stderr:
+            summary = (
+                "命令执行完成（exit=0）但没有任何输出——命令可能没按预期执行："
+                "请检查引号转义、python -c 多行参数、路径写法（cd /d 是 cmd "
+                "语法，bash 里不适用）。"
+            )
+        else:
+            summary = f"命令执行完成（exit={proc.returncode}）"
         return {
-            "summary": f"命令执行完成（exit={proc.returncode}）",
+            "summary": summary,
             "exit_code": proc.returncode,
             "output": _truncate(output),
         }

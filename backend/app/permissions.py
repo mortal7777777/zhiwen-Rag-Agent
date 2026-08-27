@@ -131,12 +131,31 @@ def display_args(name: str, args: dict | None = None) -> dict:
     return {str(k): _preview(v, 120) for k, v in args.items()}
 
 
+# 常见命令前缀 → 一句话说明（审批卡"总结描述"；命令原文在内容区/参数区展示）
+_BASH_HINTS = {
+    "head": "查看文件开头", "tail": "查看文件末尾", "cat": "查看文件内容",
+    "ls": "列出目录内容", "dir": "列出目录内容", "grep": "搜索文本",
+    "find": "查找文件", "python": "执行 Python 代码", "python3": "执行 Python 代码",
+    "py": "执行 Python 代码", "cd": "切换目录", "mkdir": "创建目录",
+    "cp": "复制文件", "mv": "移动或重命名文件", "rm": "删除文件",
+    "echo": "输出文本", "curl": "发起网络请求", "ping": "测试网络连通性",
+    "git": "执行 git 操作", "pip": "安装或管理 Python 包",
+    "powershell": "执行 PowerShell 命令", "pwd": "查看当前目录",
+    "df": "查看磁盘空间", "du": "查看目录占用", "ps": "查看进程",
+    "systemctl": "管理系统服务", "nohup": "后台运行程序", "tar": "打包或解压文件",
+    "zip": "压缩文件", "unzip": "解压文件", "tree": "查看目录树",
+}
+
+
 def describe_tool_call(name: str, args: dict | None = None) -> str:
     """生成一句话操作描述，用于审批卡片与状态栏。"""
     args = args or {}
     path = str(args.get("path") or "")
     if name in ("bash", "command_tool"):
-        return f"执行命令：{str(args.get('command') or '')[:120]}"
+        command = str(args.get("command") or "")
+        first = command.strip().split()[0].lower() if command.strip() else ""
+        hint = _BASH_HINTS.get(first, "执行命令")
+        return f"{hint}（{first or '?'}）"
     if name == "write_file":
         return f"写入文件 {path}（{len(str(args.get('content') or ''))} 字符）"
     if name == "edit_file":

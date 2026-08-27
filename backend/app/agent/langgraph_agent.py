@@ -3151,6 +3151,18 @@ class LangGraphAgentService(AgentService):
                 logger.exception("LangGraph Agent 执行失败")
                 runtime["status"] = "error"
                 runtime["error"] = str(exc)
+                # 图步数上限（Recursion limit）友好兜底：README 承诺"超限也有
+                # 最终回答"，裸报错体验差。工具轮多（含"伪成功"重试）时会触发，
+                # 给出进度汇报式收尾而非只有 error 消息（checkpoint 已保存，
+                # 回复"继续"可接着做）。
+                if "Recursion limit" in str(exc) and not runtime.get("final_text"):
+                    msg = (
+                        "任务执行步骤过多，已触发图步数上限自动停止。"
+                        "已完成的内容已保留；回复“继续”可以接着做。"
+                    )
+                    runtime["final_text"] = msg
+                    if bus is not None:
+                        bus.emit("token", msg)
                 queue.put({"event": "error", "data": {"message": str(exc)}})
                 try:
                     # 超限/异常兜底：保证有 done 事件与运行记录

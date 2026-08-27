@@ -75,12 +75,12 @@ class Settings:
     searxng_engines: str = ""  # 逗号分隔指定引擎（如 bing,baidu,sogou）；空=实例默认
 
     # ---- Agent 参数 ----
-    agent_max_iterations: int = 6       # ReAct 循环最大轮数（工具调用次数上限）
+    agent_max_iterations: int = 12      # ReAct 循环最大轮数（2026-08:6→12，参考 Claude Code 单轮约 10 次）
     agent_max_failures: int = 3         # 工具连续失败重试上限（失败不占迭代预算，超过则强制收尾）
-    agent_task_max_iterations: int = 24  # 项目级任务（task_mode）的工具调用上限
+    agent_task_max_iterations: int = 30  # 项目级任务（task_mode）的工具调用上限（2026-08:24→30）
     agent_task_max_failures: int = 6     # 项目级任务的连续失败上限
     task_mode_detect: bool = True        # 自动识别项目级任务并使用独立预算
-    agent_recursion_limit: int = 30     # LangGraph 图执行最大步数（超过则兜底收尾）
+    agent_recursion_limit: int = 40     # LangGraph 图执行最大步数（2026-08:30→40，给失败重试留余量，超过则兜底收尾）
     chat_temperature: float = 0.5       # 普通回答温度
     history_max_messages: int = 60      # 回传给模型的历史消息条数（软窗口，不足预算不压缩）
     agent_title_model: str = "deepseek-v4-flash"
@@ -236,12 +236,12 @@ class Settings:
             web_search_max_results=int(_env("WEB_SEARCH_MAX_RESULTS", "6")),
             searxng_base_url=_env("SEARXNG_BASE_URL", "http://localhost:8888"),
             searxng_engines=_env("SEARXNG_ENGINES", ""),
-            agent_max_iterations=int(_env("AGENT_MAX_ITERATIONS", "6")),
+            agent_max_iterations=int(_env("AGENT_MAX_ITERATIONS", "12")),
             agent_max_failures=int(_env("AGENT_MAX_FAILURES", "3")),
-            agent_task_max_iterations=int(_env("AGENT_TASK_MAX_ITERATIONS", "24")),
+            agent_task_max_iterations=int(_env("AGENT_TASK_MAX_ITERATIONS", "30")),
             agent_task_max_failures=int(_env("AGENT_TASK_MAX_FAILURES", "6")),
             task_mode_detect=_env("TASK_MODE_DETECT", "1") == "1",
-            agent_recursion_limit=int(_env("AGENT_RECURSION_LIMIT", "30")),
+            agent_recursion_limit=int(_env("AGENT_RECURSION_LIMIT", "40")),
             chat_temperature=float(_env("CHAT_TEMPERATURE", "0.5")),
             history_max_messages=int(_env("HISTORY_MAX_MESSAGES", "60")),
             agent_title_model=_env("AGENT_TITLE_MODEL", "deepseek-v4-flash"),
