@@ -37,7 +37,13 @@ class OpenSearchStore:
         self.index_name = index_name
         self.dimension = dimension
         # 测试环境 plugins.security.disabled=true，无需认证
-        self.client = httpx.Client(base_url=self.url, timeout=timeout)
+        # Accept-Encoding 不含 zstd：httpx 0.28 装了 zstandard 时会声明 zstd，
+        # 但没有 zstd 解码器，OpenSearch 回 zstd 响应时读 body 挂到超时
+        self.client = httpx.Client(
+            base_url=self.url,
+            timeout=timeout,
+            headers={"Accept-Encoding": "gzip, deflate"},
+        )
 
     # ---------- 基础操作 ----------
 

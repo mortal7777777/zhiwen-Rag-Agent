@@ -59,4 +59,12 @@ def make_httpx_client(**kwargs) -> httpx.Client:
     用法与 httpx.Client 一致（timeout 等参数透传）；
     回环/本地服务不需要代理，请直接用 httpx.Client。
     """
-    return httpx.Client(transport=ProxyFallbackTransport(), trust_env=False, **kwargs)
+    headers = dict(kwargs.pop("headers", None) or {})
+    # 同 rag/store.py：httpx 0.28 声明 zstd 但无解码器，远端回 zstd 时挂起
+    headers.setdefault("Accept-Encoding", "gzip, deflate")
+    return httpx.Client(
+        transport=ProxyFallbackTransport(),
+        trust_env=False,
+        headers=headers,
+        **kwargs,
+    )

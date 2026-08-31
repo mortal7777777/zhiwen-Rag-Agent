@@ -6,6 +6,7 @@ sentence-transformers>=3.0
 torch>=2.0
 langchain-core>=0.3
 langchain-community>=0.3
+chardet>=5.0,<6  # langchain-community 0.3 与 chardet 7.x API 不兼容
 langchain-openai>=0.2
 langchain-text-splitters>=0.3
 jieba>=0.42

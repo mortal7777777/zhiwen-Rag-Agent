@@ -163,7 +163,9 @@ class RAGService:
         return self._chat
 
     def refresh(self) -> None:
-        """设置变更后重置懒加载缓存（模型、查询扩展器、视觉客户端）。"""
+        """设置变更后重置懒加载缓存（嵌入/重排、模型、查询扩展器、视觉客户端）。"""
+        self._embeddings = None
+        self._reranker = None
         self._chat = None
         self._query_expander = None
         self._vision = None
