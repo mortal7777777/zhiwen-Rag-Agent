@@ -31,7 +31,7 @@ def load_project_memory(
     """按 CLAUDE.md 语义加载项目记忆：
 
     override_path 存在时（CLI 启动目录）：从该目录逐级向上找 AGENTS.md，
-    再追加用户级 ~/.myragagent/AGENTS.md；否则用项目根 AGENTS.md + 用户级。
+    再追加用户级 ~/.zhiwen/AGENTS.md；否则用项目根 AGENTS.md + 用户级。
     """
     paths: list[Path] = []
     if override_path:
@@ -50,7 +50,7 @@ def load_project_memory(
         default = project_memory_path(settings)
         if default.exists():
             paths.append(default)
-    user_global = Path.home() / ".myragagent" / "AGENTS.md"
+    user_global = Path.home() / ".zhiwen" / "AGENTS.md"
     if user_global.exists():
         paths.append(user_global)
 

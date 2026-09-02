@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class RAGService:
-    """个人知识库 RAG 智能助手的核心服务。"""
+    """知问 ZhiWen 的 RAG 核心服务。"""
 
     def __init__(self, settings: Settings):
         self.settings = settings

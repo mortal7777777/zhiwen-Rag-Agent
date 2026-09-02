@@ -20,7 +20,7 @@
       >
         <el-menu-item index="/">
           <el-icon :size="18"><ChatDotRound /></el-icon>
-          <template #title>智能助手</template>
+          <template #title>知问 ZhiWen</template>
         </el-menu-item>
         <el-menu-item index="/knowledge">
           <el-icon :size="18"><FolderOpened /></el-icon>

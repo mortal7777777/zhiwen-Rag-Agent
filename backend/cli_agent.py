@@ -10,7 +10,7 @@
 - 状态栏：会话 / 模式 / 模型 / 耗时 / tokens；
 - 键盘：↑/↓ 历史，Ctrl+C/Esc 打断，Ctrl+L 清屏，Ctrl+R 重发上一问，
   Ctrl+D 空输入退出，Tab 补全 / 命令，←/→ 光标；
-- 历史持久化到目录 .myragagent_history.json，会话到 .myragagent_session.json。
+- 历史持久化到目录 .zhiwen_history.json，会话到 .zhiwen_session.json。
 
 用法（先启动后端）：
     python cli_agent.py
@@ -1011,8 +1011,8 @@ def _clear_screen() -> None:
 
 # ------------------------------------------------------------------ 会话/历史
 
-SESSION_FILE = ".myragagent_session.json"
-HISTORY_FILE = ".myragagent_history.json"
+SESSION_FILE = ".zhiwen_session.json"
+HISTORY_FILE = ".zhiwen_history.json"
 
 
 def save_session(cwd: str, conversation_id: int) -> None:
@@ -1413,7 +1413,7 @@ def show_project_memory(cwd: str) -> None:
         if parent == d:
             break
         d = parent
-    user = os.path.join(os.path.expanduser("~"), ".myragagent", "AGENTS.md")
+    user = os.path.join(os.path.expanduser("~"), ".zhiwen", "AGENTS.md")
     if os.path.exists(user) and user not in seen:
         paths.append(user)
     if not paths:
@@ -1939,7 +1939,7 @@ def print_banner(model: str | None, tool_mode: str, has_agents: bool) -> None:
             f"模型 {model or '未知'} · 工具模式 {tool_mode}"
             + (" · 已加载 AGENTS.md" if has_agents else "")
         ],
-        "个人知识库 RAG 智能助手 · 终端版",
+        "知问 ZhiWen · 终端版",
         "cyan",
     )
     print(

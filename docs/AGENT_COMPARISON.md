@@ -1,6 +1,6 @@
 # 与主流 Agent 应用的对比与差距分析
 
-本文把本项目（个人知识库 RAG 智能助手）与三类主流 Agent 应用放在一起对比：
+本文把本项目（知问 ZhiWen）与三类主流 Agent 应用放在一起对比：
 **Claude Code**（Anthropic，终端编程 Agent）、**Codex**（OpenAI，编程/通用 Agent）、
 **Hermes**（Nous Research，开源 Agent 框架）。先对齐坐标系，再逐维度对比，
 最后给出客观的不足清单与改进路线。
@@ -107,7 +107,7 @@
 ### P1 · 记忆与可观测
 
 5. ~~**无文件型项目记忆**~~ **已落地（2026-08-13）**：AGENTS.md 逐级向上合并 +
-   用户级 `~/.myragagent/AGENTS.md`（类 CLAUDE.md）。
+   用户级 `~/.zhiwen/AGENTS.md`（类 CLAUDE.md）。
 6. ~~**上下文压缩无中间态**~~ **已落地**：长任务轨迹摘要压缩
    （`TRAJECTORY_COMPRESS_ENABLED`，默认开）+ `/compact` 与 Web「上下文」面板
    手动压缩 + `/context` 占用可视化。

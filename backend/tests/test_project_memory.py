@@ -9,8 +9,8 @@ from app.project_memory import load_project_memory
 
 def test_load_memory_walks_parents_and_user_global(tmp_path, monkeypatch):
     home = tmp_path / "home"
-    (home / ".myragagent").mkdir(parents=True)
-    (home / ".myragagent" / "AGENTS.md").write_text(
+    (home / ".zhiwen").mkdir(parents=True)
+    (home / ".zhiwen" / "AGENTS.md").write_text(
         "USER-GLOBAL", encoding="utf-8"
     )
     monkeypatch.setattr(Path, "home", lambda: home)

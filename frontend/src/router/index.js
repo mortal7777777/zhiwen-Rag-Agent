@@ -5,7 +5,7 @@ const routes = [
     path: '/',
     name: 'chat',
     component: () => import('../views/ChatView.vue'),
-    meta: { title: '智能助手' },
+    meta: { title: '知问 ZhiWen' },
   },
   {
     path: '/knowledge',

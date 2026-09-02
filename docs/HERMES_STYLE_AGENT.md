@@ -56,7 +56,7 @@ Claude Code / Codex / OpenCode 等本就支持 ACP 的客户端就能直接驱�
 | Web 前端 | ✅ Vue 3 + SSE（主题/打字机/设置面板/运行记录） |
 | 文件/命令工具 | ✅ `file_tool` / `command_tool`（白名单 + 超时 + 确认） |
 | 技能 | ✅ 扫描 Codex/Claude/Hermes skills，结构化目录 |
-| 终端对话 | ✅ 完整 CLI（`myragagent` 命令）：/new /tools /todos /memory 等命令菜单、审批弹窗（数字键 1/2/3）、Markdown 渲染、Tab 补全、Ctrl+C 打断、历史持久化、按目录加载 AGENTS.md、task_mode |
+| 终端对话 | ✅ 完整 CLI（`zhiwen` 命令）：/new /tools /todos /memory 等命令菜单、审批弹窗（数字键 1/2/3）、Markdown 渲染、Tab 补全、Ctrl+C 打断、历史持久化、按目录加载 AGENTS.md、task_mode |
 | ACP 桥 | ❌ 无（不能用 Claude Code / Codex 客户端驱动本 agent） |
 | TUI | ⚠️ 终端 CLI 已类 TUI（prompt_toolkit），未上 Textual/Ink 框架 |
 | 桌面应用 | ❌ 无（未做 PWA/Tauri 打包） |

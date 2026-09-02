@@ -1,4 +1,4 @@
-# 个人知识库 RAG 智能助手（LangChain / LangGraph Agent）
+# 知问 ZhiWen（LangChain / LangGraph Agent）
 
 > 与主流 Agent 应用（Claude Code / Codex / Hermes）的架构与功能对比，见
 > [docs/AGENT_COMPARISON.md](docs/AGENT_COMPARISON.md)。
@@ -387,11 +387,11 @@ docker compose down -v    # 连同数据卷删除（会话、索引全部清空�
 ### 终端客户端（类 Claude CLI 体验）
 
 ```powershell
-# 任意终端直接输入（首次运行 scripts\install-myragagent.ps1 安装）
-myragagent --tool auto
+# 任意终端直接输入（首次运行 scripts\install-zhiwen.ps1 安装）
+zhiwen --tool auto
 ```
 
-安装后在任何 cmd / PowerShell 里敲 `myragagent` 即可启动（类似 `claude` 命令）；
+安装后在任何 cmd / PowerShell 里敲 `zhiwen` 即可启动（类似 `claude` 命令）；
 未安装时可用项目根的 `.\agent.ps1` 兜底。
 
 终端内命令：`/new` 新会话、`/tools auto|knowledge|web|none` 切换模式、
@@ -404,13 +404,13 @@ AGENTS.md 加载链、`/clear` 清屏、`/help` 帮助；
 
 **快捷键（类 Claude Code）**：`Ctrl+C`/`Esc` 即时打断生成（后端主动停止，
 已生成的部分保留）、`Ctrl+L` 清屏、`Ctrl+R` 重发上一问、`Ctrl+D` 空输入退出、
-`↑/↓` 历史（持久化到 `.myragagent_history.json`）、`←/→` 光标移动。
+`↑/↓` 历史（持久化到 `.zhiwen_history.json`）、`←/→` 光标移动。
 生成期间照样打字，内容会留到下一轮输入。
 
 **按目录记忆（类 CLAUDE.md）**：CLI 会把启动目录传给后端，自动加载该目录下的
 `AGENTS.md` 并逐级向上合并父目录的 `AGENTS.md`，最后追加用户级
-`~/.myragagent/AGENTS.md`（不存在时可用 `/init` 创建当前目录版本）；
-会话记录在目录内 `.myragagent_session.json`，`/resume` 列出最近 10 轮对话供选择，
+`~/.zhiwen/AGENTS.md`（不存在时可用 `/init` 创建当前目录版本）；
+会话记录在目录内 `.zhiwen_session.json`，`/resume` 列出最近 10 轮对话供选择，
 换目录即换上下文。
 
 项目级任务（如“完成整个项目”）会自动进入 task_mode：工具预算 12→30、

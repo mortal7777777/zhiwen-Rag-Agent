@@ -31,7 +31,7 @@ def _env_path(name: str, default: Path) -> Path:
 class Settings:
     """应用全局配置。"""
 
-    app_name: str = "个人知识库 RAG 智能助手"
+    app_name: str = "知问 ZhiWen"
     version: str = "1.0.0"
 
     # ---- 路径 ----
