@@ -15,7 +15,7 @@ backend/ragas_baseline.jsonl
 .git/pytest-tmp/
 .pytest_cache/
 backend/.playwright-mcp/
-.myragagent_session.json
+.zhiwen_session.json
 .env.local
 
 # 前端
@@ -37,7 +37,7 @@ backend/app/user_tools/*.py
 Thumbs.db
 
 # CLI 会话历史 / Agent 运行产物（含对话内容，勿上传）
-.myragagent_history.json
+.zhiwen_history.json
 .zcode/
 backend/app/agent/_persist_debug.txt
 backend/snap.md
