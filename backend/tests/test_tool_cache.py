@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from app.agent.langgraph_agent import (
-    _CACHEABLE_TOOLS,
-    _tool_cache_key,
-)
+from app.agent.utils import _CACHEABLE_TOOLS, _tool_cache_key
 
 # 副作用类工具：绝不进缓存集合
 _NON_CACHEABLE = {

@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from app.agent.langgraph_agent import (
-    _build_subagent_tasks,
+from app.agent.nodes.common import (
     _failure_limit,
     _is_project_task,
     _iteration_limit,
-    _pick_verify_command,
     _plan_hint,
+)
+from app.agent.nodes.subagent import (
+    _build_subagent_tasks,
     _remaining_needs_tools,
     _renumber_subagent_sources,
     _run_sensitive_subagent_tool,
-    _run_verify,
     _subagent_tools,
 )
+from app.agent.utils import _pick_verify_command, _run_verify
 
 
 class TaskSettings:
@@ -189,7 +190,6 @@ def test_run_verify_skips_unknown_ext(tmp_path):
 
 
 def test_run_verify_docker_translates_path(tmp_path, monkeypatch):
-    from app.agent import langgraph_agent as la
     import app.tools_extra as te
 
     f = tmp_path / "app.py"
@@ -206,7 +206,7 @@ def test_run_verify_docker_translates_path(tmp_path, monkeypatch):
     class S(VSettings):
         command_sandbox = "docker"
 
-    results = la._run_verify(S(), [str(f)])
+    results = _run_verify(S(), [str(f)])
     assert results and results[0]["exit_code"] == 0
     assert calls and "/workspace/app.py" in calls[0]
 
@@ -267,9 +267,9 @@ def test_tools_node_can_resolve_run_hooks():
     检查函数源码含局部导入，且模块级不依赖（保持与 _subagent_node 一致）。"""
     import inspect
 
-    from app.agent.langgraph_agent import _tools_node
+    from app.agent.nodes.tools import _tools_node
 
     src = inspect.getsource(_tools_node)
-    assert "from ..hooks import run_hooks" in src, (
+    assert "from ...hooks import run_hooks" in src, (
         "_tools_node 缺少 run_hooks 局部导入，工具调用会 NameError"
     )

@@ -314,7 +314,7 @@ def test_search_searxng_403_gives_actionable_hint(monkeypatch):
 
 # ---------------- 正文 XML 工具调用泄漏清理 ----------------
 
-from app.agent.langgraph_agent import _strip_xml_tool_tags
+from app.agent.utils import _strip_xml_tool_tags
 
 
 def test_strip_xml_tool_tags_removes_tool_call_markup():
@@ -394,7 +394,7 @@ def test_strip_xml_tool_tags_fullwidth_dsml_variant():
 
 
 def test_parse_xml_tool_calls_robust_variants():
-    from app.agent.langgraph_agent import _parse_xml_tool_calls
+    from app.agent.utils import _parse_xml_tool_calls
 
     # 全角竖线 + |DSML| 前缀变体（<｜DSML｜invoke>）同样能解析执行
     calls3 = _parse_xml_tool_calls(
@@ -431,7 +431,7 @@ def test_parse_xml_tool_calls_robust_variants():
 def test_tool_has_required_args_schema_aware():
     from pydantic import Field, create_model
 
-    from app.agent.langgraph_agent import _tool_has_required_args
+    from app.agent.utils import _tool_has_required_args
 
     class _StubTool:
         def __init__(self, schema):
@@ -488,7 +488,7 @@ def test_schema_to_model_honors_default_in_required():
     # default（服务端空参可用默认值），客户端不应按严格必填解析，
     # 否则 _tool_has_required_args 会误拦空参调用
     from app.mcp_manager import _schema_to_model
-    from app.agent.langgraph_agent import _tool_has_required_args
+    from app.agent.utils import _tool_has_required_args
 
     schema = {
         "type": "object",
@@ -527,7 +527,7 @@ def test_schema_to_model_honors_default_in_required():
 def test_tools_prefix_hash_stable_and_sensitive():
     from langchain_core.tools import tool
 
-    from app.agent.langgraph_agent import _tools_prefix_hash
+    from app.agent.utils import _tools_prefix_hash
 
     @tool
     def add(a: int, b: int) -> int:
