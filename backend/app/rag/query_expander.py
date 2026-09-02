@@ -140,7 +140,7 @@ class QueryExpander:
         q = question.strip()
         if len(q) > 16:
             return False
-        # 书名/篇名查询强制扩展:原查询常与库内表述错位(如"《示例书》的主要
+        # 书名/篇名查询强制扩展:原查询常与库内表述错位(如书名题"《某书》的主要
         # 观点是什么?"),Multi-Query 改写能补上"篇名+术语"角度,提高召回
         if "《" in q or "》" in q:
             return False

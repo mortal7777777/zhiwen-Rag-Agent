@@ -27,7 +27,7 @@ def test_single_source_preserves_rrf_order():
 
 def test_multi_source_round_robin_guarantees_each_source():
     """多来源：轮流取候选，每个来源必进候选池（双格式垄断被打破）。"""
-    # 模拟：示例选集 pdf 20 个高排位，epub 3 个低排位（双格式竞争场景）
+    # 模拟：同书双格式 pdf 20 个高排位、epub 3 个低排位（双格式竞争场景）
     ranked = _ranked(["pdf"] * 20 + ["epub"] * 3)
     docs = merge_query_results([ranked], limit=8)
     sources = [d.metadata["source"] for d in docs]

@@ -18,9 +18,9 @@ from app.config import get_settings  # noqa: E402
 from app.rag.service import RAGService  # noqa: E402
 
 QUESTIONS = [
-    "《示例书》的主要观点是什么？",
+    "某本书的主要观点是什么？",
     "什么是“实事求是”？",
-    "《示例书》中主要矛盾和次要矛盾的关系是什么？",
+    "某书中主次矛盾的关系是什么？",
 ]
 
 

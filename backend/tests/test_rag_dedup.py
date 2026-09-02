@@ -50,7 +50,7 @@ def test_partial_overlap_keeps_first_source():
 
 
 def test_duplicates_within_same_document_also_deduped():
-    """同一文档内重复段落同样被去重（示例书式反复出现的段落）。"""
+    """同一文档内重复段落同样被去重（同书内反复出现的段落）。"""
     seg = "反复出现的段落。" * 20  # ~200 字
     parents, children = _split({"book_a": f"{seg}\n\n{seg}"})
 
