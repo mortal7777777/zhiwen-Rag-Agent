@@ -23,24 +23,32 @@ COST_PER_MTOKENS = {"input_miss": 2.0, "input_hit": 0.5, "output": 8.0}
 @router.get("/runs/stats")
 def runs_stats(
     days: int = Query(default=7, ge=1, le=90),
+    period: str = Query(default="", pattern="^(today|3d|7d|all)?$"),
     db: Session = Depends(get_db),
 ) -> dict:
     """用量统计仪表盘：tokens / 缓存命中率 / 估算成本 / 延迟 + 每日趋势。
 
+    时间范围：period=today|3d|7d|all（自然日语义：today=今日 00:00 起，
+    3d/7d=含今天往前 N 天，all=全部）；period 为空时兼容旧 days 参数。
     成本按 deepseek-chat 量级单价估算（命中/未命中/输出分开计价），
     供观察趋势用，不是账单。
     """
-    since = datetime.now() - timedelta(days=days)
-    rows = (
-        db.execute(
-            select(AgentRun)
-            .where(AgentRun.created_at >= since)
-            .order_by(AgentRun.created_at.desc())
-            .limit(2000)
-        )
-        .scalars()
-        .all()
-    )
+    now = datetime.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "today":
+        since = today_start
+    elif period == "3d":
+        since = today_start - timedelta(days=2)
+    elif period == "7d":
+        since = today_start - timedelta(days=6)
+    elif period == "all":
+        since = None
+    else:
+        since = now - timedelta(days=days)
+    query = select(AgentRun).order_by(AgentRun.created_at.desc()).limit(2000)
+    if since is not None:
+        query = query.where(AgentRun.created_at >= since)
+    rows = db.execute(query).scalars().all()
     total = {
         "runs": len(rows),
         "ok_runs": 0,
@@ -69,21 +77,33 @@ def runs_stats(
         total["latency_ms"] += row.latency_ms or 0
         day = (row.created_at or datetime.now()).strftime("%m-%d")
         slot = daily.setdefault(
-            day, {"runs": 0, "input_tokens": 0, "output_tokens": 0, "cache_hit": 0}
+            day,
+            {
+                "runs": 0,
+                "ok_runs": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_hit": 0,
+                "cache_miss": 0,
+                "cost": 0.0,
+            },
         )
         slot["runs"] += 1
+        if row.status == "ok":
+            slot["ok_runs"] += 1
         slot["input_tokens"] += inp
         slot["output_tokens"] += out
         slot["cache_hit"] += hit
+        slot["cache_miss"] += miss
+        slot["cost"] += _estimate_cost(miss, hit, out)
 
     hit_all = total["cache_hit"] + total["cache_miss"]
-    cost = (
-        total["cache_miss"] / 1_000_000 * COST_PER_MTOKENS["input_miss"]
-        + total["cache_hit"] / 1_000_000 * COST_PER_MTOKENS["input_hit"]
-        + total["output_tokens"] / 1_000_000 * COST_PER_MTOKENS["output"]
+    cost = _estimate_cost(
+        total["cache_miss"], total["cache_hit"], total["output_tokens"]
     )
     return {
         "days": days,
+        "period": period or ("all" if since is None else f"{days}d"),
         **total,
         "avg_latency_ms": round(total["latency_ms"] / total["runs"]) if total["runs"] else 0,
         "ok_rate": round(total["ok_runs"] / total["runs"], 3) if total["runs"] else None,
@@ -92,6 +112,15 @@ def runs_stats(
         "cost_unit_note": "估算（deepseek-chat 量级单价，非账单）",
         "daily": [{"date": day, **stats} for day, stats in sorted(daily.items())],
     }
+
+
+def _estimate_cost(miss: float, hit: float, out: float) -> float:
+    """按 deepseek-chat 量级单价估算成本（元）。"""
+    return (
+        miss / 1_000_000 * COST_PER_MTOKENS["input_miss"]
+        + hit / 1_000_000 * COST_PER_MTOKENS["input_hit"]
+        + out / 1_000_000 * COST_PER_MTOKENS["output"]
+    )
 
 
 def _safe_json(raw) -> dict:

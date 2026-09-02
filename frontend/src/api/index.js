@@ -206,9 +206,12 @@ export const getDocumentMeta = () =>
 export const saveDocumentMeta = (payload) =>
   client.put('/documents/meta', payload).then((res) => res.data)
 
-/** 运行统计：tokens / 缓存命中率 / 估算成本 / 每日趋势 */
-export const getRunStats = (days = 7) =>
-  client.get('/runs/stats', { params: { days } }).then((res) => res.data)
+/** 运行统计：tokens / 缓存命中率 / 估算成本 / 每日趋势。
+ *  period: today|3d|7d|all（自然日）；不传则按 days 天 */
+export const getRunStats = (days = 7, period = '') =>
+  client
+    .get('/runs/stats', { params: period ? { period } : { days } })
+    .then((res) => res.data)
 
 // ---------------- 设置与技能 ----------------
 

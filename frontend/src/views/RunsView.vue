@@ -1,17 +1,28 @@
 <template>
   <div class="runs-page">
-    <!-- 用量统计卡：tokens / 估算成本 / 缓存命中率 / 每日趋势 -->
+    <!-- 用量统计卡：时间筛选 + 指标卡 + 图表（类 DeepSeek platform 用量页） -->
     <el-card v-if="stats" shadow="never" class="stats-card">
       <template #header>
         <div class="header-row">
-          <span class="card-title">用量统计（近 {{ stats.days }} 天）</span>
-          <el-button size="small" @click="load">刷新</el-button>
+          <span class="card-title">用量统计{{ periodLabel }}</span>
+          <div class="header-actions">
+            <el-radio-group v-model="period" size="small" @change="loadStats">
+              <el-radio-button value="today">今天</el-radio-button>
+              <el-radio-button value="3d">近 3 天</el-radio-button>
+              <el-radio-button value="7d">近 7 天</el-radio-button>
+              <el-radio-button value="all">全部</el-radio-button>
+            </el-radio-group>
+            <el-button size="small" @click="loadStats()">刷新</el-button>
+          </div>
         </div>
       </template>
       <div class="stats-grid">
-        <div class="stat-cell">
+        <div class="stat-cell stat-main">
           <div class="stat-value">{{ fmtTokens(stats.input_tokens + stats.output_tokens) }}</div>
-          <div class="stat-label">总 tokens（入 {{ fmtTokens(stats.input_tokens) }} / 出 {{ fmtTokens(stats.output_tokens) }}）</div>
+          <div class="stat-label">消耗 tokens</div>
+          <div class="stat-detail">
+            输入 {{ fmtTokens(stats.input_tokens) }} · 输出 {{ fmtTokens(stats.output_tokens) }}
+          </div>
         </div>
         <div class="stat-cell">
           <div class="stat-value">¥{{ stats.estimated_cost_yuan?.toFixed(2) ?? '0.00' }}</div>
@@ -22,25 +33,27 @@
             {{ stats.cache_hit_rate != null ? (stats.cache_hit_rate * 100).toFixed(0) + '%' : '-' }}
           </div>
           <div class="stat-label">缓存命中率</div>
+          <div class="stat-detail">
+            命中 {{ fmtTokens(stats.cache_hit) }} · 未命中 {{ fmtTokens(stats.cache_miss) }}
+          </div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-value">{{ stats.ok_rate != null ? (stats.ok_rate * 100).toFixed(0) + '%' : '-' }}</div>
+          <div class="stat-label">成功率（{{ stats.ok_runs }}/{{ stats.runs }}）</div>
         </div>
         <div class="stat-cell">
           <div class="stat-value">{{ formatMs(stats.avg_latency_ms) }}</div>
-          <div class="stat-label">平均耗时 · {{ stats.runs }} 次</div>
+          <div class="stat-label">平均耗时</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-value">{{ stats.runs }}</div>
+          <div class="stat-label">运行次数</div>
         </div>
       </div>
-      <!-- 每日 tokens 趋势（纯 CSS 条形） -->
-      <div v-if="stats.daily && stats.daily.length" class="daily-trend">
-        <div
-          v-for="d in stats.daily"
-          :key="d.date"
-          class="daily-col"
-          :title="`${d.date}：${d.runs} 次 · ${fmtTokens(d.input_tokens + d.output_tokens)} tokens`"
-        >
-          <div class="daily-bar-wrap">
-            <div class="daily-bar" :style="{ height: dailyBarPct(d) }" />
-          </div>
-          <div class="daily-label">{{ d.date }}</div>
-        </div>
+      <!-- 图表区：每日 token 趋势 / 成本与缓存命中率趋势 -->
+      <div v-if="stats.daily && stats.daily.length" class="charts-row">
+        <div ref="tokensChartEl" class="chart-box" />
+        <div ref="costChartEl" class="chart-box" />
       </div>
     </el-card>
 
@@ -189,8 +202,9 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import * as echarts from 'echarts'
 import { getRunTrace, getRunStats, listConversations, listRuns } from '../api'
 
 defineOptions({ name: 'RunsView' })
@@ -198,10 +212,18 @@ defineOptions({ name: 'RunsView' })
 const runs = ref([])
 const loading = ref(false)
 const stats = ref(null)
+const period = ref('7d')
 const detailVisible = ref(false)
 const detail = ref(null)
 const traceJson = ref('')
 const convTitles = ref({})
+const tokensChartEl = ref(null)
+const costChartEl = ref(null)
+let tokensChart = null
+let costChart = null
+
+const PERIOD_LABELS = { today: '（今日）', '3d': '（近 3 天）', '7d': '（近 7 天）', all: '（全部）' }
+const periodLabel = computed(() => PERIOD_LABELS[period.value] || '')
 
 function fmtTokens(n) {
   if (n == null) return '-'
@@ -210,13 +232,120 @@ function fmtTokens(n) {
   return String(n)
 }
 
-function dailyBarPct(d) {
-  const max = Math.max(
-    ...stats.value.daily.map((x) => x.input_tokens + x.output_tokens),
-    1,
-  )
-  const pct = ((d.input_tokens + d.output_tokens) / max) * 100
-  return `${Math.max(4, pct)}%`
+// ---------- 图表（echarts，DeepSeek platform 用量页风格） ----------
+
+function renderCharts() {
+  if (!stats.value?.daily?.length) return
+  const daily = stats.value.daily
+  const dates = daily.map((d) => d.date)
+  const input = daily.map((d) => d.input_tokens)
+  const output = daily.map((d) => d.output_tokens)
+  const totalTok = daily.map((d) => d.input_tokens + d.output_tokens)
+  const cost = daily.map((d) => Number((d.cost || 0).toFixed(3)))
+  const hitRate = daily.map((d) => {
+    const all = (d.cache_hit || 0) + (d.cache_miss || 0)
+    return all > 0 ? Number(((d.cache_hit / all) * 100).toFixed(1)) : null
+  })
+  const runsPerDay = daily.map((d) => d.runs)
+  const axis = { type: 'category', data: dates, axisLabel: { fontSize: 11 } }
+  const tooltip = { trigger: 'axis' }
+
+  if (tokensChartEl.value) {
+    tokensChart = tokensChart || echarts.init(tokensChartEl.value)
+    tokensChart.setOption(
+      {
+        tooltip: {
+          ...tooltip,
+          valueFormatter: (v) => (v == null ? '-' : `${fmtTokens(v)} tokens`),
+        },
+        legend: { top: 0, textStyle: { fontSize: 12 } },
+        grid: { left: 8, right: 8, top: 32, bottom: 4, containLabel: true },
+        xAxis: axis,
+        yAxis: { type: 'value', axisLabel: { formatter: (v) => fmtTokens(v) } },
+        series: [
+          {
+            name: '输入 tokens',
+            type: 'bar',
+            stack: 'total',
+            data: input,
+            itemStyle: { color: '#5470c6', opacity: 0.85 },
+          },
+          {
+            name: '输出 tokens',
+            type: 'bar',
+            stack: 'total',
+            data: output,
+            itemStyle: { color: '#91cc75', opacity: 0.9 },
+          },
+          {
+            name: '总消耗',
+            type: 'line',
+            smooth: true,
+            data: totalTok,
+            lineStyle: { width: 2, color: '#fac858' },
+            itemStyle: { color: '#fac858' },
+          },
+        ],
+      },
+      true,
+    )
+  }
+  if (costChartEl.value) {
+    costChart = costChart || echarts.init(costChartEl.value)
+    costChart.setOption(
+      {
+        tooltip: { trigger: 'axis' },
+        legend: { top: 0, textStyle: { fontSize: 12 } },
+        grid: { left: 8, right: 8, top: 32, bottom: 4, containLabel: true },
+        xAxis: axis,
+        yAxis: [
+          { type: 'value', name: '成本 ¥', nameTextStyle: { fontSize: 11 } },
+          {
+            type: 'value',
+            name: '命中率 %',
+            max: 100,
+            nameTextStyle: { fontSize: 11 },
+          },
+          { type: 'value', show: false },
+        ],
+        series: [
+          {
+            name: '估算成本（¥）',
+            type: 'bar',
+            data: cost,
+            itemStyle: { color: '#ee6666', opacity: 0.8 },
+            barMaxWidth: 22,
+          },
+          {
+            name: '缓存命中率',
+            type: 'line',
+            smooth: true,
+            yAxisIndex: 1,
+            connectNulls: true,
+            data: hitRate,
+            lineStyle: { width: 2, color: '#3ba272' },
+            itemStyle: { color: '#3ba272' },
+          },
+          {
+            name: '运行次数',
+            type: 'line',
+            smooth: true,
+            yAxisIndex: 2,
+            showSymbol: false,
+            data: runsPerDay,
+            lineStyle: { width: 1.5, type: 'dashed', color: '#999' },
+            itemStyle: { color: '#999' },
+          },
+        ],
+      },
+      true,
+    )
+  }
+}
+
+function onResize() {
+  tokensChart?.resize()
+  costChart?.resize()
 }
 
 // 分阶段耗时的展示顺序与中文名（token_usage.timings，旧数据无此字段则不显示）
@@ -293,13 +422,25 @@ function formatMs(ms) {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
+async function loadStats() {
+  if (!stats.value) return // 首次加载由 load() 统一拉取（含运行列表）
+  try {
+    const runStats = await getRunStats(7, period.value)
+    stats.value = runStats
+    await nextTick()
+    renderCharts()
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '统计加载失败')
+  }
+}
+
 async function load() {
   loading.value = true
   try {
     const [runList, convList, runStats] = await Promise.all([
       listRuns({ limit: 200 }),
       listConversations().catch(() => []),
-      getRunStats(7).catch(() => null),
+      getRunStats(7, period.value).catch(() => null),
     ])
     runs.value = runList
     stats.value = runStats
@@ -308,6 +449,8 @@ async function load() {
       map[c.id] = c.title || `会话 ${c.id}`
     }
     convTitles.value = map
+    await nextTick()
+    renderCharts()
   } catch (error) {
     ElMessage.error(error.response?.data?.detail || '加载失败')
   } finally {
@@ -333,7 +476,18 @@ async function showDetail(row) {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  window.addEventListener('resize', onResize)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onResize)
+  tokensChart?.dispose()
+  costChart?.dispose()
+  tokensChart = null
+  costChart = null
+})
 </script>
 
 <style scoped>
@@ -352,7 +506,7 @@ onMounted(load)
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
 }
 
@@ -360,11 +514,22 @@ onMounted(load)
   display: flex;
   flex-direction: column;
   gap: 3px;
+  padding: 10px 14px;
+  background: var(--bg-hover, rgba(128, 128, 128, 0.06));
+  border-radius: 12px;
+}
+
+.stat-main {
+  background: linear-gradient(
+    135deg,
+    rgba(64, 158, 255, 0.12),
+    rgba(64, 158, 255, 0.03)
+  );
 }
 
 .stat-value {
-  font-size: 22px;
-  font-weight: 600;
+  font-size: 24px;
+  font-weight: 700;
   color: var(--text-1);
   font-variant-numeric: tabular-nums;
 }
@@ -374,41 +539,28 @@ onMounted(load)
   color: var(--text-3);
 }
 
-.daily-trend {
-  display: flex;
-  align-items: flex-end;
-  gap: 10px;
-  margin-top: 14px;
-  height: 64px;
-}
-
-.daily-col {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-}
-
-.daily-bar-wrap {
-  height: 44px;
-  display: flex;
-  align-items: flex-end;
-  width: 100%;
-}
-
-.daily-bar {
-  width: 100%;
-  max-width: 36px;
-  border-radius: 4px 4px 0 0;
-  background: linear-gradient(180deg, var(--el-color-primary, #409eff), rgba(64, 158, 255, 0.35));
-}
-
-.daily-label {
-  font-size: 11px;
+.stat-detail {
+  font-size: 11.5px;
   color: var(--text-3);
-  white-space: nowrap;
+  margin-top: 2px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.charts-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.chart-box {
+  height: 240px;
+  width: 100%;
 }
 
 .runs-card :deep(.el-card) {
