@@ -108,7 +108,10 @@ def preview_document(
     suffix = target.suffix.lower()
     try:
         if suffix in TEXT_SUFFIXES:
-            content = target.read_text(encoding="utf-8", errors="ignore")
+            # GBK/GB18030 中文书按 utf-8 读会乱码（errors=ignore 丢字节）
+            from ..rag.loader import read_text_robust
+
+            content = read_text_robust(target)
             kind = "markdown" if suffix in (".md", ".markdown") else "text"
         else:
             # 复用索引加载器提取文本（pdf 不走布局模式，预览要快）

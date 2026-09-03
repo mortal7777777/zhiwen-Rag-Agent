@@ -16,12 +16,26 @@ from langchain_community.document_loaders import (
     CSVLoader,
     Docx2txtLoader,
     PyPDFLoader,
-    TextLoader,
 )
 from langchain_core.documents import Document
 
 TEXT_SUFFIXES = {".txt", ".md", ".markdown"}
 SUPPORTED_SUFFIXES = TEXT_SUFFIXES | {".csv", ".doc", ".docx", ".xlsx", ".pdf", ".epub"}
+
+# 文本类文件鲁棒解码：中文书籍常见 GBK/GB18030（langchain TextLoader 的
+# autodetect 只试 utf-8/16/32，GBK 会被按 utf-16 解出全乱码）
+_TEXT_ENCODINGS = ("utf-8", "gb18030", "utf-16", "latin-1")
+
+
+def read_text_robust(path: Path) -> str:
+    """按 utf-8 → gb18030 → utf-16 → latin-1 顺序尝试解码文本文件。"""
+    raw = path.read_bytes()
+    for enc in _TEXT_ENCODINGS:
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 def list_data_files(data_dir: Path) -> list[Path]:
@@ -91,9 +105,12 @@ def load_documents(
         suffix = file_path.suffix.lower()
         try:
             if suffix in TEXT_SUFFIXES:
-                loaded = TextLoader(
-                    str(file_path), encoding="utf-8", autodetect_encoding=True
-                ).load()
+                loaded = [
+                    Document(
+                        page_content=read_text_robust(file_path),
+                        metadata={"source": file_path.name},
+                    )
+                ]
             elif suffix == ".csv":
                 loaded = CSVLoader(str(file_path), encoding="utf-8").load()
             elif suffix == ".docx":
