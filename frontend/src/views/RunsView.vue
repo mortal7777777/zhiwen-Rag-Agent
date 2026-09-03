@@ -499,6 +499,17 @@ onBeforeUnmount(() => {
   gap: 16px;
 }
 
+/* 卡片不被 flex 压缩（对齐 KnowledgeView）：统计卡 + 运行列表各自完整
+   显示，内容高时页面整体滚动，而不是压缩卡片导致显示不全 */
+.runs-page > :deep(.el-card) {
+  flex-shrink: 0;
+}
+
+.runs-page :deep(.el-card) {
+  border-radius: 14px;
+  border: 1px solid var(--border);
+}
+
 /* 用量统计卡 */
 .stats-card {
   margin-bottom: 0;
