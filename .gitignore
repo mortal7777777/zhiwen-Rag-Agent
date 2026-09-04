@@ -71,3 +71,6 @@ backend/stability_test.py
 
 # full 模式离线 wheel（构建上下文用，不提交）
 torch_wheels/
+
+# 私人文档（面试笔记等，不进入公开仓库 / 源码包）
+docs/interview*

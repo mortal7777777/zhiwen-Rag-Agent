@@ -1,5 +1,8 @@
 # 知问 ZhiWen（LangChain / LangGraph Agent）
 
+> **Latest release: [v0.1.0](https://github.com/mortal7777777/zhiwen-Rag-Agent/releases)** —
+> 源码包（zip / tar.gz）可从 Releases 页面下载，不含数据、模型与私有文档。
+>
 > 与主流 Agent 应用（Claude Code / Codex / Hermes）的架构与功能对比，见
 > [docs/AGENT_COMPARISON.md](docs/AGENT_COMPARISON.md)。
 
