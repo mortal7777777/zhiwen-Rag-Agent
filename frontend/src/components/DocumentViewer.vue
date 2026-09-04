@@ -61,7 +61,7 @@
 // - 目录侧栏统一渲染（各查看器提供 getToc/jumpTo）；
 // - 定位优先级：引用定位（page/anchorText）→ 上次记住的位置；
 // - 位置记忆按相对路径存 localStorage，文档 mtime 变化即失效。
-import { computed, defineAsyncComponent, ref } from 'vue'
+import { computed, defineAsyncComponent, nextTick, ref } from 'vue'
 import { DArrowLeft, List } from '@element-plus/icons-vue'
 import { getDocumentFileUrl, listDocuments } from '../api'
 import TextViewer from './viewer/TextViewer.vue'
@@ -131,6 +131,7 @@ function open(path, loc = null) {
   activeId.value = ''
   activeInfo.value = null
   tocCollapsed.value = false
+  posSuppressUntil = 0
   visible.value = true
   mtimeWaiter = fetchMtime(path).then((m) => {
     mtime.value = m
@@ -147,6 +148,9 @@ async function onReady() {
   } catch {
     toc.value = []
   }
+  // 目录侧栏渲染会挤窄主区（如 236px），内容随之整版重排——
+  // 必须在侧栏生效后再做 rect 定位，否则定位目标按满宽布局计算、整体偏移
+  await nextTick()
   const remembered = loadPosition(relativePath.value, mtime.value)
   let located = false
   if (locator.value) {
@@ -157,7 +161,12 @@ async function onReady() {
     }
   }
   if (!located && remembered) viewer.applyPosition?.(remembered)
+  // 引用定位产生滚动时上报的位置会覆盖用户的阅读位置（下次打开便不是
+  // 上次读到哪），短窗口内抑制位置记忆写入；窗口过后由用户滚动照常记录
+  posSuppressUntil = located ? Date.now() + 1600 : 0
 }
+
+let posSuppressUntil = 0
 
 function onError(message) {
   // 各查看器内部已展示错误，这里仅保留钩子便于日后上报
@@ -165,6 +174,7 @@ function onError(message) {
 }
 
 function onPosition(pos) {
+  if (Date.now() < posSuppressUntil) return
   saver?.push(pos)
 }
 

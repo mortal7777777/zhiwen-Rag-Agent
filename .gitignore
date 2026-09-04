@@ -68,3 +68,6 @@ backend/http_smoke.py
 backend/retrieval_summary.py
 backend/rewrite_demo.py
 backend/stability_test.py
+
+# full 模式离线 wheel（构建上下文用，不提交）
+torch_wheels/

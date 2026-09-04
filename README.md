@@ -374,6 +374,14 @@ docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
 无 GPU 时也可用（自动 CPU 推理）；GPU 直通依赖 Docker Desktop 的 WSL2 + NVIDIA 驱动。
 lite/full 切换后若提示索引维度冲突（768 vs 1024），`docker compose down -v` 清卷重来。
 
+> **镜像分层**：基础依赖与 torch 层（full 深度学习栈）分开构建，lite↔full 切换不会触
+> 发重装；torch 套件较大（约 3.6GB），构建时从 `PIP_INDEX_URL` 拉取，网络不佳可先运行
+> `bash scripts/download_torch_wheels.sh` 预下载 wheel 到 `torch_wheels/`（已 gitignore，
+> 构建时作为离线兜底）。
+> **务必用上面的完整命令启动 full**：裸 `docker compose up -d --build` 会以 lite 重构建，
+> 覆盖 `latest` 镜像标签（此前 10GB 的 full 镜像即因此被顶掉后遭清理）。
+> 切换回 lite 同样只需换回默认命令，镜像已拆层不会重复下载。
+
 ### 停止与清理
 
 ```bash
