@@ -46,7 +46,9 @@ class Settings:
 
     # ---- OpenSearch ----
     opensearch_url: str = "http://localhost:9200"
-    opensearch_index: str = "rag_knowledge_base_v2"
+    # 逻辑索引名（别名）：物理索引 = {该名}_{模型}_{维度}_v{schema}_{时间戳}，
+    # 全量重建走蓝绿切换，见 docs/INDEX_REDESIGN_PLAN.md
+    opensearch_index: str = "zhiwen_kb_current"
 
     # ---- 生成模型（DeepSeek，OpenAI 兼容接口）----
     deepseek_api_key: str = ""
@@ -170,7 +172,7 @@ class Settings:
     tool_permission_mode: str = "ask"     # ask=敏感操作人工确认；allow=自动批准（跳过确认）
     permission_timeout: int = 0           # 等待人工确认的超时（秒），0=无限等待（类 Claude Code 行为）
     skill_sandbox_enabled: bool = False   # 技能沙箱执行开关（默认关）
-    reasoning_summary_enabled: bool = True  # 最终作答前生成"思考摘要"（已深度思考折叠区）
+    reasoning_summary_enabled: bool = False  # 最终作答前生成"思考摘要"（已深度思考折叠区）；默认关闭
     project_memory_file: str = ""         # 文件型项目记忆（AGENTS.md）路径；空=项目根/AGENTS.md
     mcp_enabled: bool = True              # MCP 工具接入总开关
     checkpoint_enabled: bool = True       # 会话中断 checkpoint 恢复
@@ -214,7 +216,7 @@ class Settings:
             reranker_api_key=_env("RERANKER_API_KEY", ""),
             reranker_api_model=_env("RERANKER_API_MODEL", ""),
             opensearch_url=_env("OPENSEARCH_URL", "http://localhost:9200"),
-            opensearch_index=_env("OPENSEARCH_INDEX", "rag_knowledge_base_v2"),
+            opensearch_index=_env("OPENSEARCH_INDEX", "zhiwen_kb_current"),
             deepseek_api_key=_env("DEEPSEEK_API_KEY", ""),
             deepseek_base_url=_env("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             deepseek_model=_env("DEEPSEEK_MODEL", "deepseek-v4-flash"),
@@ -301,7 +303,7 @@ class Settings:
             tool_permission_mode=_env("TOOL_PERMISSION_MODE", "ask"),
             permission_timeout=int(_env("PERMISSION_TIMEOUT", "0")),
             skill_sandbox_enabled=_env("SKILL_SANDBOX_ENABLED", "0") == "1",
-            reasoning_summary_enabled=_env("REASONING_SUMMARY_ENABLED", "1") == "1",
+            reasoning_summary_enabled=_env("REASONING_SUMMARY_ENABLED", "0") == "1",
             project_memory_file=_env("PROJECT_MEMORY_FILE", ""),
             mcp_enabled=_env("MCP_ENABLED", "1") == "1",
             checkpoint_enabled=_env("CHECKPOINT_ENABLED", "1") == "1",

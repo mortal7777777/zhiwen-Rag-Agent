@@ -127,6 +127,9 @@ def load_judge():
         client=client,
         max_tokens=8192,
         temperature=0,
+        # 裁判关闭思考：v4 系列默认思考，思考 token 会吃满 max_tokens 导致
+        # 输出被截断（IncompleteOutputException → 指标写 None，实测 7/8 题失效）
+        extra_body={"thinking": {"type": "disabled"}},
     )
 
 

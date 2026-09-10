@@ -76,11 +76,12 @@ def main() -> int:
     if avg_ctx < args.min_contexts:
         failed.append(f"平均来源数 {avg_ctx:.1f} < 阈值 {args.min_contexts}")
     if failed:
-        print("✖ 回归门槛未通过：")
+        # 用 ASCII 标记：✔/✖（U+2714/U+2716）在 GBK 控制台会 UnicodeEncodeError
+        print("[FAIL] 回归门槛未通过：")
         for f in failed:
             print("   -", f)
         return 1
-    print("✔ 回归门槛通过")
+    print("[OK] 回归门槛通过")
     return 0
 
 

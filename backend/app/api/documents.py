@@ -201,7 +201,7 @@ def delete_document(
     relative_path: str,
     service: RAGService = Depends(get_service),
 ) -> list[dict]:
-    """删除知识库文件并重建索引（删除会影响旧向量，重建最稳妥）。"""
+    """删除知识库文件并移除其向量块（per-doc 增量维护，无需全量重建）。"""
     try:
         service.delete_document(relative_path)
         return service.list_documents()
@@ -215,7 +215,7 @@ def delete_document(
 
 @router.post("/index/rebuild", response_model=IndexStatus)
 def rebuild_index(service: RAGService = Depends(get_service)) -> dict:
-    """强制重建整个索引（删除旧索引后全量嵌入）。"""
+    """强制重建整个索引（蓝绿：写新物理索引 + 别名原子切换）。"""
     try:
         return service.rebuild_index()
     except Exception as exc:

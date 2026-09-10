@@ -25,7 +25,7 @@ from .query_expander import QueryExpander
 from .reranker import LocalReranker
 from .retriever import hybrid_search, merge_query_results, small_to_big
 from .splitter import build_parent_child_splitters
-from .store import OpenSearchStore
+from .store import IDX_SCHEMA_VERSION, OpenSearchStore, slugify
 from ..runtime_config import chat_provider_config, effective
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,8 @@ class RAGService:
         self._semaphore = threading.BoundedSemaphore(settings.max_concurrency)
         # LLM API 调用并发上限（生成阶段不占 GPU 锁，单独限流）
         self._llm_semaphore = threading.BoundedSemaphore(settings.llm_max_concurrency)
+        # 索引维护单写者锁：上传/删除/重建/检索触发的增量维护在此串行
+        self._index_lock = threading.RLock()
 
     # ============================================================
     # 懒加载组件
@@ -287,14 +289,23 @@ class RAGService:
     ) -> tuple[list[Document], list[Document]]:
         """把文档切成 parent（段落分组，上下文）和 child（小窗口，定位精度）。
 
-        跨文档块级去重：内容 md5 已见过的 child 直接跳过（重复段落主要来自
-        同一书内反复出现的段落），保留首次出现的 parent 上下文归属。
+        块级去重（作用域=单文件）：同一文件内重复的 child 只保留首次出现的一份。
+        跨文件重复保留各自副本——per-doc 删除要求删任一文件不牵连其他文件；
+        检索端的重复占坑由 source 分流接管（见 docs/INDEX_REDESIGN_PLAN.md §1.4）。
         """
         parents: list[Document] = []
         children: list[Document] = []
-        seen_child_md5: set[str] = set()
         skipped = 0
+        # 去重作用域 = 单文件（PDF 分页 / EPUB 分章节属于同一文件，共用去重集合）；
+        # 跨文件重复保留各自副本（per-doc 删除才互不牵连）
+        seen_by_file: dict[str, set[str]] = {}
         for document in documents:
+            file_key = str(
+                document.metadata.get("relative_path")
+                or document.metadata.get("source")
+                or ""
+            )
+            seen_child_md5 = seen_by_file.setdefault(file_key, set())
             for parent_text in self._parent_splitter.split_text(document.page_content):
                 parent_id = hashlib.md5(parent_text.encode("utf-8")).hexdigest()
                 parent_meta = dict(document.metadata)
@@ -317,91 +328,141 @@ class RAGService:
         return parents, children
 
     # ============================================================
-    # 索引构建
+    # 索引构建（per-doc 运维，见 docs/INDEX_REDESIGN_PLAN.md）
     # ============================================================
-    def ensure_index(self, force_rebuild: bool = False) -> OpenSearchStore:
-        """切分 -> 本地嵌入 -> 写入 OpenSearch，支持增量更新。
-
-        三种情况：
-          1. 文件都没变        -> 直接复用 OpenSearch 索引；
-          2. 只新增了文件      -> 只嵌入新文件并追加；
-          3. 有修改/删除/强制  -> 删除旧索引，全量重建。
-        """
-        self.settings.ensure_dirs()
-        store = self.store
-        store.ping()
-        file_fps = self._compute_file_fingerprints()
-
-        manifest: dict | None = None
-        if self._manifest_file().exists():
-            try:
-                manifest = json.loads(self._manifest_file().read_text(encoding="utf-8"))
-            except Exception:
-                manifest = None
-        old_fps = (manifest or {}).get("files", {})
-
-        # 情况 1：数据没变且索引存在 -> 直接复用
-        if (
-            not force_rebuild
-            and store.index_exists()
-            and old_fps
-            and file_fps == old_fps
-            and store.doc_count() > 0
-        ):
-            logger.info("命中 OpenSearch 索引缓存，直接复用")
-            return store
-
-        added = [k for k in file_fps if k not in old_fps]
-        changed = [k for k in old_fps if k in file_fps and old_fps[k] != file_fps[k]]
-        removed = [k for k in old_fps if k not in file_fps]
-        old_parents = self._load_parents()
-
-        # 情况 2：只有新增文件 -> 增量追加
-        if (
-            not force_rebuild
-            and store.index_exists()
-            and old_fps
-            and added
-            and not changed
-            and not removed
-            and old_parents is not None
-        ):
-            logger.info("检测到 %d 个新文件，增量嵌入并追加", len(added))
-            new_docs = load_documents(
-                self.settings.data_dir, set(added), **self._loader_kwargs()
-            )
-            new_parents, new_children = self._split_parent_child(new_docs)
-            store.bulk_index(
-                new_children,
-                self.embeddings,
-                batch_size=self.settings.embed_batch_size,
-            )
-            self._save_meta(
-                file_fps,
-                old_parents + new_parents,
-                child_count=store.doc_count(),
-            )
-            return store
-
-        # 情况 3：修改/删除/强制 -> 全量重建
-        if force_rebuild:
-            logger.info("强制重建索引")
-        elif store.index_exists():
-            logger.info(
-                "检测到 %d 个文件修改、%d 个文件删除，重建索引",
-                len(changed),
-                len(removed),
-            )
+    def _physical_base(self) -> str:
+        """当前配置对应的物理索引名前缀：{逻辑名}_{模型}_{维度}_v{schema}。"""
+        provider = str(effective(self.settings, "embedding_provider") or "local")
+        if provider == "api":
+            model = str(effective(self.settings, "embedding_api_model") or "api_embed")
         else:
-            logger.info("首次运行，创建索引")
-
-        if store.index_exists():
-            store.delete_index()
-        store.create_index()
-
-        documents = load_documents(
-            self.settings.data_dir, **self._loader_kwargs()
+            model = self.settings.embedding_model_dir.name
+        return (
+            f"{self.settings.opensearch_index}_{slugify(model)}"
+            f"_{self.embeddings.dimension}_v{IDX_SCHEMA_VERSION}"
         )
+
+    def _read_manifest(self) -> dict | None:
+        path = self._manifest_file()
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def ensure_index(self, force_rebuild: bool = False) -> OpenSearchStore:
+        """切分 -> 本地嵌入 -> 写入 OpenSearch（per-doc 增量 + 别名蓝绿重建）。
+
+        指纹 diff 驱动（docs/INDEX_REDESIGN_PLAN.md §1.5）：
+          1. 无变化            -> 直接复用；
+          2. 新增/修改/删除    -> 按文件粒度应用（删除零嵌入、修改只重嵌该文件）；
+          3. 首次/换模型/改切分/强制/账本缺失 -> 蓝绿全量重建（新物理索引 + 原子切别名）。
+        """
+        with self._index_lock:
+            self.settings.ensure_dirs()
+            store = self.store
+            store.ping()
+            file_fps = self._compute_file_fingerprints()
+            old_fps = (self._read_manifest() or {}).get("files", {})
+
+            write_index, via_alias = store.resolve()
+            base = self._physical_base()
+            managed = bool(write_index) and via_alias and write_index.startswith(base)
+
+            # 裸物理索引（旧脚本显式指定索引名）：保持历史行为，不做别名管理
+            if write_index and not via_alias:
+                return self._ensure_legacy(store, file_fps, old_fps, force_rebuild)
+
+            # 情况 1：指纹命中 -> 直接复用
+            if (
+                not force_rebuild
+                and managed
+                and old_fps
+                and file_fps == old_fps
+                and store.doc_count() > 0
+            ):
+                logger.info("命中 OpenSearch 索引缓存，直接复用")
+                return store
+
+            # 情况 2：全量重建（首次/别名缺失/换模型/改 schema/强制/账本缺失）
+            need_rebuild = force_rebuild or not managed
+            if not need_rebuild and not old_fps:
+                if not file_fps and store.doc_count() == 0:
+                    return store  # 空知识库是合法稳态（等待首次上传）
+                need_rebuild = True
+            if need_rebuild:
+                self._full_rebuild(store, file_fps)
+                return store
+
+            # 情况 3：增量（按文件 diff）
+            added = [k for k in file_fps if k not in old_fps]
+            changed = [k for k in old_fps if k in file_fps and old_fps[k] != file_fps[k]]
+            removed = [k for k in old_fps if k not in file_fps]
+            if added or changed or removed:
+                self._apply_incremental(store, file_fps, added, changed, removed)
+            return store
+
+    def _apply_incremental(
+        self,
+        store: OpenSearchStore,
+        file_fps: dict[str, str],
+        added: list[str],
+        changed: list[str],
+        removed: list[str],
+    ) -> None:
+        """按文件粒度应用差异：删/改先删旧块，增/改单独嵌入追加，最后同步账本。"""
+        parents = self._load_parents()
+        if parents is None:
+            logger.warning("parent 副本账本缺失，降级为全量重建")
+            self._full_rebuild(store, file_fps)
+            return
+
+        for rel in removed + changed:
+            deleted = store.delete_by_document(rel)
+            if deleted:
+                logger.info("已删除文件 %s 的 %d 个旧块", rel, deleted)
+            else:
+                logger.warning(
+                    "删除 %s 命中 0 块（若为旧版 schema 索引，请手动全量重建）", rel
+                )
+        dropped = set(removed) | set(changed)
+        if dropped:
+            parents = [
+                p
+                for p in parents
+                if str(p.metadata.get("relative_path") or "") not in dropped
+            ]
+
+        to_embed = added + changed
+        if to_embed:
+            docs = load_documents(
+                self.settings.data_dir, set(to_embed), **self._loader_kwargs()
+            )
+            new_parents, new_children = self._split_parent_child(docs)
+            logger.info(
+                "增量索引：%d 个新增/修改文件，%d 个块",
+                len(to_embed),
+                len(new_children),
+            )
+            if new_children:
+                store.bulk_index(
+                    new_children,
+                    self.embeddings,
+                    batch_size=self.settings.embed_batch_size,
+                )
+            parents.extend(new_parents)
+
+        self._save_meta(file_fps, parents, child_count=store.doc_count())
+
+    def _full_rebuild(
+        self,
+        store: OpenSearchStore,
+        file_fps: dict[str, str],
+        use_alias: bool = True,
+    ) -> None:
+        """全量重建。别名模式 = 蓝绿：写新物理索引 -> 原子切别名 -> 清理旧索引。"""
+        documents = load_documents(self.settings.data_dir, **self._loader_kwargs())
         if not documents:
             raise RuntimeError(
                 f"数据目录 {self.settings.data_dir} 没有可索引的文档，请先上传文件"
@@ -412,12 +473,67 @@ class RAGService:
             len(parents),
             len(children),
         )
-        store.bulk_index(
-            children,
-            self.embeddings,
-            batch_size=self.settings.embed_batch_size,
-        )
-        self._save_meta(file_fps, parents, child_count=len(children))
+        if use_alias:
+            base = self._physical_base()
+            physical = store.create_physical_index(
+                base, dimension=self.embeddings.dimension
+            )
+            try:
+                store.bulk_index(
+                    children,
+                    self.embeddings,
+                    batch_size=self.settings.embed_batch_size,
+                    target=physical,
+                )
+                store.swap_alias(physical, alias=self.settings.opensearch_index)
+            except Exception:
+                # 失败清理新索引，别名仍指向旧索引（不影响检索）
+                store.delete_index(physical)
+                raise
+            self._save_meta(file_fps, parents, child_count=len(children))
+            for old in store.list_physical_indices(base):
+                if old == physical:
+                    continue
+                try:
+                    store.delete_index(old)
+                    logger.info("已清理旧物理索引 %s", old)
+                except Exception as exc:
+                    logger.warning("清理旧物理索引 %s 失败：%s", old, exc)
+            logger.info(
+                "索引重建完成：别名 %s → %s",
+                self.settings.opensearch_index,
+                physical,
+            )
+        else:
+            if store.index_exists():
+                store.delete_index()
+            store.create_index(
+                self.settings.opensearch_index, dimension=self.embeddings.dimension
+            )
+            store.bulk_index(
+                children,
+                self.embeddings,
+                batch_size=self.settings.embed_batch_size,
+            )
+            self._save_meta(file_fps, parents, child_count=len(children))
+
+    def _ensure_legacy(
+        self,
+        store: OpenSearchStore,
+        file_fps: dict[str, str],
+        old_fps: dict[str, str],
+        force_rebuild: bool,
+    ) -> OpenSearchStore:
+        """裸物理索引（非别名）：保持历史语义——指纹命中复用，否则原地重建。"""
+        if (
+            not force_rebuild
+            and old_fps
+            and file_fps == old_fps
+            and store.doc_count() > 0
+        ):
+            return store
+        logger.info("索引 %s 为裸物理索引，原地全量重建", self.settings.opensearch_index)
+        self._full_rebuild(store, file_fps, use_alias=False)
         return store
 
     # ============================================================
@@ -539,7 +655,7 @@ class RAGService:
         return self.list_documents()
 
     def delete_document(self, relative_path: str) -> None:
-        """删除文件并重建索引（删除会影响旧向量，全量重建最稳妥）。"""
+        """删除文件并同步移除其向量块（per-doc：指纹 diff 驱动，无需全量重建）。"""
         data_dir = self.settings.data_dir.resolve()
         target = (data_dir / relative_path).resolve()
         if data_dir not in target.parents:
@@ -548,7 +664,7 @@ class RAGService:
             raise FileNotFoundError(f"文件不存在：{relative_path}")
         target.unlink()
         logger.info("已删除文件：%s", relative_path)
-        self.ensure_index(force_rebuild=True)
+        self.ensure_index()
 
     def rebuild_index(self) -> dict:
         """强制重建索引。"""
@@ -556,22 +672,20 @@ class RAGService:
         return self.index_status()
 
     def index_status(self) -> dict:
-        """返回索引状态：向量条数、文本块数、数据目录。"""
-        manifest: dict = {}
-        if self._manifest_file().exists():
-            try:
-                manifest = json.loads(self._manifest_file().read_text(encoding="utf-8"))
-            except Exception:
-                manifest = {}
+        """返回索引状态：向量条数、文本块数、数据目录、别名指向的物理索引。"""
+        manifest: dict = self._read_manifest() or {}
         error: str | None = None
         doc_count = 0
+        physical: str | None = None
         try:
             if self.store.index_exists():
+                physical = self.store.resolve_write_index()
                 doc_count = self.store.doc_count()
         except Exception as exc:
             error = str(exc)
         return {
             "index_name": self.settings.opensearch_index,
+            "physical_index": physical,
             "doc_count": doc_count,
             "chunk_count": manifest.get("child_count", 0),
             "parent_count": manifest.get("parent_count", 0),

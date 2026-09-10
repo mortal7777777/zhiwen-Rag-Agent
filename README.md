@@ -133,7 +133,9 @@
   含《》书名号的书名/篇名题强制扩展）；
 - 混合检索：kNN + BM25 → RRF 融合 → Small-to-Big 聚合 → 本地 bge-reranker 精排；
 - 支持 txt / md / csv / doc / docx / xlsx / pdf / epub；
-- 增量索引：文件没变直接复用，只新增只嵌入新文件，修改/删除才全量重建；
+- 增量索引（按文件粒度）：文件没变直接复用，新增/修改只嵌入该文件，删除秒级移除其向量块（零嵌入）；
+  全量重建仅首次运行/换嵌入模型/手动触发（蓝绿：新物理索引 + 别名原子切换，见
+  [docs/INDEX_REDESIGN_PLAN.md](docs/INDEX_REDESIGN_PLAN.md)）；
 - 布局感知 PDF 解析（PyMuPDF4LLM），可选扫描页视觉 OCR（需 SenseNova key）。
 - **CUDA 容错**：embedding / reranker 遇到 CUDA 异步错误（unknown error /
   illegal memory access / OOM）时自动降级到 CPU 完成本次检索，
@@ -296,7 +298,7 @@ rag_knowledge_base/
    plugins.security.disabled: true
    ```
 
-   本机安装路径：`D:\AI\新建文件夹 (3)\opensearch-3.5.0-windows-x64\opensearch-3.5.0`，
+   本机为 zip 解压安装（如 `D:\opensearch\opensearch-3.5.0`），
    启动方式：后台运行其 `bin\opensearch.bat`（不是 Docker 容器）。
 
 2. **MySQL** 已启动，能创建数据库/表（默认 `rag_assistant`，首次启动自动建库建表、写入内置模板）。
@@ -514,7 +516,7 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 | `SANDBOX_IMAGE` | `python:3.11-slim` | Docker 沙箱镜像 |
 | `TOOL_PERMISSION_MODE` | `ask` | 敏感操作确认：`ask`（每次确认）/ `allow`（自动批准） |
 | `PERMISSION_TIMEOUT` | `0` | 等待人工确认超时（秒），0=无限等待（类 Claude Code），>0 超时自动取消 |
-| `OPENSEARCH_URL` / `OPENSEARCH_INDEX` | `http://localhost:9200` / `rag_knowledge_base_v2` | OpenSearch 地址 / 索引名 |
+| `OPENSEARCH_URL` / `OPENSEARCH_INDEX` | `http://localhost:9200` / `zhiwen_kb_current` | OpenSearch 地址 / 索引逻辑名（别名；物理索引由服务自动管理，见 docs/INDEX_REDESIGN_PLAN.md） |
 | `DATA_DIR` / `META_DIR` | `rag_knowledge_base/data` / `opensearch_meta` | 文档目录 / 账本目录 |
 | `EMBEDDING_MODEL_DIR` / `RERANKER_CACHE_DIR` | `../local_models/...` | 本地模型目录 |
 | `CORS_ORIGINS` | `http://localhost:5173,...` | 前端跨域白名单 |
@@ -539,7 +541,7 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 | POST | `/api/memories/consolidate` | 手动整合整理记忆 |
 | GET | `/api/documents` | 知识库文档列表 |
 | POST | `/api/documents/upload` | 上传文档（multipart） |
-| DELETE | `/api/documents/{path}` | 删除文档并重建索引 |
+| DELETE | `/api/documents/{path}` | 删除文档并移除其向量块（per-doc，无需重建） |
 | POST/GET | `/api/index/rebuild` / `/api/index/status` | 重建索引 / 索引状态 |
 | GET/PUT | `/api/settings` | 读取（脱敏）/ 保存运行时配置（供应商、温度、联网、技能开关） |
 | GET/PUT | `/api/hooks` | 生命周期 hooks 配置（PreToolUse / PostToolUse 用户脚本回调） |
@@ -571,7 +573,8 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 - **MySQL 未连接时自动降级**：普通对话仍可用，但会话记忆、模板、运行记录不可用（日志给出明确错误）；
 - 联网搜索默认 DuckDuckGo（免 key），国内网络可能需要代理；也可配置 Tavily 或自托管 SearXNG；
 - 问答必须配置对话模型 API Key（可在设置页添加/切换供应商）；知识库检索与重排序全程本地；
-- 首次运行或删除文件后会全量嵌入，耗时取决于文档量；上传新文件只做增量追加；
+- 索引按文件粒度维护：上传/修改只嵌入该文件，删除秒级移除其向量块；
+  仅首次运行、换嵌入模型或手动重建时做全量（蓝绿切换，旧物理索引确认后可手动删除）；
 - EPUB 本质是 ZIP 压缩包（XHTML 章节 + OPF 元数据），用 ebooklib + BeautifulSoup 按章节解析；
 - 老式二进制 `.doc` 使用 `doc2txt`（内置 antiword）解析，失败时回退 `legacy-doc`；
 - 技能"移除"只影响本助手（skill_lookup 不再使用），不会修改其他 Agent 的技能文件。

@@ -61,6 +61,7 @@ class IndexStatus(BaseModel):
     """索引状态。"""
 
     index_name: str
+    physical_index: str | None = None
     doc_count: int = 0
     chunk_count: int = 0
     parent_count: int = 0

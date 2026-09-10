@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-os.environ.setdefault("OPENSEARCH_INDEX", "rag_knowledge_base_v2")
+os.environ.setdefault("OPENSEARCH_INDEX", "zhiwen_kb_current")
 
 from app.config import get_settings  # noqa: E402
 from app.rag.service import RAGService  # noqa: E402
