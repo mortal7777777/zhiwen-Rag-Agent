@@ -7,6 +7,7 @@ import time
 
 
 from ...config import Settings
+from ...runtime_config import effective
 
 logger = logging.getLogger(__name__)
 from ..state import AgentState, EventBus
@@ -66,7 +67,7 @@ def _agent_node(state: AgentState) -> dict:
     # 思考摘要前置：正文输出前先展示"已深度思考"（有工具调用历史时）
     if (
         state["tool_calls_used"] > 0
-        and settings.reasoning_summary_enabled
+        and effective(settings, "reasoning_summary_enabled", False)
         and not runtime.get("reasoning_emitted")
     ):
         runtime["reasoning_emitted"] = True

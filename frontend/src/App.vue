@@ -1033,7 +1033,7 @@ const toolsForm = ref({
   tool_permission_mode: 'ask',
   permission_timeout: 300,
   skill_sandbox_enabled: false,
-  reasoning_summary_enabled: true,
+  reasoning_summary_enabled: false,
   checkpoint_enabled: true,
   trajectory_compress_enabled: true,
   mcp_enabled: true,

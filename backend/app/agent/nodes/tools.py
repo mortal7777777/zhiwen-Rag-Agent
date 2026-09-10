@@ -63,7 +63,7 @@ def _tools_node(state: AgentState) -> dict:
 
     # 预生成"思考摘要"（后台线程）：与工具执行并行，
     # 工具通常耗时数秒，摘要利用这段时间完成，作答轮几乎零额外延迟
-    if settings.reasoning_summary_enabled:
+    if effective(settings, "reasoning_summary_enabled", False):
         try:
             evt = {"summary": None, "done": threading.Event()}
             runtime["_reasoning"] = evt
