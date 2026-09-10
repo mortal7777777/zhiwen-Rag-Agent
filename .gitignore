@@ -54,6 +54,9 @@ cache_verify.py
 final_verify.py
 verify_final.py
 
+# 本地 AI 助手记忆（含个人信息；保留在磁盘供 CLI 按目录加载，不入库）
+AGENTS.md
+
 # 本地开发向文档 / 一次性实验脚本（保留在磁盘，不入库）
 docs/PROJECT_HANDOFF.md
 docs/DEV_PITFALLS.md

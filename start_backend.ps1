@@ -1,10 +1,9 @@
 # 启动后端：python run.py（监听 127.0.0.1:8000）
+# MySQL 凭据由 run.py 从 backend/.env.local 读取（gitignored，不写死在脚本里）
 Set-Location (Join-Path $PSScriptRoot 'backend')
 
-# MySQL 对话记忆：未显式设置时使用本机默认凭据
-if (-not $env:MYSQL_URL) {
-    $env:MYSQL_URL = "mysql+pymysql://root:CHANGE_ME@127.0.0.1:3306/rag_assistant?charset=utf8mb4"
-    Write-Host "已自动设置 MYSQL_URL（root@127.0.0.1/rag_assistant）"
+if (-not (Test-Path (Join-Path $PSScriptRoot 'backend\.env.local'))) {
+    Write-Host "提示：未找到 backend\.env.local，MySQL 凭据将用默认值（可能连接失败）。"
 }
 
 # 视觉识别（可选）：日日新 SenseNova 多模态模型
