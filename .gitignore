@@ -12,6 +12,9 @@ backend/_*.py
 backend/eval_questions.local.json
 backend/eval_report.jsonl
 backend/ragas_baseline.jsonl
+backend/ragas_retrieval_cache.json
+backend/ragas_baselines.json
+backend/retrieval_annotations.json
 .git/pytest-tmp/
 .pytest_cache/
 backend/.playwright-mcp/
@@ -77,3 +80,6 @@ torch_wheels/
 
 # 私人文档（面试笔记等，不进入公开仓库 / 源码包）
 docs/interview*
+
+backend/cmrc2018_dev.json
+backend/cmrc2018_eval_result.jsonl
