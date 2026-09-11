@@ -299,22 +299,44 @@ class OpenSearchStore:
 
     # ---------- 检索 ----------
 
-    def search_vector(self, query_vector: list[float], k: int = 40) -> list[Document]:
-        """稠密检索：kNN 向量相似度（OpenSearch 3.x 新版 knn 查询语法）。"""
-        body = {
-            "query": {"knn": {"vector": {"vector": query_vector, "k": k}}},
-            "size": k,
-        }
+    def search_vector(
+        self,
+        query_vector: list[float],
+        k: int = 40,
+        filter_rel_path: str | None = None,
+    ) -> list[Document]:
+        """稠密检索：kNN 向量相似度（OpenSearch 3.x 新版 knn 查询语法）。
+
+        filter_rel_path：按文档相对路径过滤（S3′ 书内检索用，过滤在 kNN
+        图搜索内生效，保证 k 条结果都来自该书）。"""
+        knn = {"vector": query_vector, "k": k}
+        if filter_rel_path:
+            knn["filter"] = {"term": {"metadata_relative_path": filter_rel_path}}
+        body = {"query": {"knn": {"vector": knn}}, "size": k}
         data = self._request("POST", f"/{self.index_name}/_search", json=body)
         return [self._hit_to_doc(hit) for hit in data["hits"]["hits"]]
 
-    def search_bm25(self, query: str, k: int = 40) -> list[Document]:
+    def search_bm25(
+        self,
+        query: str,
+        k: int = 40,
+        filter_rel_path: str | None = None,
+    ) -> list[Document]:
         """稀疏检索：BM25 关键词匹配（jieba 分词后查 content_seg）。"""
         seg_query = " ".join(jieba_tokenize(query))
-        body = {
-            "query": {"match": {"content_seg": seg_query}},
-            "size": k,
-        }
+        match = {"match": {"content_seg": seg_query}}
+        if filter_rel_path:
+            query_body = {
+                "bool": {
+                    "must": [match],
+                    "filter": [
+                        {"term": {"metadata_relative_path": filter_rel_path}}
+                    ],
+                }
+            }
+        else:
+            query_body = match
+        body = {"query": query_body, "size": k}
         data = self._request("POST", f"/{self.index_name}/_search", json=body)
         return [self._hit_to_doc(hit) for hit in data["hits"]["hits"]]
 

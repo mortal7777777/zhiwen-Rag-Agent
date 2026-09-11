@@ -23,7 +23,20 @@ from .loader import SUPPORTED_SUFFIXES, list_data_files, load_documents
 from .llm import DeepSeekChat
 from .query_expander import QueryExpander
 from .reranker import LocalReranker
-from .retriever import hybrid_search, merge_query_results, small_to_big
+from .retriever import (
+    TITLE_RERANK_BONUS,
+    TOC_RERANK_PENALTY,
+    book_scoped_children,
+    ensure_parents,
+    extract_titles,
+    hybrid_search,
+    is_enumeration_question,
+    is_toc_like,
+    match_book_paths,
+    merge_query_results,
+    small_to_big,
+    title_matches_source,
+)
 from .splitter import build_parent_child_splitters
 from .store import IDX_SCHEMA_VERSION, OpenSearchStore, slugify
 from ..runtime_config import chat_provider_config, effective
@@ -155,13 +168,7 @@ class RAGService:
             cfg = chat_provider_config(self.settings) or {}
             if not cfg.get("api_key"):
                 raise RuntimeError("未配置对话模型 API Key，无法生成回答")
-            self._chat = DeepSeekChat(
-                api_key=cfg.get("api_key"),
-                base_url=cfg.get("base_url") or "https://api.deepseek.com",
-                model=cfg.get("model") or "deepseek-v4-flash",
-                thinking_enabled=cfg.get("thinking_enabled", True),
-                thinking_effort=cfg.get("thinking_effort", "high"),
-            )
+            self._chat = DeepSeekChat(cfg)
         return self._chat
 
     def refresh(self) -> None:
@@ -571,6 +578,8 @@ class RAGService:
             logger.info("查询扩展（%d 条）：%s", len(queries), queries)
 
         start = time.perf_counter()
+        # S2 目录块降权：枚举类问题（哪些/哪几/列举）豁免——清单式篇目就是答案
+        demote_toc = not is_enumeration_question(question)
         per_query = [
             hybrid_search(
                 store,
@@ -578,17 +587,85 @@ class RAGService:
                 query,
                 recall_k=self.settings.recall_k,
                 candidate_pool=self.settings.candidate_pool,
+                demote_toc=demote_toc,
             )
             for query in queries
         ]
-        candidates = merge_query_results(per_query, limit=40)
-        if use_parent_child:
-            candidates = small_to_big(candidates, self.settings.max_parents)
-        docs = self.reranker.rerank(
-            question,
-            candidates,
-            top_k=self.settings.rerank_top_k,
+        # S1 书名感知路由：问题里点名的书加权 + 保底（篇名匹配不到时自动退化）
+        titles = extract_titles(question)
+        candidates = merge_query_results(
+            per_query,
+            limit=40,
+            boost_titles=titles,
+            original_weight=self.settings.query_original_weight,
         )
+        # S3′ 书内检索：点名书在来源过滤下再检一次，书内 top child 直接进池
+        scoped_children: list[Document] = []
+        if titles:
+            try:
+                rel_paths = [
+                    f.relative_to(self.settings.data_dir).as_posix()
+                    for f in list_data_files(self.settings.data_dir)
+                ]
+                for rel in match_book_paths(titles, rel_paths):
+                    scoped_children.extend(
+                        book_scoped_children(
+                            self.store,
+                            self.embeddings,
+                            question,
+                            rel,
+                            demote_toc=demote_toc,
+                        )
+                    )
+            except Exception as exc:
+                logger.warning("书内检索失败，跳过：%s", exc)
+        if scoped_children:
+            candidates = candidates + scoped_children
+        if use_parent_child:
+            candidates = small_to_big(
+                candidates,
+                self.settings.max_parents,
+                boost_titles=titles,
+                demote_toc=demote_toc,
+            )
+            # S6 查询级公平：多话题问题（≥2 个书名号）时，每个话题探针（扩展
+            # 查询）的 top parent 保底进池——避免单一话题篇章垄断精排名额
+            if len(titles) >= 2:
+                try:
+                    guaranteed: list[Document] = []
+                    for one_query in per_query:
+                        tops = small_to_big(
+                            one_query, 1, demote_toc=demote_toc
+                        )
+                        guaranteed.extend(
+                            t
+                            for t in tops
+                            if not (demote_toc and is_toc_like(t.page_content))
+                        )
+                    candidates = ensure_parents(
+                        candidates, guaranteed, self.settings.max_parents
+                    )
+                except Exception as exc:
+                    logger.warning("query 级保底失败，跳过：%s", exc)
+        ranked = self.reranker.rerank(question, candidates, top_k=len(candidates))
+
+        # S1 收尾 / S2 出口：点名书来源加精排分，目录块扣精排分（枚举题豁免），再截断
+        def _adjusted(doc: Document) -> float:
+            src = str(doc.metadata.get("source") or "")
+            bonus = (
+                TITLE_RERANK_BONUS
+                if any(title_matches_source(t, src) for t in titles)
+                else 0.0
+            )
+            penalty = (
+                TOC_RERANK_PENALTY
+                if demote_toc and is_toc_like(doc.page_content)
+                else 0.0
+            )
+            return float(doc.metadata.get("rerank_score") or 0.0) + bonus - penalty
+
+        ranked.sort(key=_adjusted, reverse=True)
+        docs = ranked[: self.settings.rerank_top_k]
         metrics.record("retrieval", time.perf_counter() - start)
         return docs
 
@@ -597,6 +674,26 @@ class RAGService:
         metrics.inc("chat_requests")
         try:
             docs = self.retrieve(question, history=history)
+            # S5 相关度门槛：库内没有相关内容（top1 低于阈值）时不喂生成模型，
+            # 避免随机块被当依据；0=关闭。校准：库外题 top1≤0.01，库内题≥0.54。
+            min_score = float(self.settings.kb_chat_min_score or 0)
+            best = max(
+                (
+                    float(
+                        d.metadata.get("rerank_score")
+                        or d.metadata.get("parent_score")
+                        or 0
+                    )
+                    for d in docs
+                ),
+                default=0.0,
+            )
+            if docs and min_score > 0 and best < min_score:
+                metrics.inc("chat_no_context")
+                return {
+                    "answer": "知识库中没有找到与这个问题相关的内容。",
+                    "sources": [],
+                }
             context = "\n\n".join(doc.page_content for doc in docs)
             start = time.perf_counter()
             answer = self.chat.generate(question, context, history)

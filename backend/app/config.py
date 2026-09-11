@@ -84,13 +84,19 @@ class Settings:
     task_mode_detect: bool = True        # 自动识别项目级任务并使用独立预算
     agent_recursion_limit: int = 40     # LangGraph 图执行最大步数（2026-08:30→40，给失败重试留余量，超过则兜底收尾）
     chat_temperature: float = 0.5       # 普通回答温度
-    history_max_messages: int = 60      # 回传给模型的历史消息条数（软窗口，不足预算不压缩）
+    history_max_messages: int = 400     # 历史窗口行数上限：超 1.5× 才压缩到该条数（粘滞窗口，见 compact_conversation）
     agent_title_model: str = "deepseek-v4-flash"
 
     # ---- 记忆与上下文工程 ----
     summary_enabled: bool = True        # 会话滚动摘要（压缩早期对话）
     summary_max_chars: int = 800        # 摘要最大字符数
-    history_max_tokens: int = 32000     # 注入历史消息的 token 预算（估算，为长窗口模型放宽）
+    history_max_tokens: int = 64000     # 历史 token 预算兜底（未绑定模板/未知类别时；按模板类别见 history_budget_*）
+    # 历史窗口 token 预算（按提示词模板类别取用，检索型可小、编码/写作需要更长原始上下文）
+    history_budget_general: int = 64000
+    history_budget_knowledge: int = 64000
+    history_budget_coding: int = 96000
+    history_budget_writing: int = 96000
+    history_budget_translate: int = 64000
     memory_enabled: bool = True         # 长期事实记忆
     # 自动提取记忆的最小回答长度：短问答不触发记忆提取 LLM 调用（省钱提速）
     memory_auto_extract_min_chars: int = 400
@@ -106,6 +112,11 @@ class Settings:
     # ---- CRAG（知识库不足时自动补联网）----
     crag_fallback_enabled: bool = True
     crag_min_score: float = 0.45        # 最佳相关度低于此值触发联网兜底
+
+    # ---- /api/chat 相关度门槛（S5，2026-09-11）----
+    # top1 精排分低于此值时视为"库内无相关内容"：不喂生成模型、直接明确回复；
+    # 0=关闭。校准依据：库外问题 top1≤0.01，库内题 top1≥0.54（21 题实测）。
+    kb_chat_min_score: float = 0.2
 
     # ---- 文档解析增强 ----
     pdf_layout_enabled: bool = True     # 布局感知 PDF 解析（PyMuPDF4LLM，保留标题/段落/表格）
@@ -131,6 +142,8 @@ class Settings:
     recall_k: int = 60       # 每路检索器各取前 N 条（2026-08:40→60 提升召回候选）
     candidate_pool: int = 32 # 每路 RRF 融合后送重排序的候选数（2026-08:24→32）
     rerank_top_k: int = 6    # 精排后最终保留条数（2026-08:4→6,多跳题第二篇文档更稳进上下文）
+    # 原问题在跨查询 RRF 中的权重（S3 实验旋钮；1.0=与其他扩展查询等权，2026-09-11）
+    query_original_weight: float = 1.0
 
     # ---- 切分参数（Parent-Child）----
     # 实验结论：递归切分 8% 的块能落在句子边界；按段落分组约 47%。
@@ -245,11 +258,16 @@ class Settings:
             task_mode_detect=_env("TASK_MODE_DETECT", "1") == "1",
             agent_recursion_limit=int(_env("AGENT_RECURSION_LIMIT", "40")),
             chat_temperature=float(_env("CHAT_TEMPERATURE", "0.5")),
-            history_max_messages=int(_env("HISTORY_MAX_MESSAGES", "60")),
+            history_max_messages=int(_env("HISTORY_MAX_MESSAGES", "400")),
             agent_title_model=_env("AGENT_TITLE_MODEL", "deepseek-v4-flash"),
             summary_enabled=_env("SUMMARY_ENABLED", "1") == "1",
             summary_max_chars=int(_env("SUMMARY_MAX_CHARS", "800")),
-            history_max_tokens=int(_env("HISTORY_MAX_TOKENS", "32000")),
+            history_max_tokens=int(_env("HISTORY_MAX_TOKENS", "64000")),
+            history_budget_general=int(_env("HISTORY_BUDGET_GENERAL", "64000")),
+            history_budget_knowledge=int(_env("HISTORY_BUDGET_KNOWLEDGE", "64000")),
+            history_budget_coding=int(_env("HISTORY_BUDGET_CODING", "96000")),
+            history_budget_writing=int(_env("HISTORY_BUDGET_WRITING", "96000")),
+            history_budget_translate=int(_env("HISTORY_BUDGET_TRANSLATE", "64000")),
             memory_enabled=_env("MEMORY_ENABLED", "1") == "1",
             memory_auto_extract_min_chars=int(
                 _env("MEMORY_AUTO_EXTRACT_MIN_CHARS", "400")
@@ -278,6 +296,12 @@ class Settings:
             parent_max_chunk_size=int(_env("PARENT_MAX_CHUNK_SIZE", "900")),
             child_chunk_size=int(_env("CHILD_CHUNK_SIZE", "320")),
             child_overlap=int(_env("CHILD_OVERLAP", "64")),
+            # 检索参数 env 覆盖（2026-09-11 加，供 A/B 实验免改代码；改后重启后端生效）
+            recall_k=int(_env("RECALL_K", "60")),
+            candidate_pool=int(_env("CANDIDATE_POOL", "32")),
+            rerank_top_k=int(_env("RERANK_TOP_K", "6")),
+            query_original_weight=float(_env("QUERY_ORIGINAL_WEIGHT", "1.0")),
+            kb_chat_min_score=float(_env("KB_CHAT_MIN_SCORE", "0.2")),
             max_parents=int(_env("MAX_PARENTS", "10")),
             query_expansion_enabled=_env("QUERY_EXPANSION_ENABLED", "1") == "1",
             expansion_multi_query=_env("EXPANSION_MULTI_QUERY", "1") == "1",
