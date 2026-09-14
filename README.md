@@ -10,6 +10,8 @@
 **LangGraph 状态图**（7 节点 + 条件路由）实现按需工具调用，支持个人知识库问答、
 联网搜索、视觉识别、本机 Skills 复用、三层对话记忆（MySQL）、预设提示词模板、
 多供应商模型管理与可视化设置。
+<img width="2520" height="1174" alt="image" src="https://github.com/user-attachments/assets/ec283eff-59a9-4bf9-b9da-ef8d7e451709" />
+
 
 - **后端**：FastAPI + LangChain / LangGraph + OpenSearch + 本地 BGE Embedding/Reranker + DeepSeek / 任意 OpenAI 兼容模型 + SenseNova 视觉 + MySQL
 - **前端**：Vue 3 + Vite + Element Plus（浅色/深色主题、打字机流式、引用索引、设置面板）
