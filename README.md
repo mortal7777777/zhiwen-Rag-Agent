@@ -103,7 +103,8 @@
 - MySQL 持久化会话（`conversations`）与消息（`messages`），左侧会话列表可新建/切换/重命名/删除；
 - **会话滚动摘要（粘滞窗口）**：窗口起点跟随摘要边界、不随总行数滑动；行数超上限 1.5 倍
   （默认 400→600 行）**或** token 超预算 1.25 倍才压缩一次、压到预算内（默认通用/知识库 64k、
-  编程/写作 96k，`HISTORY_BUDGET_*` 可覆盖）——压一次前缀缓存稳定多轮，不再每轮改写历史开头；
+  编程/写作 400k，`HISTORY_BUDGET_*` 可覆盖；最终会被模型上下文窗口自动夹紧）——
+  压一次前缀缓存稳定多轮，不再每轮改写历史开头；
 - **长期事实记忆**：每轮对话自动提取并**分类**（用户画像/喜好偏好/工作项目/重要决定/教训与应对/其他）；
   用户说"记住…"时**强制提取**；可在「记忆」面板查看/编辑/新增/删除；
 - **自动整合整理**：活跃记忆达到阈值后自动合并重复、新事实覆盖旧事实、归档过时项，
@@ -501,7 +502,8 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 | `AGENT_TITLE_MODEL` | `deepseek-v4-flash` | 标题生成模型 |
 | `HISTORY_MAX_MESSAGES` | `400` | 历史窗口行数上限（超 1.5× 才压缩到该条数，粘滞窗口） |
 | `HISTORY_MAX_TOKENS` | `64000` | 历史 token 预算兜底（未绑定模板/未知模板类别） |
-| `HISTORY_BUDGET_GENERAL` / `_KNOWLEDGE` / `_CODING` / `_WRITING` / `_TRANSLATE` | `64000` / `64000` / `96000` / `96000` / `64000` | 按模板类别的历史 token 预算（压缩与裁剪同一口径） |
+| `HISTORY_BUDGET_GENERAL` / `_KNOWLEDGE` / `_CODING` / `_WRITING` / `_TRANSLATE` | `64000` / `64000` / `400000` / `400000` / `64000` | 按模板类别的历史 token 预算（压缩与裁剪同一口径；会被模型窗口夹紧——见 `MODEL_CONTEXT_WINDOW` / `CONTEXT_WINDOW_RESERVE`） |
+| `MODEL_CONTEXT_WINDOW` / `CONTEXT_WINDOW_RESERVE` | `0`（自动）/ `32000` | 模型窗口（0=按模型名推断，`[1m]` 后缀→1M，其余 128K）/ 窗口内为静态区+工具+D块预留的 token |
 | `SUMMARY_ENABLED` / `SUMMARY_MAX_CHARS` | `1` / `800` | 滚动摘要开关 / 最大字符 |
 | `MEMORY_ENABLED` / `MEMORY_TOP_K` | `1` / `3` | 长期记忆开关 / 每次注入条数 |
 | `MEMORY_MIN_SCORE` / `MEMORY_MAX_TOKENS` | `0.35` / `600` | 记忆召回阈值 / token 预算 |
