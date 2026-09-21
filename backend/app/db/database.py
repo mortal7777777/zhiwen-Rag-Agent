@@ -163,6 +163,19 @@ def _migrate(engine) -> None:
                     )
                 )
                 logger.info("已为 memories 添加 status 列")
+            if "hit_count" not in memory_columns:
+                conn.execute(
+                    text(
+                        "ALTER TABLE memories "
+                        "ADD COLUMN hit_count INT NOT NULL DEFAULT 0"
+                    )
+                )
+                logger.info("已为 memories 添加 hit_count 列")
+            if "last_hit_at" not in memory_columns:
+                conn.execute(
+                    text("ALTER TABLE memories ADD COLUMN last_hit_at DATETIME NULL")
+                )
+                logger.info("已为 memories 添加 last_hit_at 列")
     except Exception as exc:
         logger.warning("数据库增量迁移失败（不影响主流程）：%s", exc)
 
@@ -174,6 +187,19 @@ def get_db():
             status_code=503,
             detail="数据库未连接：请检查 MYSQL_URL 配置后重启服务",
         )
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def get_db_optional():
+    """软依赖：DB 未连接时 yield None（普通上传不应因 MySQL 宕机而失效；
+    只有"同名归档 / 版本管理"这类必须落库的分支再显式报错）。"""
+    if not db_ready or SessionLocal is None:
+        yield None
+        return
     db = SessionLocal()
     try:
         yield db

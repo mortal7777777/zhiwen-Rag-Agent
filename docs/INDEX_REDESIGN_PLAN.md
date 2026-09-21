@@ -54,7 +54,7 @@ mapping 增加 `metadata_relative_path: keyword`（删除/过滤的精确键；
 | 层 | 位置 | 做什么 | 状态 |
 |---|---|---|---|
 | 文档内 | 索引时 | 同一文件重复 child 只留一份（`seen_child_md5` 改为每文件独立） | 本次落地 |
-| 文档级近似 | 上传时 | MinHash 签名比对 → "疑似与《X》重复 92%"提示（不拦截，用户决定） | Phase 3 |
+| 文档级近似 | 上传时 | MinHash 签名比对 → "疑似与《X》重复 92%"提示（不拦截，用户决定） | **已实现（2026-09-18）**：另含全文件 sha256 与文件名归一化两档；同批落地重命名与版本管理（`app/rag/dedup.py`、`app/rag/versioning.py`） |
 | 检索时 | small_to_big 后、rerank 前 | 按 `md5(parent_content)` 折叠重复 parent（保留高分）+ 现有 source 分流 | Phase 3 |
 
 跨文件全局去重退场：它换来的"减少重复占坑"由上述 2+3 层接管，
@@ -96,7 +96,8 @@ mapping 增加 `metadata_relative_path: keyword`（删除/过滤的精确键；
   旧索引 `rag_knowledge_base_v2` 保留可回滚）；
 - **Phase 2**：service per-doc CRUD + 去重作用域 + 测试——✅ 2026-09-10 落地
   （另修一处：去重作用域按"文件"而非"加载单元"，PDF 分页/EPUB 分章归同一文件）；
-- **Phase 3**：MinHash 上传提示 + 检索折叠 + 分类 keyword——待做。
+- **Phase 3**：✅ MinHash 上传提示（2026-09-18，同批含 sha256/归一化名查重、重命名、版本管理）；
+  检索折叠（生产路径由 small_to_big 的 parent_id 聚合覆盖）与分类 keyword 待做。
 
 ## 4. 验收标准（2026-09-10 实测）
 

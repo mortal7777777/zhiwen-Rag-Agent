@@ -8,6 +8,7 @@ import logging
 from langgraph.types import Send
 from sqlalchemy.orm import Session
 
+from ...llm_text import message_text
 from ...runtime_config import effective
 
 logger = logging.getLogger(__name__)
@@ -290,7 +291,7 @@ def _subagent_node(state: AgentState) -> dict:
             messages.append(resp)
             tool_calls = list(getattr(resp, "tool_calls", None) or [])
             if not tool_calls:
-                summary = resp.content or ""
+                summary = message_text(resp.content)
                 break
             by_name = {t.name: t for t in tools}
             for tc in tool_calls:
@@ -342,7 +343,7 @@ def _subagent_node(state: AgentState) -> dict:
                     messages,
                     config={"callbacks": [get_aux_usage_collector()]},
                 )
-                summary = final_resp.content or ""
+                summary = message_text(final_resp.content)
             except Exception as exc:
                 summary = f"（子任务总结失败：{exc}）"
     finally:

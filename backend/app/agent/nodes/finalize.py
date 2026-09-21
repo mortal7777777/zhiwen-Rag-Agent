@@ -211,6 +211,11 @@ def _finalize_node(state: AgentState) -> dict:
                     # 工具定义哈希（缓存前缀监测）：与上一 run 对比，
                     # 变化说明前缀被破坏，命中率可能下降
                     "tools_hash": runtime.get("tools_hash"),
+                    # 消息链指纹（缓存前缀监测）：下一轮与本轮做前缀比对，
+                    # 首个分歧位置即前缀命中断点
+                    "chain_len": runtime.get("chain_len"),
+                    "chain_divergence": runtime.get("chain_divergence"),
+                    "chain_hashes": runtime.get("chain_hashes") or [],
                 },
             )
             write_trace(
@@ -247,7 +252,7 @@ def _finalize_node(state: AgentState) -> dict:
         and len(tool_trace) >= 3
     ):
         try:
-            from ..trajectory import compress_trajectory
+            from ...trajectory import compress_trajectory
 
             compress_trajectory(
                 service.context._invoke,

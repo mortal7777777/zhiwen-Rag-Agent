@@ -1210,7 +1210,9 @@ async function fetchChatModels(p) {
       const ids = res.models.map((m) => m.id)
       p._modelsText = ids.join(', ')
       if (!ids.includes(p.model)) p.model = ids[0]
-      ElMessage.success(`拉取到 ${ids.length} 个模型`)
+      // 远端模型列表接口不可用时后端回退为本地配置，提示语区分两种情况
+      if (res.note) ElMessage.warning(res.note)
+      else ElMessage.success(`拉取到 ${ids.length} 个模型`)
     } else {
       ElMessage.warning(res.error || '未拉取到模型')
     }

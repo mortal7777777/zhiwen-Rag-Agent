@@ -101,8 +101,9 @@
 ### 对话记忆与上下文工程（类 DeepSeek 网页端）
 
 - MySQL 持久化会话（`conversations`）与消息（`messages`），左侧会话列表可新建/切换/重命名/删除；
-- **会话滚动摘要（软窗口）**：消息数超过 60 条**且/或** token 超预算才压缩；
-  预算按模板任务差异化（知识库 24k / 编程写作 36k / 通用 32k）；无论如何保留最近 60 条原始消息；
+- **会话滚动摘要（粘滞窗口）**：窗口起点跟随摘要边界、不随总行数滑动；行数超上限 1.5 倍
+  （默认 400→600 行）**或** token 超预算 1.25 倍才压缩一次、压到预算内（默认通用/知识库 64k、
+  编程/写作 96k，`HISTORY_BUDGET_*` 可覆盖）——压一次前缀缓存稳定多轮，不再每轮改写历史开头；
 - **长期事实记忆**：每轮对话自动提取并**分类**（用户画像/喜好偏好/工作项目/重要决定/教训与应对/其他）；
   用户说"记住…"时**强制提取**；可在「记忆」面板查看/编辑/新增/删除；
 - **自动整合整理**：活跃记忆达到阈值后自动合并重复、新事实覆盖旧事实、归档过时项，
@@ -124,7 +125,13 @@
 
 ### 多供应商模型管理（参考 cc-switch）
 
-- 对话模型与视觉模型各自支持**多个供应商**（OpenAI 兼容），设置页可添加/删除/启停/设为当前；
+- 对话模型与视觉模型各自支持**多个供应商**（OpenAI 兼容 + Anthropic 兼容两种 API 格式），
+  设置页可添加/删除/启停/设为当前；
+- **API 格式判定**：供应商 `api_format` 字段显式指定，未填则按 `base_url` 推断——
+  路径含 `/anthropic` 即走 Anthropic 格式（`langchain-anthropic` 的 ChatAnthropic），
+  如 DeepSeek 的 `https://api.deepseek.com/anthropic`（模型名支持 `deepseek-v4-flash[1m]`
+  长窗口后缀；该端点 `cache_control` 断点被忽略，仍是自动前缀缓存，命中量记在
+  `cache_read_input_tokens`，遥测面板照常统计）；
 - API Key 脱敏展示，`****last4` 回传表示"保持不变"；旧 `deepseek_*` / `sensenova_*` 键值自动同步；
 - 切换供应商无需重启，立即生效（模型懒加载缓存刷新）。
 
@@ -492,8 +499,9 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 | `AGENT_RECURSION_LIMIT` | `40` | LangGraph 图执行最大步数（超限友好收尾） |
 | `CHAT_TEMPERATURE` | `0.5` | 回答温度 |
 | `AGENT_TITLE_MODEL` | `deepseek-v4-flash` | 标题生成模型 |
-| `HISTORY_MAX_MESSAGES` | `60` | 历史消息软窗口条数 |
-| `HISTORY_MAX_TOKENS` | `32000` | 历史消息 token 预算 |
+| `HISTORY_MAX_MESSAGES` | `400` | 历史窗口行数上限（超 1.5× 才压缩到该条数，粘滞窗口） |
+| `HISTORY_MAX_TOKENS` | `64000` | 历史 token 预算兜底（未绑定模板/未知模板类别） |
+| `HISTORY_BUDGET_GENERAL` / `_KNOWLEDGE` / `_CODING` / `_WRITING` / `_TRANSLATE` | `64000` / `64000` / `96000` / `96000` / `64000` | 按模板类别的历史 token 预算（压缩与裁剪同一口径） |
 | `SUMMARY_ENABLED` / `SUMMARY_MAX_CHARS` | `1` / `800` | 滚动摘要开关 / 最大字符 |
 | `MEMORY_ENABLED` / `MEMORY_TOP_K` | `1` / `3` | 长期记忆开关 / 每次注入条数 |
 | `MEMORY_MIN_SCORE` / `MEMORY_MAX_TOKENS` | `0.35` / `600` | 记忆召回阈值 / token 预算 |

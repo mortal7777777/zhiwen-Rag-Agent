@@ -8,6 +8,7 @@ langchain-core>=0.3
 langchain-community>=0.3
 chardet>=5.0,<6  # langchain-community 0.3 与 chardet 7.x API 不兼容
 langchain-openai>=0.2
+langchain-anthropic>=0.3  # Anthropic 兼容格式供应商（如 DeepSeek /anthropic 端点）
 langchain-text-splitters>=0.3
 jieba>=0.42
 docx2txt>=0.8

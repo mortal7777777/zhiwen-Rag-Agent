@@ -32,13 +32,21 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_openai import ChatOpenAI
+from langchain_core.language_models import BaseChatModel
 from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..db import repository as repo
+from ..llm_text import message_text
 from ..rag.service import RAGService
-from ..runtime_config import chat_provider_config, effective, vision_provider_config
+from ..runtime_config import (
+    build_chat_model,
+    chat_provider_config,
+    effective,
+    thinking_extra_body,
+    thinking_param,
+    vision_provider_config,
+)
 from ..tracing import get_aux_usage_collector, get_usage_collector, reset_usage, usage_summary, write_trace
 from .context import ContextService, estimate_tokens, trim_history_for_budget
 from .prompts import compose_system_prompt
@@ -53,48 +61,44 @@ class AgentService:
     def __init__(self, settings: Settings, rag_service: RAGService):
         self.settings = settings
         self.rag = rag_service
-        self._chat: ChatOpenAI | None = None
-        self._title_chat: ChatOpenAI | None = None
+        self._chat: BaseChatModel | None = None
+        self._title_chat: BaseChatModel | None = None
         self._context: ContextService | None = None
         self._vision = None
 
     # ---------------- 模型 ----------------
 
     @property
-    def chat(self) -> ChatOpenAI:
-        """主对话模型（LangChain ChatOpenAI，支持工具调用）。"""
+    def chat(self) -> BaseChatModel:
+        """主对话模型（按供应商 API 格式构建，支持工具调用）。"""
         if self._chat is None:
             cfg = chat_provider_config(self.settings) or {}
             if not cfg.get("api_key"):
                 raise RuntimeError("未配置对话模型 API Key，请在设置中配置供应商")
-            from ..runtime_config import thinking_extra_body
-
-            self._chat = ChatOpenAI(
-                api_key=cfg.get("api_key"),
-                base_url=cfg.get("base_url") or "https://api.deepseek.com",
-                model=cfg.get("model") or "deepseek-v4-flash",
+            self._chat = build_chat_model(
+                cfg,
                 temperature=effective(self.settings, "chat_temperature"),
-                request_timeout=180,
-                max_retries=2,
-                # 思考模式/强度（DeepSeek V4：thinking + reasoning_effort）
+                timeout=180,
+                # 思考模式/强度：openai 格式走 extra_body，anthropic 格式走 thinking
+                thinking=thinking_param(cfg),
                 extra_body=thinking_extra_body(cfg),
             )
         return self._chat
 
     @property
-    def title_chat(self) -> ChatOpenAI:
+    def title_chat(self) -> BaseChatModel:
         """会话标题生成模型（低温，结果稳定）。"""
         if self._title_chat is None:
             cfg = chat_provider_config(self.settings) or {}
-            self._title_chat = ChatOpenAI(
-                api_key=cfg.get("api_key") or "",
-                base_url=cfg.get("base_url") or "https://api.deepseek.com",
+            self._title_chat = build_chat_model(
+                cfg,
                 model=effective(self.settings, "agent_title_model")
                 or cfg.get("model")
                 or "deepseek-v4-flash",
                 temperature=0.0,
-                request_timeout=60,
+                timeout=60,
                 # 标题/摘要等辅助调用关闭思考：更快更省，且不影响主循环
+                thinking={"type": "disabled"},
                 extra_body={"thinking": {"type": "disabled"}},
             )
         return self._title_chat
@@ -320,7 +324,8 @@ class AgentService:
                     db, conv_id
                 )
                 recent_rows = trim_history_for_budget(
-                    recent_rows, settings.history_max_tokens
+                    recent_rows,
+                    self.context.history_budget_for(db, conv_id),
                 )
                 for row in recent_rows:
                     if row["role"] == "user":
@@ -534,7 +539,7 @@ class AgentService:
         forced_final = False
         last_call_warned = False
 
-        def model_for_call() -> ChatOpenAI:
+        def model_for_call() -> BaseChatModel:
             # 强制收尾时不绑定工具 -> 模型无法再调用工具，保证有最终回答
             if forced_final or not tools:
                 return self.chat
@@ -580,10 +585,10 @@ class AgentService:
                             stopped_flag = True
                             break
                         chunks.append(chunk)
-                        content = getattr(chunk, "content", None)
-                        if content:
-                            final_text += content
-                            yield {"event": "token", "data": content}
+                        delta = message_text(getattr(chunk, "content", None))
+                        if delta:
+                            final_text += delta
+                            yield {"event": "token", "data": delta}
                 finally:
                     self.rag.release_llm()
                 if stopped_flag:
@@ -603,7 +608,7 @@ class AgentService:
                         int(usage.get("output_tokens") or 0),
                     )
                 tool_calls = getattr(merged, "tool_calls", None) or []
-                content = merged.content or ""
+                content = message_text(merged.content)
 
                 messages.append(
                     AIMessage(content=content, tool_calls=list(tool_calls))
@@ -905,7 +910,7 @@ class AgentService:
                 ],
                 config={"callbacks": [get_aux_usage_collector()]},
             )
-            title = (response.content or "").strip().strip('"“”')
+            title = message_text(response.content).strip().strip('"“”')
             if title:
                 return title[:30]
         except Exception as exc:

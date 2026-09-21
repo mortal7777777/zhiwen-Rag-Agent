@@ -13,6 +13,7 @@ import logging
 from langchain_core.messages import HumanMessage
 
 from .db import repository as repo
+from .llm_text import message_text
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ def compress_trajectory(
     )
     try:
         resp = chat([HumanMessage(content=prompt)])
-        text = (resp.content or "").strip()
+        text = message_text(resp.content).strip()
         if not text:
             return None
         repo.set_meta(db, _meta_key(conversation_id), text[: max_chars * 2])

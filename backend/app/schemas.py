@@ -57,6 +57,91 @@ class DocumentMetaIn(BaseModel):
     notes: str | None = Field(default=None, max_length=4000)
 
 
+class UploadConflictItem(BaseModel):
+    """上传查重的一条冲突（仅警告，供前端确认）。"""
+
+    kind: str  # same_name | identical | similar_name | near_duplicate
+    existing_name: str = ""
+    existing_relative_path: str = ""
+    similarity: float | None = None
+    message: str = ""
+
+
+class UploadFileCheckOut(BaseModel):
+    """单个上传文件的查重报告。"""
+
+    file_name: str
+    would_replace: bool = False
+    suggested_version_no: str = "v1"
+    conflicts: list[UploadConflictItem] = Field(default_factory=list)
+
+
+class UploadCheckOut(BaseModel):
+    """上传预检/冲突响应（dry_run 或 409 detail 共用结构）。"""
+
+    files: list[UploadFileCheckOut] = Field(default_factory=list)
+    has_conflict: bool = False
+
+
+class DocumentRenameIn(BaseModel):
+    """重命名请求（仅同目录改基名）。"""
+
+    relative_path: str = Field(..., min_length=1, max_length=500)
+    new_name: str = Field(..., min_length=1, max_length=200)
+
+
+class DocumentVersionOut(BaseModel):
+    """一条历史版本（归档行）。"""
+
+    id: int
+    version_no: str
+    note: str = ""
+    size: int = 0
+    created_at: str = ""
+    file_name: str
+    original_name: str
+    file_exists: bool = True
+
+
+class DocumentVersionsOut(BaseModel):
+    """某文档的版本列表（当前版本 + 历史版本）。"""
+
+    doc_relative_path: str
+    name: str
+    current: dict | None = None
+    suggested_version_no: str = "v1"
+    versions: list[DocumentVersionOut] = Field(default_factory=list)
+
+
+class DocumentVersionsArchiveOut(DocumentVersionsOut):
+    documents: list[DocumentInfo] = Field(default_factory=list)
+
+
+class DocumentVersionsRestoreOut(DocumentVersionsOut):
+    documents: list[DocumentInfo] = Field(default_factory=list)
+    new_relative_path: str | None = None
+
+
+class DocumentVersionsDeleteOut(BaseModel):
+    versions: list[DocumentVersionOut] = Field(default_factory=list)
+
+
+class DocumentVersionArchiveIn(BaseModel):
+    """把 source 文档归档为 target 文档的历史版本。"""
+
+    source_path: str = Field(..., min_length=1, max_length=500)
+    target_path: str = Field(..., min_length=1, max_length=500)
+    version_no: str = Field(..., min_length=1, max_length=50)
+    note: str = Field(default="", max_length=500)
+
+
+class DocumentVersionRestoreIn(BaseModel):
+    """恢复某历史版本为当前；current 版本将被归档（版本号用户指定）。"""
+
+    new_version_no: str = Field(..., min_length=1, max_length=50)
+    note: str = Field(default="", max_length=500)
+
+
 class IndexStatus(BaseModel):
     """索引状态。"""
 

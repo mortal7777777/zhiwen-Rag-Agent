@@ -39,9 +39,23 @@ from .retriever import (
 )
 from .splitter import build_parent_child_splitters
 from .store import IDX_SCHEMA_VERSION, OpenSearchStore, slugify
+from .dedup import DedupChecker
+from .versioning import archive_file, validate_version_no
 from ..runtime_config import chat_provider_config, effective
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class UploadOutcome:
+    """add_documents 的结果：mode = dry_run（仅检测）| conflict（待确认）| committed（已落盘）。"""
+
+    mode: str
+    documents: list[dict] = field(default_factory=list)
+    conflicts: list[dict] = field(default_factory=list)
+    archived: list[dict] = field(default_factory=list)
 
 
 class RAGService:
@@ -68,6 +82,9 @@ class RAGService:
         self._llm_semaphore = threading.BoundedSemaphore(settings.llm_max_concurrency)
         # 索引维护单写者锁：上传/删除/重建/检索触发的增量维护在此串行
         self._index_lock = threading.RLock()
+        # 上传查重缓存（按当前 data_dir 惰性构建；data_dir 变化时重建）
+        self._dedup: DedupChecker | None = None
+        self._dedup_dir = None
 
     # ============================================================
     # 懒加载组件
@@ -178,6 +195,22 @@ class RAGService:
         self._chat = None
         self._query_expander = None
         self._vision = None
+        self._dedup = None
+
+    @property
+    def dedup(self) -> DedupChecker:
+        """上传查重器（哈希/签名缓存；data_dir 变化时重建）。"""
+        current = self.settings.data_dir
+        if self._dedup is None or self._dedup_dir != current:
+            self._dedup = DedupChecker(current)
+            self._dedup_dir = current
+        return self._dedup
+
+    @contextmanager
+    def index_lock(self):
+        """索引维护单写者锁的公开入口（归档/改名/恢复等编排复用，RLock 可重入）。"""
+        with self._index_lock:
+            yield
 
     @property
     def query_expander(self) -> QueryExpander:
@@ -733,11 +766,26 @@ class RAGService:
             )
         return result
 
-    def add_documents(self, files: list[UploadFile]) -> list[dict]:
-        """保存上传文件到 data/ 并增量更新索引。"""
+    def add_documents(
+        self,
+        files: list[UploadFile],
+        *,
+        dry_run: bool = False,
+        conflict_policy: str = "ask",
+        archive_version_no: str | None = None,
+        archive_note: str = "",
+    ) -> UploadOutcome:
+        """保存上传文件到 data/ 并增量更新索引（带查重与同名归档）。
+
+        - dry_run：只做查重、不落盘；
+        - conflict_policy="ask" 且检出冲突：返回 conflict（API 层转 409）；
+        - conflict_policy="proceed"：仅警告档直接放行；同名档要求 archive_version_no，
+          旧文件移到 data_versions/ 归档（archived 元数据交 API 层落库）。
+        """
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
+        # 先读字节 + 校验（路径穿越/格式）
+        items: list[tuple[str, bytes]] = []
         for file in files:
-            # 只取文件名部分，防止路径穿越（../ 等）
             filename = Path(file.filename or "未命名").name
             suffix = Path(filename).suffix.lower()
             if suffix not in SUPPORTED_SUFFIXES:
@@ -745,11 +793,68 @@ class RAGService:
                 raise ValueError(
                     f"不支持的文件格式：{filename}（当前支持：{supported}）"
                 )
-            target = self.settings.data_dir / filename
-            target.write_bytes(file.file.read())
-            logger.info("已保存文件：%s", filename)
-        self.ensure_index()
-        return self.list_documents()
+            items.append((filename, file.file.read()))
+        if not items:
+            raise ValueError("没有可上传的文件")
+        names = [name.lower() for name, _ in items]
+        if len(set(names)) != len(names):
+            raise ValueError("批量上传中包含同名文件，请逐个上传")
+
+        with self.index_lock():
+            # 冲突检测（锁内执行，消 TOCTOU）
+            checks: list[dict] = []
+            for filename, raw in items:
+                conflicts = self.dedup.check(filename, raw)
+                checks.append({"file_name": filename, "conflicts": conflicts})
+
+            if dry_run:
+                return UploadOutcome(mode="dry_run", conflicts=checks)
+
+            same_name_checks = [
+                c
+                for c in checks
+                if any(x["kind"] == "same_name" for x in c["conflicts"])
+            ]
+            has_any = any(c["conflicts"] for c in checks)
+            if has_any and conflict_policy != "proceed":
+                return UploadOutcome(mode="conflict", conflicts=checks)
+            if len(same_name_checks) >= 2:
+                raise ValueError("批量上传包含多个同名文件，请逐个上传")
+            if same_name_checks and not (archive_version_no or "").strip():
+                raise ValueError("同名文件重传需要指定归档版本号")
+
+            archived: list[dict] = []
+            for filename, raw in items:
+                target = self.settings.data_dir / filename
+                same_name = any(
+                    x["kind"] == "same_name"
+                    for c in checks
+                    if c["file_name"] == filename
+                    for x in c["conflicts"]
+                )
+                if same_name and target.exists():
+                    version_no = validate_version_no(archive_version_no or "")
+                    size = target.stat().st_size
+                    path = archive_file(self.settings, filename, target, version_no)
+                    archived.append(
+                        {
+                            "doc_relative_path": filename,
+                            "version_no": version_no,
+                            "file_name": path.name,
+                            "original_name": filename,
+                            "size": size,
+                            "note": (archive_note or "").strip(),
+                        }
+                    )
+                    logger.info("同名重传：旧文件已归档为 %s", path)
+                target.write_bytes(raw)
+                logger.info("已保存文件：%s", filename)
+            self.ensure_index()
+            return UploadOutcome(
+                mode="committed",
+                documents=self.list_documents(),
+                archived=archived,
+            )
 
     def delete_document(self, relative_path: str) -> None:
         """删除文件并同步移除其向量块（per-doc：指纹 diff 驱动，无需全量重建）。"""

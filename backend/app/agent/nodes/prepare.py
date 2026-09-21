@@ -20,7 +20,13 @@ from ..prompts import compose_system_prompt
 logger = logging.getLogger(__name__)
 from ..state import AgentState, EventBus
 from .common import _plan_hint, _is_project_task
-from ..utils import _rows_to_history, _tools_prefix_hash
+from ..utils import (
+    _rows_to_history,
+    _tools_prefix_hash,
+    _chain_fingerprints,
+    _chain_preview,
+    _window_has_same,
+)
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from typing import TYPE_CHECKING
@@ -57,6 +63,8 @@ def _prepare_node(state: AgentState) -> dict:
     is_new_conversation = False
     history_messages: list = []
     summary_text: str | None = None
+    # 本轮发送窗口（DB 行）：D 块"变化才追加"的判据——窗口内已有同内容副本就跳过
+    window_rows: list[dict] = []
     if db is not None:
         try:
             bound_template_id = template_id or None
@@ -85,9 +93,12 @@ def _prepare_node(state: AgentState) -> dict:
             summary_text, recent_rows = service.context.compact_conversation(
                 db, conv_id
             )
+            # 压缩后裁剪必须与压缩用同一模板预算，否则调大的预算会被兜底值砍回
             recent_rows = trim_history_for_budget(
-                recent_rows, settings.history_max_tokens
+                recent_rows,
+                service.context.history_budget_for(db, conv_id),
             )
+            window_rows = recent_rows
             history_messages = _rows_to_history(recent_rows, history_messages)
         except Exception as exc:
             logger.warning("读写会话失败，降级为无记忆模式：%s", exc)
@@ -359,7 +370,7 @@ def _prepare_node(state: AgentState) -> dict:
     trajectory_summary = None
     try:
         from ...project_memory import load_project_memory
-        from ..trajectory import load_trajectory_summary
+        from ...trajectory import load_trajectory_summary
 
         project_memory_text = load_project_memory(
             settings, state.get("project_dir")
@@ -424,46 +435,49 @@ def _prepare_node(state: AgentState) -> dict:
             messages.append(SystemMessage(content=static_dynamic_text))
         messages.extend(history_messages)
         persist_start = len(messages)
-        # ---- D 块：问题之前（指令语义与旧版一致），finalize 落库为
-        # system 行，下一轮从 DB 重建时位置不变 → 纯追加链成立 ----
-        # 项目记忆（AGENTS.md）会随"最近任务经验"每轮变化，放链尾
-        # 只影响本条消息，不波及静态核心与历史
+        # ---- D 块：变化才追加 ----
+        # D 块每轮重新渲染；若与窗口内已有副本逐字相同则不重复注入——
+        # 否则每轮制造一份副本（进历史占上下文）且内容必然 miss（前缀缓存
+        # 失效）。被压缩掉（窗口内查不到）或内容确实变化时才追加，
+        # 链仍是"上一轮 + 新增"的纯追加形态。
+        def _append_if_changed(content: str) -> None:
+            if not content or _window_has_same(window_rows, content):
+                return
+            messages.append(SystemMessage(content=content))
+
         if project_memory_text:
-            messages.append(
-                SystemMessage(content="项目记忆（AGENTS.md）：\n" + project_memory_text)
+            _append_if_changed(
+                "项目记忆（AGENTS.md）：\n"
+                "（以下为历史记录，可能过时；与当前代码/文件/文档冲突时以现状为准）\n"
+                + project_memory_text
             )
-        if todos_prompt_text:
-            messages.append(SystemMessage(content=todos_prompt_text))
+        _append_if_changed(todos_prompt_text or "")
         if trajectory_summary:
-            messages.append(
-                SystemMessage(content="最近任务过程摘要：\n" + trajectory_summary)
-            )
+            _append_if_changed("最近任务过程摘要：\n" + trajectory_summary)
         if summary_text:
-            messages.append(
-                SystemMessage(content="以下是对本会话早期内容的摘要（供参考）：\n" + summary_text)
+            _append_if_changed(
+                "以下是对本会话早期内容的摘要（供参考）：\n" + summary_text
             )
         if memory_summary:
-            messages.append(
-                SystemMessage(content="关于用户（长期记忆摘要，通常应作为默认背景）：\n" + memory_summary)
+            _append_if_changed(
+                "关于用户（长期记忆摘要，通常应作为默认背景）：\n" + memory_summary
             )
         if memory_hits:
-            messages.append(
-                SystemMessage(content="相关的长期记忆（如与本轮相关可参考）：\n" + "\n".join(f"- {item}" for item in memory_hits))
+            _append_if_changed(
+                "相关的长期记忆（历史信息、可能过时，仅供参考）：\n"
+                + "\n".join(f"- {item}" for item in memory_hits)
             )
         if vision_descriptions:
-            messages.append(
-                SystemMessage(
-                    content=(
-                        "用户上传了图片。以下是视觉模型对图片的理解，请据此回答：\n"
-                        + "\n".join(
-                            f"- 图片{i + 1}：{text}"
-                            for i, text in enumerate(vision_descriptions)
-                        )
-                    )
+            _append_if_changed(
+                "用户上传了图片。以下是视觉模型对图片的理解，请据此回答：\n"
+                + "\n".join(
+                    f"- 图片{i + 1}：{text}"
+                    for i, text in enumerate(vision_descriptions)
                 )
             )
-        # 时间戳是纯背景信息（无指令约束力），放链尾避免破坏前缀缓存
-        messages.append(SystemMessage(content=time_context))
+        # 时间戳是纯背景信息（无指令约束力），放链尾避免破坏前缀缓存；
+        # 精度到分钟，同一分钟内的多轮请求字节相同（被上面的去重跳过）
+        _append_if_changed(time_context)
         messages.append(HumanMessage(content=question))
 
     # ---- 按开关组装工具 ----
@@ -532,6 +546,47 @@ def _prepare_node(state: AgentState) -> dict:
                     )
         except Exception as exc:
             logger.warning("工具哈希对比失败：%s", exc)
+
+    # ---- 消息链指纹（缓存前缀分歧定位）----
+    # 纯追加链的判据：本轮链应以上一轮实际发送的链为前缀。逐条指纹
+    # 比对，首个分歧位置就是 provider 前缀命中的断点，写日志与 trace，
+    # 用于定位"哪里断了"（工具轮消息重建、静态段渲染、D 块位置等）。
+    chain_hashes = _chain_fingerprints(messages)
+    runtime["chain_len"] = len(messages)
+    runtime["chain_hashes"] = chain_hashes
+    if db is not None and conv_id is not None and restored is None:
+        divergence = None
+        try:
+            prev_runs = repo.list_agent_runs(db, limit=1, conversation_id=conv_id)
+            prev_usage = (prev_runs[0].get("token_usage") if prev_runs else None) or {}
+            prev_chain = (
+                prev_usage.get("chain_hashes")
+                if isinstance(prev_usage, dict)
+                else None
+            )
+            if prev_chain:
+                for i in range(min(len(prev_chain), len(chain_hashes))):
+                    if prev_chain[i] != chain_hashes[i]:
+                        divergence = i
+                        break
+                if divergence is not None:
+                    logger.warning(
+                        "消息链前缀分歧：第 %d/%d 条起（此前 %d 条一致）"
+                        "｜本轮该条：%s",
+                        divergence + 1,
+                        len(chain_hashes),
+                        divergence,
+                        _chain_preview(messages[divergence]),
+                    )
+                elif len(prev_chain) > len(chain_hashes):
+                    logger.warning(
+                        "消息链缩短：上轮 %d 条 -> 本轮 %d 条（非纯追加）",
+                        len(prev_chain),
+                        len(chain_hashes),
+                    )
+        except Exception as exc:
+            logger.debug("消息链指纹比对失败：%s", exc)
+        runtime["chain_divergence"] = divergence
 
     state["messages"] = messages
     state["tools"] = tools

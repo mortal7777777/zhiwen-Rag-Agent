@@ -27,15 +27,19 @@ SUPPORTED_SUFFIXES = TEXT_SUFFIXES | {".csv", ".doc", ".docx", ".xlsx", ".pdf", 
 _TEXT_ENCODINGS = ("utf-8", "gb18030", "utf-16", "latin-1")
 
 
-def read_text_robust(path: Path) -> str:
-    """按 utf-8 → gb18030 → utf-16 → latin-1 顺序尝试解码文本文件。"""
-    raw = path.read_bytes()
+def decode_text_bytes(raw: bytes) -> str:
+    """按 utf-8 → gb18030 → utf-16 → latin-1 顺序尝试解码字节（供上传查重的近重复检测复用）。"""
     for enc in _TEXT_ENCODINGS:
         try:
             return raw.decode(enc)
         except (UnicodeDecodeError, LookupError):
             continue
     return raw.decode("utf-8", errors="replace")
+
+
+def read_text_robust(path: Path) -> str:
+    """按 utf-8 → gb18030 → utf-16 → latin-1 顺序尝试解码文本文件。"""
+    return decode_text_bytes(path.read_bytes())
 
 
 def list_data_files(data_dir: Path) -> list[Path]:

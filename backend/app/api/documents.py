@@ -2,17 +2,34 @@
 
 from __future__ import annotations
 
+import logging
+import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
-from ..db import get_db
+from ..db import get_db, get_db_optional
 from ..db import repository as repo
+from ..rag import versioning
 from ..rag.loader import TEXT_SUFFIXES
 from ..rag.service import RAGService
-from ..schemas import DocumentInfo, DocumentMetaIn, IndexStatus
+from ..schemas import (
+    DocumentInfo,
+    DocumentMetaIn,
+    DocumentRenameIn,
+    DocumentVersionArchiveIn,
+    DocumentVersionRestoreIn,
+    DocumentVersionsArchiveOut,
+    DocumentVersionsDeleteOut,
+    DocumentVersionsOut,
+    DocumentVersionsRestoreOut,
+    IndexStatus,
+    UploadCheckOut,
+)
 from .deps import get_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["documents"])
 
@@ -182,35 +199,247 @@ def save_document_meta(payload: DocumentMetaIn, db=Depends(get_db)) -> dict:
         raise HTTPException(status_code=500, detail=f"保存文档元数据失败：{exc}")
 
 
-@router.post("/documents/upload", response_model=list[DocumentInfo])
+def _build_upload_check(service: RAGService, db, checks: list[dict]) -> dict:
+    """把 service 的原始冲突报告补上 would_replace / suggested_version_no。"""
+    from ..rag.versioning import suggest_next_version
+
+    files_out = []
+    for item in checks:
+        same = [x for x in item["conflicts"] if x["kind"] == "same_name"]
+        existing: list[str] = []
+        if same and db is not None:
+            try:
+                existing = [
+                    v["version_no"]
+                    for v in repo.list_document_versions(
+                        db, same[0]["existing_relative_path"]
+                    )
+                ]
+            except Exception:
+                existing = []
+        files_out.append(
+            {
+                "file_name": item["file_name"],
+                "would_replace": bool(same),
+                "suggested_version_no": suggest_next_version(existing),
+                "conflicts": item["conflicts"],
+            }
+        )
+    return {
+        "files": files_out,
+        "has_conflict": any(f["conflicts"] for f in files_out),
+    }
+
+
+@router.post("/documents/upload", response_model=list[DocumentInfo] | UploadCheckOut)
 def upload_documents(
     files: list[UploadFile] = File(..., description="支持 txt/md/csv/docx/xlsx/pdf"),
+    dry_run: bool = Form(False, description="只做查重预检，不落盘"),
+    conflict_policy: str = Form("ask", description="ask=有冲突时 409 / proceed=确认后放行"),
+    archive_version_no: str | None = Form(None, description="同名重传时旧文件的归档版本号"),
+    archive_note: str = Form("", description="归档备注（可选）"),
     service: RAGService = Depends(get_service),
-) -> list[dict]:
-    """上传一个或多个文档，并增量更新 OpenSearch 索引。"""
+    db=Depends(get_db_optional),
+):
+    """上传一个或多个文档，并增量更新索引（带查重与同名归档）。
+
+    - 无冲突：200 + 文档列表（老契约不变）；
+    - 有冲突且 policy=ask：409，detail={"code":"upload_conflict","files":[...]}，零写入；
+    - 同名重传（policy=proceed）：旧文件归档到 data_versions/，需 archive_version_no；
+    - dry_run=true：只返回查重报告，不落盘。
+    """
+    version_no = (archive_version_no or "").strip()
+    # 同名 + 版本号已被占用 → 提前 409（避免文件已归档才失败）
+    if conflict_policy == "proceed" and version_no:
+        if db is None:
+            raise HTTPException(
+                status_code=409, detail="数据库未连接，无法归档历史版本，请检查 MySQL 后重试"
+            )
+        for f in files:
+            name = Path(f.filename or "").name
+            if (service.settings.data_dir / name).exists() and repo.version_no_exists(
+                db, name, version_no
+            ):
+                raise HTTPException(status_code=409, detail=f"版本号 {version_no} 已存在")
+
     try:
-        return service.add_documents(files)
+        outcome = service.add_documents(
+            files,
+            dry_run=dry_run,
+            conflict_policy=conflict_policy,
+            archive_version_no=version_no or None,
+            archive_note=archive_note,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"上传失败：{exc}")
 
+    if outcome.mode == "dry_run":
+        return _build_upload_check(service, db, outcome.conflicts)
+    if outcome.mode == "conflict":
+        report = _build_upload_check(service, db, outcome.conflicts)
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "upload_conflict", "message": "检测到上传冲突，请确认后继续", **report},
+        )
+
+    # committed：落归档版本行（同名重传的旧文件）
+    if outcome.archived:
+        if db is None:
+            raise HTTPException(
+                status_code=409, detail="数据库未连接，无法归档历史版本，请检查 MySQL 后重试"
+            )
+        for item in outcome.archived:
+            try:
+                repo.add_document_version(
+                    db,
+                    doc_relative_path=item["doc_relative_path"],
+                    version_no=item["version_no"],
+                    file_name=item["file_name"],
+                    original_name=item["original_name"],
+                    size=item["size"],
+                    note=item["note"],
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=409, detail=f"归档版本写入失败：{exc}")
+    return outcome.documents
+
+
+@router.post("/documents/rename", response_model=list[DocumentInfo])
+def rename_document_endpoint(
+    payload: DocumentRenameIn,
+    service: RAGService = Depends(get_service),
+    db=Depends(get_db),
+) -> list[dict]:
+    """重命名知识库文档（重名 / 非法名拒绝；改名后该书重建索引）。"""
+    try:
+        return versioning.rename_document(
+            service,
+            db,
+            relative_path=payload.relative_path,
+            new_name=payload.new_name,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"重命名失败：{exc}")
+
+
+@router.get("/documents/versions", response_model=DocumentVersionsOut)
+def list_document_versions_endpoint(
+    path: str = Query(..., description="文档相对路径"),
+    service: RAGService = Depends(get_service),
+    db=Depends(get_db),
+) -> dict:
+    """某文档的版本列表（当前版本 + 历史版本）。"""
+    try:
+        return versioning.list_versions(service, db, path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取版本列表失败：{exc}")
+
+
+@router.post("/documents/versions/archive", response_model=DocumentVersionsArchiveOut)
+def archive_document_version_endpoint(
+    payload: DocumentVersionArchiveIn,
+    service: RAGService = Depends(get_service),
+    db=Depends(get_db),
+) -> dict:
+    """把 source 文档归档为 target 文档的历史版本（移出检索、保留文件）。"""
+    try:
+        return versioning.archive_as_version(
+            service,
+            db,
+            source_path=payload.source_path,
+            target_path=payload.target_path,
+            version_no=payload.version_no,
+            note=payload.note,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"归档失败：{exc}")
+
+
+@router.post(
+    "/documents/versions/{version_id}/restore", response_model=DocumentVersionsRestoreOut
+)
+def restore_document_version_endpoint(
+    version_id: int,
+    payload: DocumentVersionRestoreIn,
+    service: RAGService = Depends(get_service),
+    db=Depends(get_db),
+) -> dict:
+    """恢复某历史版本为当前（当前版本归档为 new_version_no，两者交换）。"""
+    try:
+        return versioning.restore_version(
+            service,
+            db,
+            version_id=version_id,
+            new_version_no=payload.new_version_no,
+            note=payload.note,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"恢复失败：{exc}")
+
+
+@router.delete("/documents/versions/{version_id}", response_model=DocumentVersionsDeleteOut)
+def delete_document_version_endpoint(
+    version_id: int,
+    service: RAGService = Depends(get_service),
+    db=Depends(get_db),
+) -> dict:
+    """彻底删除某历史版本（归档文件 + 版本行）。"""
+    try:
+        return versioning.delete_version(service, db, version_id=version_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"删除版本失败：{exc}")
+
 
 @router.delete("/documents/{relative_path:path}", response_model=list[DocumentInfo])
 def delete_document(
     relative_path: str,
+    purge_versions: bool = Query(False, description="同时删除该文档的全部历史版本"),
     service: RAGService = Depends(get_service),
+    db=Depends(get_db_optional),
 ) -> list[dict]:
     """删除知识库文件并移除其向量块（per-doc 增量维护，无需全量重建）。"""
     try:
         service.delete_document(relative_path)
-        return service.list_documents()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"删除失败：{exc}")
+    if purge_versions and db is not None:
+        try:
+            repo.delete_document_versions_all(db, relative_path)
+            root = versioning.versions_dir(service.settings).resolve()
+            vdir = (root / relative_path).resolve()
+            if root in vdir.parents:  # 防路径穿越
+                shutil.rmtree(vdir, ignore_errors=True)
+        except Exception as exc:
+            logger.warning("清理历史版本失败：%s", exc)
+    return service.list_documents()
 
 
 @router.post("/index/rebuild", response_model=IndexStatus)

@@ -9,8 +9,9 @@ venv/
 *.log
 .env
 backend/_*.py
-backend/eval_questions.local.json
+backend/eval_questions.local.json*
 backend/eval_report.jsonl
+backend/logs_e2e.txt
 backend/ragas_baseline.jsonl
 backend/ragas_retrieval_cache.json
 backend/ragas_baselines.json
@@ -27,6 +28,7 @@ frontend/dist/
 
 # 运行时数据：上传文档、索引账本、trace、checkpoint（可重建，不入库）
 data/
+data_versions/
 opensearch_meta/
 .agent_trash/
 
@@ -38,6 +40,9 @@ backend/app/user_tools/*.py
 .vscode/
 *.swp
 Thumbs.db
+
+# Claude Code 本地目录（计划/会话本地状态）
+.claude/
 
 # CLI 会话历史 / Agent 运行产物（含对话内容，勿上传）
 .zhiwen_history.json

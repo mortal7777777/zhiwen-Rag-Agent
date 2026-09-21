@@ -611,6 +611,14 @@ wo<template>
           系统会定期整合整理（合并重复、覆盖过时信息）。
         </div>
         <div class="memory-actions">
+          <el-checkbox
+            v-model="showArchived"
+            size="small"
+            class="memory-archived-toggle"
+            @change="loadMemories"
+          >
+            显示归档
+          </el-checkbox>
           <el-button size="small" @click="openMemoryEdit(null)">新建记忆</el-button>
           <el-button
             size="small"
@@ -625,15 +633,29 @@ wo<template>
       </div>
       <div v-if="!memories.length" class="memory-empty">还没有提取到长期记忆</div>
       <div class="memory-list">
-        <div v-for="m in memories" :key="m.id" class="memory-item">
+        <div
+          v-for="m in memories"
+          :key="m.id"
+          class="memory-item"
+          :class="{ 'is-archived': m.status === 'archived' }"
+        >
           <div class="memory-main">
-            <el-tag size="small" :type="categoryTagType(m.category)" effect="light">
+            <el-tag size="small" class="memory-tag" :type="categoryTagType(m.category)" effect="light">
               {{ categoryLabel(m.category) }}
             </el-tag>
-            <div class="memory-content">{{ m.content }}</div>
+            <div class="memory-body">
+              <div class="memory-content">{{ m.content }}</div>
+              <div class="memory-meta">
+                <span v-if="m.status === 'archived'" class="memory-archived-flag">已归档</span>
+                <span v-if="m.hit_count">命中 {{ m.hit_count }} 次</span>
+              </div>
+            </div>
           </div>
           <div class="memory-ops">
             <el-button size="small" link @click="openMemoryEdit(m)">编辑</el-button>
+            <el-button size="small" link @click="handleArchiveMemory(m)">
+              {{ m.status === 'archived' ? '恢复' : '归档' }}
+            </el-button>
             <el-button size="small" type="danger" link @click="handleDeleteMemory(m)">
               删除
             </el-button>
@@ -686,15 +708,17 @@ wo<template>
         <div class="ctx-row">
           <span class="ctx-label">历史消息</span>
           <span class="ctx-value">
-            {{ contextStats.message_count }} / {{ contextStats.history_max_messages }} 条
+            {{ ctxEffectiveMessages }} 条发给模型
+            <span class="ctx-sub">
+              （上限 {{ contextStats.history_max_messages }}，超
+              {{ ctxHighWater }} 自动压缩<template
+                v-if="contextStats.message_count !== ctxEffectiveMessages"
+              >；会话累计 {{ contextStats.message_count }} 条</template>）
+            </span>
           </span>
         </div>
         <div class="ctx-bar">
-          <i
-            :style="{
-              width: barPct(contextStats.message_count, contextStats.history_max_messages),
-            }"
-          />
+          <i :style="{ width: barPct(ctxEffectiveMessages, ctxHighWater) }" />
         </div>
         <div class="ctx-row">
           <span class="ctx-label">估算 token</span>
@@ -783,7 +807,7 @@ wo<template>
 </template>
 
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowDown,
@@ -1019,6 +1043,8 @@ const memories = ref([])
 const memoryEditVisible = ref(false)
 const consolidating = ref(false)
 const memoryForm = ref({ id: null, content: '', category: 'profile' })
+// 是否连归档记忆一起显示（归档 = 停用但保留，不参与召回/导出）
+const showArchived = ref(false)
 
 const categoryMap = {
   profile: '用户画像',
@@ -1377,6 +1403,23 @@ const contextVisible = ref(false)
 const contextStats = ref(null)
 const compacting = ref(false)
 
+// 下一轮实际发给模型的历史条数（后端 effective_history_messages；
+// 会话累计 message_count 含已并入滚动摘要的部分，两者通常不同）
+const ctxEffectiveMessages = computed(
+  () =>
+    contextStats.value?.effective_history_messages ??
+    contextStats.value?.message_count ??
+    0,
+)
+// 压缩触发水位（1.5×上限）：窗口超过它后压缩到上限条数，
+// 画进度条按水位对比，避免"70/60"这类超 100% 的显示
+const ctxHighWater = computed(
+  () =>
+    contextStats.value?.history_high_water_messages ??
+    contextStats.value?.history_max_messages ??
+    1,
+)
+
 function barPct(cur, cap) {
   if (!cap) return '0%'
   return `${Math.min(100, Math.round((cur / cap) * 100))}%`
@@ -1497,9 +1540,20 @@ async function openMemories() {
 
 async function loadMemories() {
   try {
-    memories.value = await listMemories()
+    memories.value = await listMemories(showArchived.value ? 'all' : 'active')
   } catch (error) {
     ElMessage.error(error.response?.data?.detail || '加载记忆失败')
+  }
+}
+
+async function handleArchiveMemory(memory) {
+  const archived = memory.status !== 'archived'
+  try {
+    await updateMemory(memory.id, { status: archived ? 'archived' : 'active' })
+    await loadMemories()
+    ElMessage.success(archived ? '已归档（不再参与召回，可随时恢复）' : '已恢复')
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || (archived ? '归档失败' : '恢复失败'))
   }
 }
 
@@ -3442,13 +3496,17 @@ onBeforeUnmount(() => {
 
 .memory-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   margin-bottom: 8px;
+}
+
+.memory-item.is-archived {
+  opacity: 0.6;
 }
 
 .memory-main {
@@ -3459,15 +3517,47 @@ onBeforeUnmount(() => {
   gap: 10px;
 }
 
-.memory-content {
+.memory-main .memory-tag {
+  flex-shrink: 0;
+}
+
+.memory-body {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.memory-content {
   font-size: 13.5px;
   color: var(--text-1);
   line-height: 1.6;
+  /* 长路径/URL 等无空格长串要能折行，否则会溢出顶住右侧的编辑/归档/删除按钮 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.memory-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.memory-archived-flag {
+  color: #d48806;
 }
 
 .memory-ops {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.memory-archived-toggle {
+  margin-right: 4px;
 }
 
 </style>

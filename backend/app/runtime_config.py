@@ -328,6 +328,243 @@ def effective(settings, key: str, default=None):
     return getattr(settings, key, None)
 
 
+# ---------------- 供应商 API 格式（OpenAI 兼容 / Anthropic 兼容） ----------------
+
+def provider_api_format(cfg: dict | None) -> str:
+    """判定供应商使用的 API 格式：'anthropic' | 'openai'。
+
+    显式 `api_format` 字段优先；否则按 base_url 推断——路径含 /anthropic
+    即为 Anthropic 兼容端点（如 DeepSeek 的 https://api.deepseek.com/anthropic，
+    见 https://api-docs.deepseek.com/guides/anthropic_api）。
+    """
+    if not cfg:
+        return "openai"
+    fmt = str(cfg.get("api_format") or "").strip().lower()
+    if fmt in ("anthropic", "openai"):
+        return fmt
+    return "anthropic" if "/anthropic" in str(cfg.get("base_url") or "") else "openai"
+
+
+def thinking_param(cfg: dict | None) -> dict:
+    """Anthropic 格式的 thinking 参数（ChatAnthropic 顶层参数）。
+
+    DeepSeek 兼容端点忽略 budget_tokens（官方兼容表），给名义值即可；
+    disabled 在两种格式下都表示关闭思考（辅助调用用）。
+    """
+    if cfg and cfg.get("thinking_enabled") is False:
+        return {"type": "disabled"}
+    return {"type": "enabled", "budget_tokens": 4096}
+
+
+class _AnthropicSystemNormalizer:
+    """Anthropic 兼容端点适配层：链中非连续 SystemMessage 降级为 HumanMessage。
+
+    背景（2026-09-18 实测 bug）：langchain_anthropic 的 _format_messages 只允许
+    一个 system 消息（出现第二个即抛 "Received multiple non-consecutive system
+    messages"）。而本项目的纯追加消息链会把 merge 摘要、计划进度等 system 行
+    追加在链中（问题/工具消息之后），导致 Anthropic 格式下带子代理的任务全崩。
+
+    处理：请求构造时保留"首个 system 段"，其后出现的 SystemMessage 按
+    **位置确定性**转为 HumanMessage（内容不变）——
+    - 转换规则只取决于"是否在首个 system 段之后"，同一条消息每轮转换结果一致，
+      发往 provider 的请求仍是逐轮稳定的纯追加链，前缀缓存不受影响；
+    - 本地落库的消息链不做任何改动（finalize 仍按原样重建）；
+    - OpenAI 格式不经过本适配层。
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    @staticmethod
+    def _normalize(messages):
+        if not isinstance(messages, list):
+            return messages
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        out = []
+        seen_non_system = False
+        converted = False
+        for m in messages:
+            if isinstance(m, SystemMessage):
+                if seen_non_system:
+                    out.append(HumanMessage(content=m.content))
+                    converted = True
+                    continue
+            else:
+                seen_non_system = True
+            out.append(m)
+        return out if converted else messages
+
+    def invoke(self, input, config=None, **kwargs):
+        return self._inner.invoke(self._normalize(input), config=config, **kwargs)
+
+    def stream(self, input, config=None, **kwargs):
+        return self._inner.stream(self._normalize(input), config=config, **kwargs)
+
+    async def ainvoke(self, input, config=None, **kwargs):
+        return await self._inner.ainvoke(self._normalize(input), config=config, **kwargs)
+
+    def astream(self, input, config=None, **kwargs):
+        return self._inner.astream(self._normalize(input), config=config, **kwargs)
+
+    def bind_tools(self, tools, **kwargs):
+        return _AnthropicSystemNormalizer(self._inner.bind_tools(tools, **kwargs))
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _fallback_sync_client(*, base_url: str | None = None, timeout=None, anthropic_proxy: str | None = None):
+    """带系统代理回退的 httpx2 客户端。
+
+    注意用 httpx2：本环境 anthropic SDK 校验 http_client 必须是 httpx2.Client
+    （httpx 的 Client 会被拒收："this SDK uses httpx2"）。
+    anthropic 显式配了代理时尊重显式配置（不走回退）。
+    """
+    from .network import make_httpx2_client
+
+    if anthropic_proxy:
+        import httpx2
+
+        kwargs = {"proxy": anthropic_proxy}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return httpx2.Client(**kwargs)
+    kwargs = {}
+    if base_url:
+        kwargs["base_url"] = base_url
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    return make_httpx2_client(**kwargs)
+
+
+def _fallback_async_client(*, base_url: str | None = None, timeout=None, anthropic_proxy: str | None = None):
+    """带系统代理回退的异步 httpx2 客户端。"""
+    from .network import make_async_httpx2_client
+
+    if anthropic_proxy:
+        import httpx2
+
+        kwargs = {"proxy": anthropic_proxy}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return httpx2.AsyncClient(**kwargs)
+    kwargs = {}
+    if base_url:
+        kwargs["base_url"] = base_url
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    return make_async_httpx2_client(**kwargs)
+
+
+_fallback_chat_anthropic_cls = None
+
+
+def _fallback_chat_anthropic_class():
+    """ChatAnthropic 子类：同步/异步客户端都走带代理回退的工厂（惰性构建一次）。
+
+    2026-09-18 实测教训：langchain_anthropic 自建 httpx 客户端，构造时捕获
+    系统代理（Clash 关闭后所有模型调用报 "Connection error." 且重试无效）；
+    其余 5 处出站调用早已走 network.make_httpx_client，chat 模型是遗漏路径。
+    """
+    global _fallback_chat_anthropic_cls
+    if _fallback_chat_anthropic_cls is None:
+        from functools import cached_property
+
+        from langchain_anthropic import ChatAnthropic
+
+        class _FallbackChatAnthropic(ChatAnthropic):
+            @cached_property
+            def _client(self):  # type: ignore[override]
+                import anthropic
+
+                params = self._client_params
+                http_params = {"base_url": params["base_url"]}
+                if "timeout" in params:
+                    http_params["timeout"] = params["timeout"]
+                if self.anthropic_proxy:
+                    http_params["anthropic_proxy"] = self.anthropic_proxy
+                return anthropic.Client(
+                    **{**params, "http_client": _fallback_sync_client(**http_params)}
+                )
+
+            @cached_property
+            def _async_client(self):  # type: ignore[override]
+                import anthropic
+
+                params = self._client_params
+                http_params = {"base_url": params["base_url"]}
+                if "timeout" in params:
+                    http_params["timeout"] = params["timeout"]
+                if self.anthropic_proxy:
+                    http_params["anthropic_proxy"] = self.anthropic_proxy
+                return anthropic.AsyncClient(
+                    **{**params, "http_client": _fallback_async_client(**http_params)}
+                )
+
+        _fallback_chat_anthropic_cls = _FallbackChatAnthropic
+    return _fallback_chat_anthropic_cls
+
+
+def build_chat_model(
+    cfg: dict,
+    *,
+    model: str | None = None,
+    temperature: float | None = None,
+    timeout: float = 180,
+    max_retries: int = 2,
+    max_tokens: int | None = None,
+    thinking: dict | None = None,
+    extra_body: dict | None = None,
+):
+    """按供应商 API 格式构建对话模型。
+
+    - openai 格式：ChatOpenAI（思考配置走 extra_body）；
+    - anthropic 格式：ChatAnthropic（思考配置走顶层 thinking 参数；
+      max_tokens 必填且思考 token 计入，默认 8192）。
+
+    注意：Anthropic 兼容端点上 DeepSeek 仍是**自动前缀缓存**，cache_control
+    断点被忽略（官方兼容表）；命中量体现在 usage 的 cache_read_input_tokens，
+    与 OpenAI 格式的 prompt_cache_hit_tokens 等价。
+    """
+    fmt = provider_api_format(cfg)
+    base_url = (cfg.get("base_url") or "https://api.deepseek.com").rstrip("/")
+    model_name = model or cfg.get("model") or "deepseek-v4-flash"
+    temp = temperature if temperature is not None else 0.5
+    if fmt == "anthropic":
+        kwargs: dict = dict(
+            model=model_name,
+            api_key=cfg.get("api_key") or "",
+            base_url=base_url,
+            temperature=temp,
+            timeout=timeout,
+            max_retries=max_retries,
+            max_tokens=max_tokens or 8192,
+        )
+        if thinking is not None:
+            kwargs["thinking"] = thinking
+        # 用带回退客户端的子类（Clash 关闭后不再 "Connection error."）
+        return _AnthropicSystemNormalizer(_fallback_chat_anthropic_class()(**kwargs))
+    from langchain_openai import ChatOpenAI
+
+    from .network import make_async_httpx_client, make_httpx_client
+
+    kwargs = dict(
+        api_key=cfg.get("api_key"),
+        base_url=base_url,
+        model=model_name,
+        temperature=temp,
+        request_timeout=timeout,
+        max_retries=max_retries,
+        extra_body=extra_body,
+        http_client=make_httpx_client(),
+        http_async_client=make_async_httpx_client(),
+    )
+    if max_tokens:
+        kwargs["max_tokens"] = max_tokens
+    return ChatOpenAI(**kwargs)
+
+
 def mask_key(value: str | None) -> str | None:
     """脱敏展示 API Key：只留后 4 位。"""
     if not value:

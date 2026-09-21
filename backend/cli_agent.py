@@ -1265,11 +1265,20 @@ def show_context(base_url: str, conversation_id: int | None) -> None:
         return "█" * filled + "░" * (width - filled)
 
     count = int(stats.get("message_count") or 0)
+    effective = int(stats.get("effective_history_messages") or count)
     max_msgs = int(stats.get("history_max_messages") or 1)
+    high = int(stats.get("history_high_water_messages") or max_msgs)
     tokens = int(stats.get("estimated_tokens") or 0)
     budget = int(stats.get("token_budget") or 1)
+    suffix = f"，会话累计 {count} 条" if count != effective else ""
     print(paint("上下文占用", "cyan", bold=True))
-    print(paint(f"   消息   {_bar(count, max_msgs)} {count}/{max_msgs} 条", "dim"))
+    print(
+        paint(
+            f"   消息   {_bar(effective, high)} {effective} 条发给模型"
+            f"（上限 {max_msgs}，超 {high} 自动压缩{suffix}）",
+            "dim",
+        )
+    )
     print(paint(f"   tokens {_bar(tokens, budget)} {fmt_num(tokens)}/{fmt_num(budget)}（估算）", "dim"))
     if stats.get("summary_chars"):
         print(

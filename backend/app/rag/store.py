@@ -80,10 +80,26 @@ class OpenSearchStore:
         """连接检查，返回 OpenSearch 版本信息。"""
         return self._request("GET", "/")
 
+    # 瞬时故障重试路径：查询类操作为幂等读，节点压力窗口的
+    # 502/503/连接错误短退避重试即可消化（2026-09-18：本机出现过
+    # 数秒级的 "all shards failed" 窗口，用户检索被打断）。
+    _RETRYABLE_PATHS = ("_search", "_count", "_delete_by_query")
+
     def _request(self, method: str, path: str, **kwargs) -> dict:
-        response = self.client.request(method, path, **kwargs)
-        response.raise_for_status()
-        return response.json()
+        attempts = 3 if any(p in path for p in self._RETRYABLE_PATHS) else 1
+        for attempt in range(attempts):
+            try:
+                response = self.client.request(method, path, **kwargs)
+                if response.status_code in (502, 503) and attempt < attempts - 1:
+                    time.sleep(0.4 * (attempt + 1))
+                    continue
+                response.raise_for_status()
+                return response.json()
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout):
+                if attempt < attempts - 1:
+                    time.sleep(0.4 * (attempt + 1))
+                    continue
+                raise
 
     # ---------- 索引解析（别名 → 物理索引） ----------
 

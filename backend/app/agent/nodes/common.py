@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 
+from ...llm_text import message_text
 from ...runtime_config import effective
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,7 @@ def _generate_reasoning_summary(
     )
     try:
         resp = service.context._invoke([HumanMessage(content=prompt)])
-        return (resp.content or "").strip()[:200]
+        return message_text(resp.content).strip()[:200]
     except Exception as exc:
         logger.warning("思考摘要生成失败：%s", exc)
         return ""

@@ -49,7 +49,7 @@
         <div class="el-upload__text">
           <template v-if="uploading">
             <el-icon class="is-loading"><Loading /></el-icon>
-            正在上传并索引，请勿关闭页面...
+            正在上传并索引（{{ uploadProgress || '准备中...' }}），请勿关闭页面...
           </template>
           <template v-else>
             拖拽文件到此处，或<em>点击选择</em>
@@ -57,7 +57,8 @@
         </div>
         <template #tip>
           <div class="el-upload__tip">
-            支持 txt / md / csv / doc / docx / xlsx / pdf / epub，上传后自动增量更新索引
+            支持 txt / md / csv / doc / docx / xlsx / pdf / epub，上传后自动增量更新索引；
+            同名重传会提示把旧文件归档为历史版本，重复内容会给出查重警告
           </div>
         </template>
       </el-upload>
@@ -89,8 +90,19 @@
         </div>
       </template>
       <el-table v-loading="tableLoading" :data="filteredDocuments" stripe>
-        <el-table-column label="文件名" min-width="220">
+        <el-table-column label="文件名" min-width="260">
           <template #default="{ row }">
+            <el-dropdown trigger="click" @command="(cmd) => handleVersionCommand(cmd, row)">
+              <el-button type="primary" link class="version-menu-btn">
+                版本<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="manage">版本管理…</el-dropdown-item>
+                  <el-dropdown-item command="archive">归档为历史版本…</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
             <span class="doc-name" @click="handlePreview(row)">{{ row.name }}</span>
           </template>
         </el-table-column>
@@ -109,10 +121,11 @@
           <template #default="{ row }">{{ formatSize(row.size) }}</template>
         </el-table-column>
         <el-table-column prop="modified" label="修改时间" width="170" />
-        <el-table-column label="操作" width="180" align="center">
+        <el-table-column label="操作" width="230" align="center" class-name="ops-cell">
           <template #default="{ row }">
             <el-button type="primary" link @click="handlePreview(row)">预览</el-button>
             <el-button type="primary" link @click="openMetaEdit(row)">分类</el-button>
+            <el-button type="primary" link @click="openRename(row)">重命名</el-button>
             <el-button type="danger" link @click="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -162,6 +175,149 @@
       </template>
     </el-dialog>
 
+    <!-- 重命名对话框 -->
+    <el-dialog v-model="renameVisible" title="重命名文档" width="440px" append-to-body>
+      <el-form label-width="70px">
+        <el-form-item label="原文件">
+          <span class="meta-file">{{ renameForm.oldName }}</span>
+        </el-form-item>
+        <el-form-item label="新文件名">
+          <el-input v-model="renameForm.newName" placeholder="含扩展名，如 示例文档.txt" />
+        </el-form-item>
+        <div class="dir-hint">
+          改名后该书会重新切分并嵌入（可能耗时）；与其他文件重名（含归一化重名）会被拒绝。
+        </div>
+      </el-form>
+      <template #footer>
+        <el-button @click="renameVisible = false">取消</el-button>
+        <el-button type="primary" :loading="renameSaving" @click="saveRename">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 归档为历史版本对话框 -->
+    <el-dialog v-model="archiveVisible" title="归档为历史版本" width="500px" append-to-body>
+      <el-form label-width="100px">
+        <el-form-item label="待归档文档">
+          <span class="meta-file">{{ archiveForm.sourceName }}</span>
+        </el-form-item>
+        <el-form-item label="归属主文档">
+          <el-select
+            v-model="archiveForm.targetPath"
+            filterable
+            placeholder="选择当前生效的主文档"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="d in archiveTargets"
+              :key="d.relative_path"
+              :label="d.name"
+              :value="d.relative_path"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="版本号">
+          <el-input v-model="archiveForm.versionNo" placeholder="如 v1 / 初稿（用户自定）" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="archiveForm.note" placeholder="可选：这版的说明" />
+        </el-form-item>
+        <div class="dir-hint">
+          归档后该文档将从检索中移除（向量块删除），文件保留在 data_versions/，可随时恢复。
+        </div>
+      </el-form>
+      <template #footer>
+        <el-button @click="archiveVisible = false">取消</el-button>
+        <el-button type="primary" :loading="archiveSaving" @click="saveArchive">确认归档</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 版本管理对话框 -->
+    <el-dialog v-model="versionsVisible" title="版本管理" width="680px" append-to-body>
+      <div v-if="versionsData.current" class="versions-current">
+        当前版本：{{ versionsData.name }}（{{ formatSize(versionsData.current.size) }} ·
+        {{ versionsData.current.modified }}）
+      </div>
+      <el-table v-loading="versionsLoading" :data="versionsData.versions" size="small" empty-text="暂无历史版本">
+        <el-table-column prop="version_no" label="版本号" width="100" />
+        <el-table-column prop="original_name" label="归档文件" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="note" label="备注" min-width="110" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.note || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="大小" width="90">
+          <template #default="{ row }">{{ formatSize(row.size) }}</template>
+        </el-table-column>
+        <el-table-column prop="created_at" label="归档时间" width="150" />
+        <el-table-column label="操作" width="120" align="center">
+          <template #default="{ row }">
+            <el-button type="primary" link @click="openRestore(row)">恢复</el-button>
+            <el-button type="danger" link @click="handleDeleteVersion(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="versionsVisible = false">关闭</el-button>
+        <el-button type="primary" plain @click="openArchiveFromVersions">
+          归档其他文档为历史版本…
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 恢复历史版本对话框 -->
+    <el-dialog v-model="restoreVisible" title="恢复历史版本" width="460px" append-to-body>
+      <el-form label-width="120px">
+        <el-form-item label="恢复版本">
+          <span class="meta-file">{{ restoreForm.versionNo }}</span>
+        </el-form-item>
+        <el-form-item label="当前版本归档为">
+          <el-input v-model="restoreForm.newVersionNo" placeholder="为被替换的当前版本指定版本号" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="restoreForm.note" placeholder="可选" />
+        </el-form-item>
+        <div class="dir-hint">
+          恢复后该版本重新切分嵌入（可能耗时）；当前版本自动归档为上面指定的版本号。
+        </div>
+      </el-form>
+      <template #footer>
+        <el-button @click="restoreVisible = false">取消</el-button>
+        <el-button type="primary" :loading="restoreSaving" @click="saveRestore">恢复</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 上传查重确认对话框 -->
+    <el-dialog
+      v-model="uploadConflictVisible"
+      title="重复检测提示"
+      width="540px"
+      append-to-body
+      :close-on-click-modal="false"
+      @close="onConflictDialogClose"
+    >
+      <div class="conflict-file">文件：{{ uploadConflictForm.fileName }}</div>
+      <div v-for="(c, i) in uploadConflictForm.conflicts" :key="i" class="conflict-item">
+        <el-tag :type="conflictTagType(c.kind)" size="small">{{ conflictTagText(c.kind) }}</el-tag>
+        <span class="conflict-msg">{{ c.message }}</span>
+      </div>
+      <template v-if="uploadConflictForm.wouldReplace">
+        <el-divider />
+        <el-form label-width="110px">
+          <el-form-item label="旧版本归档为">
+            <el-input v-model="uploadConflictForm.versionNo" placeholder="如 v1" />
+          </el-form-item>
+          <el-form-item label="备注">
+            <el-input v-model="uploadConflictForm.note" placeholder="可选：本次更新说明" />
+          </el-form-item>
+        </el-form>
+        <div class="dir-hint">
+          确认后旧文件归档为历史版本（可在「版本管理」里恢复），新文件写入并重建索引。
+        </div>
+      </template>
+      <template #footer>
+        <el-button @click="resolveUploadConflict(null)">跳过此文件</el-button>
+        <el-button type="primary" @click="resolveUploadConflict(true)">仍要上传</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 更改数据目录对话框 -->
     <el-dialog v-model="changeDirVisible" title="更改知识库目录" width="480px" append-to-body>
       <el-form label-width="70px">
@@ -189,16 +345,21 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled, Loading } from '@element-plus/icons-vue'
+import { UploadFilled, Loading, ArrowDown } from '@element-plus/icons-vue'
 import DocumentViewer from '../components/DocumentViewer.vue'
 import {
+  archiveDocumentVersion,
   deleteDocument,
+  deleteDocumentVersion,
   getIndexStatus,
   getDocumentMeta,
   listDocuments,
+  listDocumentVersions,
   rebuildIndex,
+  renameDocument,
+  restoreDocumentVersion,
   saveDocumentMeta,
   setDataDir,
   uploadDocuments,
@@ -228,6 +389,49 @@ const metaForm = ref({ relative_path: '', name: '', category: '', tags: '', note
 const changeDirVisible = ref(false)
 const changeDirSaving = ref(false)
 const changeDirForm = ref({ path: '' })
+
+// 上传进度文案（逐文件）
+const uploadProgress = ref('')
+
+// 重命名
+const renameVisible = ref(false)
+const renameSaving = ref(false)
+const renameForm = ref({ relativePath: '', oldName: '', newName: '' })
+
+// 归档为历史版本
+const archiveVisible = ref(false)
+const archiveSaving = ref(false)
+const archiveForm = ref({ sourcePath: '', sourceName: '', targetPath: '', versionNo: 'v1', note: '' })
+const archiveTargets = computed(() =>
+  documents.value.filter((d) => d.relative_path !== archiveForm.value.sourcePath),
+)
+
+// 版本管理
+const versionsVisible = ref(false)
+const versionsLoading = ref(false)
+const versionsData = ref({
+  doc_relative_path: '',
+  name: '',
+  current: null,
+  suggested_version_no: 'v1',
+  versions: [],
+})
+
+// 恢复历史版本
+const restoreVisible = ref(false)
+const restoreSaving = ref(false)
+const restoreForm = ref({ versionId: null, versionNo: '', newVersionNo: 'v1', note: '' })
+
+// 上传查重确认
+const uploadConflictVisible = ref(false)
+const uploadConflictForm = ref({
+  fileName: '',
+  conflicts: [],
+  wouldReplace: false,
+  versionNo: 'v1',
+  note: '',
+})
+let uploadConflictResolver = null
 
 const filteredDocuments = computed(() =>
   categoryFilter.value
@@ -263,30 +467,134 @@ async function handleUpload() {
     return
   }
   uploading.value = true
+  let ok = 0
+  let skipped = 0
+  const failures = []
   try {
-    const result = await uploadDocuments(files)
-    ElMessage.success(`已上传 ${files.length} 个文件并更新索引`)
+    // 逐文件上传：查重冲突（409）时弹确认，逐文件决策互不阻塞
+    for (let i = 0; i < files.length; i += 1) {
+      uploadProgress.value = `${i + 1}/${files.length} ${files[i].name}`
+      try {
+        const result = await uploadOne(files[i])
+        if (result === 'ok') ok += 1
+        else skipped += 1
+      } catch (error) {
+        failures.push(`${files[i].name}：${error.message || '上传失败'}`)
+      }
+    }
+  } finally {
+    uploading.value = false
+    uploadProgress.value = ''
     // 清空上传组件内部的文件列表
     uploadRef.value?.clearFiles()
     fileList.value = []
     await refresh()
+  }
+  const parts = []
+  if (ok) parts.push(`成功 ${ok} 个`)
+  if (skipped) parts.push(`跳过 ${skipped} 个`)
+  if (failures.length) parts.push(`失败 ${failures.length} 个（${failures[0]}）`)
+  if (failures.length) ElMessage.warning(parts.join('，'))
+  else ElMessage.success(parts.join('，') || '没有可上传的文件')
+}
+
+/** 上传单个文件：正常直传；409 查重冲突时弹窗确认，确认后带版本号重传。 */
+async function uploadOne(raw) {
+  try {
+    await uploadDocuments([raw])
+    return 'ok'
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '上传失败')
-  } finally {
-    uploading.value = false
+    const status = error.response?.status
+    const detail = error.response?.data?.detail
+    if (status !== 409 || !detail || !Array.isArray(detail.files) || !detail.files.length) {
+      throw new Error(typeof detail === 'string' ? detail : '上传失败')
+    }
+    const decision = await openUploadConflict(raw.name, detail.files[0])
+    if (!decision) return 'skipped'
+    await uploadDocuments([raw], {
+      conflictPolicy: 'proceed',
+      archiveVersionNo: decision.versionNo,
+      archiveNote: decision.note,
+    })
+    return 'ok'
   }
 }
 
+function openUploadConflict(fileName, check) {
+  uploadConflictForm.value = {
+    fileName,
+    conflicts: check.conflicts || [],
+    wouldReplace: !!check.would_replace,
+    versionNo: check.suggested_version_no || 'v1',
+    note: '',
+  }
+  uploadConflictVisible.value = true
+  return new Promise((resolve) => {
+    uploadConflictResolver = resolve
+  })
+}
+
+function resolveUploadConflict(confirm) {
+  if (confirm && uploadConflictForm.value.wouldReplace && !uploadConflictForm.value.versionNo.trim()) {
+    ElMessage.warning('请先为旧版本填写归档版本号')
+    return
+  }
+  const form = uploadConflictForm.value
+  uploadConflictVisible.value = false
+  const resolver = uploadConflictResolver
+  uploadConflictResolver = null
+  if (resolver) {
+    resolver(
+      confirm ? { versionNo: form.versionNo.trim(), note: form.note.trim() } : null,
+    )
+  }
+}
+
+function onConflictDialogClose() {
+  // 点右上角关闭 = 跳过此文件（否则上传循环里的 Promise 会悬挂）
+  if (uploadConflictResolver) resolveUploadConflict(null)
+}
+
+function conflictTagType(kind) {
+  if (kind === 'identical') return 'danger'
+  if (kind === 'same_name' || kind === 'near_duplicate') return 'warning'
+  return 'info'
+}
+
+function conflictTagText(kind) {
+  return (
+    {
+      same_name: '同名',
+      identical: '内容相同',
+      similar_name: '名称相似',
+      near_duplicate: '疑似重复',
+    }[kind] || kind
+  )
+}
+
 async function handleDelete(row) {
+  // 先查历史版本数量：有版本时在确认文案里明示将一并删除
+  let versionCount = 0
   try {
-    await ElMessageBox.confirm(`确定删除「${row.name}」吗？删除后会重建索引。`, '提示', {
-      type: 'warning',
-    })
+    const data = await listDocumentVersions(row.relative_path)
+    versionCount = (data.versions || []).length
+  } catch {
+    // 读取失败不阻塞删除
+  }
+  const versionHint = versionCount
+    ? `该文档有 ${versionCount} 个历史版本，将一并删除（不可恢复）。`
+    : ''
+  try {
+    await ElMessageBox.confirm(
+      `确定删除「${row.name}」吗？删除后会重建索引。${versionHint}`,
+      '提示',
+      { type: 'warning' },
+    )
   } catch {
     return // 用户取消
   }
   try {
-    await deleteDocument(row.relative_path)
+    await deleteDocument(row.relative_path, versionCount > 0)
     ElMessage.success('已删除并重建索引')
     await refresh()
   } catch (error) {
@@ -389,6 +697,192 @@ async function saveMeta() {
   }
 }
 
+// ---------------- 重命名 ----------------
+
+function openRename(row) {
+  renameForm.value = { relativePath: row.relative_path, oldName: row.name, newName: row.name }
+  renameVisible.value = true
+}
+
+async function saveRename() {
+  const form = renameForm.value
+  const name = form.newName.trim()
+  if (!name) {
+    ElMessage.warning('请输入新文件名')
+    return
+  }
+  if (name === form.oldName) {
+    renameVisible.value = false
+    return
+  }
+  renameSaving.value = true
+  try {
+    await renameDocument(form.relativePath, name)
+    renameVisible.value = false
+    ElMessage.success('已重命名并重建索引')
+    await refresh()
+  } catch (error) {
+    const detail = error.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' ? detail : '重命名失败')
+  } finally {
+    renameSaving.value = false
+  }
+}
+
+// ---------------- 版本管理 ----------------
+
+function handleVersionCommand(cmd, row) {
+  if (cmd === 'manage') openVersions(row)
+  else openArchive(row)
+}
+
+async function loadVersions(relativePath) {
+  versionsLoading.value = true
+  try {
+    versionsData.value = await listDocumentVersions(relativePath)
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '读取版本列表失败')
+  } finally {
+    versionsLoading.value = false
+  }
+}
+
+function openVersions(row) {
+  versionsData.value = {
+    doc_relative_path: row.relative_path,
+    name: row.name,
+    current: null,
+    suggested_version_no: 'v1',
+    versions: [],
+  }
+  versionsVisible.value = true
+  loadVersions(row.relative_path)
+}
+
+// ---------------- 归档为历史版本 ----------------
+
+function openArchive(row) {
+  archiveForm.value = {
+    sourcePath: row.relative_path,
+    sourceName: row.name,
+    targetPath: '',
+    versionNo: 'v1',
+    note: '',
+  }
+  archiveVisible.value = true
+}
+
+function openArchiveFromVersions() {
+  const rel = versionsData.value.doc_relative_path
+  const row = documents.value.find((d) => d.relative_path === rel)
+  if (!row) {
+    ElMessage.warning('主文档不在当前列表中')
+    return
+  }
+  versionsVisible.value = false
+  openArchive(row)
+}
+
+// 选定主文档后自动预填建议版本号（用户可改）
+watch(
+  () => archiveForm.value.targetPath,
+  async (target) => {
+    if (!target || !archiveVisible.value) return
+    try {
+      const data = await listDocumentVersions(target)
+      archiveForm.value.versionNo = data.suggested_version_no || 'v1'
+    } catch {
+      // 预填失败保留当前值
+    }
+  },
+)
+
+async function saveArchive() {
+  const form = archiveForm.value
+  if (!form.targetPath) {
+    ElMessage.warning('请选择归属主文档')
+    return
+  }
+  if (!form.versionNo.trim()) {
+    ElMessage.warning('请填写版本号')
+    return
+  }
+  archiveSaving.value = true
+  try {
+    await archiveDocumentVersion({
+      source_path: form.sourcePath,
+      target_path: form.targetPath,
+      version_no: form.versionNo.trim(),
+      note: form.note.trim(),
+    })
+    archiveVisible.value = false
+    ElMessage.success(`已归档为《${form.targetPath}》的历史版本`)
+    await refresh()
+    if (versionsVisible.value) await loadVersions(versionsData.value.doc_relative_path)
+  } catch (error) {
+    const detail = error.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' ? detail : '归档失败')
+  } finally {
+    archiveSaving.value = false
+  }
+}
+
+// ---------------- 恢复 / 删除历史版本 ----------------
+
+function openRestore(row) {
+  restoreForm.value = {
+    versionId: row.id,
+    versionNo: row.version_no,
+    newVersionNo: versionsData.value.suggested_version_no || 'v1',
+    note: '',
+  }
+  restoreVisible.value = true
+}
+
+async function saveRestore() {
+  const form = restoreForm.value
+  if (!form.newVersionNo.trim()) {
+    ElMessage.warning('请为被替换的当前版本指定版本号')
+    return
+  }
+  restoreSaving.value = true
+  try {
+    const result = await restoreDocumentVersion(form.versionId, {
+      new_version_no: form.newVersionNo.trim(),
+      note: form.note.trim(),
+    })
+    restoreVisible.value = false
+    ElMessage.success('已恢复历史版本并重建索引')
+    await refresh()
+    await loadVersions(result.new_relative_path || versionsData.value.doc_relative_path)
+  } catch (error) {
+    const detail = error.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' ? detail : '恢复失败')
+  } finally {
+    restoreSaving.value = false
+  }
+}
+
+async function handleDeleteVersion(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确定彻底删除历史版本「${row.version_no}」（${row.original_name}）吗？归档文件将被删除，不可恢复。`,
+      '提示',
+      { type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const data = await deleteDocumentVersion(row.id)
+    versionsData.value = { ...versionsData.value, versions: data.versions || [] }
+    ElMessage.success('已删除该历史版本')
+  } catch (error) {
+    const detail = error.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' ? detail : '删除版本失败')
+  }
+}
+
 onMounted(() => {
   tableLoading.value = true
   refresh().finally(() => {
@@ -465,7 +959,12 @@ onMounted(() => {
   width: 160px;
 }
 
-/* 文件名可点击预览 */
+/* 文件名前的版本入口 + 可点击预览 */
+.version-menu-btn {
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
 .doc-name {
   color: var(--el-color-primary);
   cursor: pointer;
@@ -473,6 +972,11 @@ onMounted(() => {
 
 .doc-name:hover {
   text-decoration: underline;
+}
+
+/* 操作列不换行：预览 | 分类 | 重命名 | 删除 一行放下 */
+.ops-cell .cell {
+  white-space: nowrap;
 }
 
 .no-category {
@@ -489,5 +993,35 @@ onMounted(() => {
   font-size: 13px;
   color: var(--text-2);
   word-break: break-all;
+}
+
+/* 版本管理 / 查重提示 */
+.versions-current {
+  font-size: 13px;
+  color: var(--text-2);
+  background: var(--bg-hover, rgba(128, 128, 128, 0.06));
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+
+.conflict-file {
+  font-size: 13px;
+  color: var(--text-2);
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+.conflict-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.conflict-msg {
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.6;
 }
 </style>

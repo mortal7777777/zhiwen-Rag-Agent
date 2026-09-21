@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from ..agent.agent import AgentService
 from ..db import get_db
 from ..db import repository as repo
+from ..llm_text import message_text
 from ..rag.service import RAGService
 from .deps import get_agent_service, get_service
 
@@ -62,7 +63,7 @@ def _news_question(agent: AgentService) -> str:
                 + "\n".join(f"- {t}" for t in titles)
             )
             resp = agent.title_chat.invoke([HumanMessage(content=prompt)])
-            question = (resp.content or "").strip().strip('"“”')
+            question = message_text(resp.content).strip().strip('"“”')
             if question and len(question) < 60:
                 return question
     except Exception as exc:

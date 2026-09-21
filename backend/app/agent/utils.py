@@ -342,6 +342,67 @@ def _tools_prefix_hash(tools) -> str:
     return _hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
+def _window_has_same(rows: list[dict], content: str, role: str = "system") -> bool:
+    """发送窗口内是否已有逐字相同的消息（D 块"变化才追加"的判据）。
+
+    D 块每轮重新渲染，重复注入相同内容只会制造上下文副本、并让该段
+    前缀必然 miss；窗口内已有一份时跳过注入，链仍是纯追加形态。
+    """
+    if not content:
+        return True
+    for row in rows or []:
+        if row.get("role") == role and str(row.get("content") or "") == content:
+            return True
+    return False
+
+
+def _chain_fingerprints(messages: list) -> list[str]:
+    """逐条消息的稳定指纹（缓存前缀分歧定位用）。
+
+    纯追加链要求"下一轮请求 = 上一轮实际发送 + 新增"，因此逐条指纹序列
+    做前缀比对即可定位"第几条消息起断了"；只做诊断，不参与请求内容。
+    """
+    import hashlib as _hashlib
+    import json as _json
+
+    prints: list[str] = []
+    for m in messages:
+        content = getattr(m, "content", "")
+        if not isinstance(content, str):
+            try:
+                content = _json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
+            except Exception:
+                content = str(content)
+        extra = getattr(m, "additional_kwargs", None) or {}
+        payload = _json.dumps(
+            {
+                "type": getattr(m, "type", "") or type(m).__name__,
+                "content": content,
+                "tool_calls": getattr(m, "tool_calls", None) or None,
+                "tool_call_id": getattr(m, "tool_call_id", None),
+                "name": getattr(m, "name", None),
+                "reasoning": extra.get("reasoning_content"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        prints.append(_hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10])
+    return prints
+
+
+def _chain_preview(msg, limit: int = 80) -> str:
+    """消息内容的一行摘要（分歧日志用）。"""
+    text = getattr(msg, "content", "") or ""
+    if not isinstance(text, str):
+        try:
+            text = json.dumps(text, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(text)
+    text = " ".join(str(text).split())
+    return (text[:limit] + "…") if len(text) > limit else text
+
+
 def _rows_to_history(rows: list[dict], history_messages: list | None = None) -> list:
     """把数据库历史行重建为消息链（含工具轮消息，缓存前缀保真）。
 

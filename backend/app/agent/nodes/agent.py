@@ -7,6 +7,7 @@ import time
 
 
 from ...config import Settings
+from ...llm_text import message_text
 from ...runtime_config import effective
 
 logger = logging.getLogger(__name__)
@@ -116,15 +117,15 @@ def _agent_node(state: AgentState) -> dict:
                 runtime["status"] = "stopped"
                 break
             chunks.append(chunk)
-            content = getattr(chunk, "content", None)
-            if content:
+            delta = message_text(getattr(chunk, "content", None))
+            if delta:
                 # TTFT 打点：首个内容 chunk 到达（含工具轮过渡文本，即 API 首字）
                 timings = runtime.setdefault("timings", {})
                 if "first_token_ms" not in timings:
                     timings["first_token_ms"] = round(
                         (time.perf_counter() - runtime["started"]) * 1000
                     )
-                buf_parts.append(content)
+                buf_parts.append(delta)
     finally:
         service.rag.release_llm()
 
@@ -170,7 +171,7 @@ def _agent_node(state: AgentState) -> dict:
     if state["forced_final"] and tool_calls:
         # forced_final 下模型仍调工具：计数，超过阈值后解除绑定兜底
         runtime["forced_tool_rounds"] = runtime.get("forced_tool_rounds", 0) + 1
-    merged_text = merged.content or ""
+    merged_text = message_text(merged.content)
     # 全角/DSML 前缀变体先归一化：否则 <｜DSML｜tool_calls> 这类标签
     # 漏过工具轮判定，正文（含标签）直接泄漏进最终回答
     merged_text = _normalize_tool_markers(merged_text)

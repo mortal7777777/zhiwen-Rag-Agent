@@ -66,6 +66,8 @@ def _load_judge_llm():
     cfg = chat_provider_config(get_settings()) or {}
     if not cfg.get("api_key"):
         raise RuntimeError("未配置对话模型 API Key，无法启动 judge（可用 --no-judge 跳过）")
+    from app.network import make_httpx_client
+
     return ChatOpenAI(
         api_key=cfg.get("api_key"),
         base_url=cfg.get("base_url") or "https://api.deepseek.com",
@@ -74,6 +76,7 @@ def _load_judge_llm():
         request_timeout=120,
         max_retries=1,
         extra_body=thinking_extra_body({"thinking_enabled": False}),
+        http_client=make_httpx_client(),  # 系统代理关闭后不再 Connection error
     )
 
 

@@ -6,6 +6,11 @@
 
 每个服务器运行在独立的 asyncio 事件循环线程中，工具调用同步返回；
 连接失败自动降级（跳过该服务器），不影响主流程。
+
+缓存前缀不变量：工具定义（名称/描述/参数 schema）是 provider 前缀缓存
+的一部分，会话内字节变化会让整段前缀失效。因此连接失败/未就绪时**不
+移除工具**，改用上次成功连接时落盘的 schema 生成同样的工具定义（调用
+时才提示不可用），保证工具数组跨连接状态字节稳定。
 """
 
 from __future__ import annotations
@@ -15,11 +20,32 @@ import json
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
 
 logger = logging.getLogger(__name__)
+
+# 连接超时：npx 首次冷启动实测可达 70s+（@playwright/mcp），20s 必然超时；
+# 连接在后台线程进行、不阻塞请求，超时给足即可。
+DEFAULT_CONNECT_TIMEOUT = 120.0
+# 断连后的重试冷却：距上次尝试超过该秒数，才在请求路径上再触发一次后台连接
+RECONNECT_COOLDOWN = 60.0
+
+
+def _server_signature(cfg: dict) -> str:
+    """服务器配置签名：同 id 但命令/参数变了也要重建会话。"""
+    return json.dumps(
+        [
+            str(cfg.get("type") or "stdio"),
+            str(cfg.get("command") or ""),
+            [str(a) for a in (cfg.get("args") or [])],
+            str(cfg.get("url") or ""),
+            str(cfg.get("name") or ""),
+        ],
+        ensure_ascii=False,
+    )
 
 
 def _truncate(text: str, limit: int = 900) -> str:
@@ -72,20 +98,71 @@ def _schema_to_model(input_schema: dict | None):
 class MCPServerSession:
     """一个 MCP 服务器的常驻连接（独立事件循环线程）。"""
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, cache_dir: Path | None = None) -> None:
         self.config = config
         self.id = str(config.get("id") or "")
         self.name = str(config.get("name") or self.id)
+        self.config_sig = _server_signature(config)
+        self.cache_dir = Path(cache_dir) if cache_dir else None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._session = None
         self._context = None
+        self._lock = threading.Lock()
+        self._connecting = False
+        self._last_attempt = 0.0
         self.tools: list[dict] = []
+        # 上次成功连接的 schema 缓存：连接失败时用它生成同样的工具定义，
+        # 保证工具数组字节稳定（前缀缓存不变量）
+        self.cached_tools: list[dict] = self._load_cached_tools()
         self.connected = False
         self.error: str | None = None
 
-    def start(self, timeout: float = 20.0) -> bool:
-        """启动连接线程并初始化会话；失败返回 False（降级跳过）。"""
+    # ---------------- schema 缓存 ----------------
+
+    def _cache_path(self) -> Path | None:
+        if self.cache_dir is None or not self.id:
+            return None
+        return self.cache_dir / f"{self.id}.json"
+
+    def _load_cached_tools(self) -> list[dict]:
+        path = self._cache_path()
+        if path is None or not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            tools = data.get("tools") if isinstance(data, dict) else None
+            return [
+                t
+                for t in (tools or [])
+                if isinstance(t, dict) and t.get("name")
+            ]
+        except Exception as exc:
+            logger.debug("MCP 工具缓存读取失败 %s：%s", path, exc)
+            return []
+
+    def _save_cached_tools(self) -> None:
+        path = self._cache_path()
+        if path is None or not self.tools:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    {"name": self.name, "tools": self.tools},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.debug("MCP 工具缓存写入失败 %s：%s", path, exc)
+
+    # ---------------- 连接 ----------------
+
+    def start(self, timeout: float = DEFAULT_CONNECT_TIMEOUT) -> bool:
+        """启动连接线程并初始化会话；失败返回 False（降级为缓存 schema）。"""
+        with self._lock:
+            self._last_attempt = time.time()
         try:
             self._loop = asyncio.new_event_loop()
             self._thread = threading.Thread(
@@ -96,11 +173,47 @@ class MCPServerSession:
             self._thread.start()
             fut = asyncio.run_coroutine_threadsafe(self._connect(), self._loop)
             fut.result(timeout=timeout)
-            return self.connected
-        except Exception as exc:
-            self.error = str(exc)
-            logger.warning("MCP 服务器 %s 连接失败：%s", self.name, exc)
+            if self.connected:
+                return True
+            self.close()
             return False
+        except Exception as exc:
+            self.error = str(exc) or type(exc).__name__
+            logger.warning("MCP 服务器 %s 连接失败：%s", self.name, self.error)
+            self.close()
+            return False
+
+    def start_background(self, timeout: float = DEFAULT_CONNECT_TIMEOUT) -> bool:
+        """后台线程发起连接（不阻塞请求）。已在连接中/已连通则跳过。"""
+        with self._lock:
+            if self.connected or self._connecting:
+                return False
+            self._connecting = True
+
+        def _worker() -> None:
+            try:
+                self.start(timeout=timeout)
+            finally:
+                with self._lock:
+                    self._connecting = False
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name=f"mcp-connect-{self.id or self.name}",
+        ).start()
+        return True
+
+    def should_connect(self) -> bool:
+        """是否该（重新）发起连接：未连通、不在连接中、且过了冷却期。"""
+        with self._lock:
+            if self.connected or self._connecting:
+                return False
+            return time.time() - self._last_attempt >= RECONNECT_COOLDOWN
+
+    def available_tools(self) -> list[dict]:
+        """当前用于组装工具定义的 schema：已连通用实时，否则用上次缓存。"""
+        return self.tools if self.connected else self.cached_tools
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
@@ -147,6 +260,17 @@ class MCPServerSession:
                 for t in result.tools
             ]
             self.connected = True
+            prev_names = [t.get("name") for t in self.cached_tools]
+            now_names = [t.get("name") for t in self.tools]
+            if prev_names and prev_names != now_names:
+                logger.warning(
+                    "MCP 服务器 %s 工具集变化（%d -> %d 个）：缓存前缀会失效，"
+                    "常见于服务器版本升级",
+                    self.name,
+                    len(prev_names),
+                    len(now_names),
+                )
+            self._save_cached_tools()
             logger.info("MCP 服务器 %s 就绪，%d 个工具", self.name, len(self.tools))
         except Exception as exc:
             self.error = str(exc)
@@ -191,17 +315,32 @@ class MCPServerSession:
                 self._loop.call_soon_threadsafe(self._loop.stop)
             except Exception:
                 pass
+        self._session = None
+        self._context = None
+        self._loop = None
+        self._thread = None
+        self.connected = False
 
 
 class MCPManager:
     """管理一组 MCP 服务器，并把工具包装成 LangChain BaseTool。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        cache_dir: Path | None = None,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+    ) -> None:
         self._servers: dict[str, MCPServerSession] = {}
         self._lock = threading.Lock()
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.connect_timeout = connect_timeout
 
     def configure(self, servers: list[dict]) -> list[BaseTool]:
-        """按配置启停服务器，返回所有可用工具的 LangChain 包装。"""
+        """按配置启停服务器，返回工具定义（未连通用上次 schema 兜底）。
+
+        连接在后台线程进行、不阻塞请求；连接失败也不再丢工具——用缓存
+        schema 生成同样的定义，保持工具数组字节稳定（前缀缓存不变量）。
+        """
         with self._lock:
             enabled = {
                 str(s.get("id"))
@@ -222,13 +361,20 @@ class MCPManager:
                 if sid not in enabled:
                     continue
                 server = self._servers.get(sid)
+                if server is not None and server.config_sig != _server_signature(cfg):
+                    # 同 id 但配置变了：重建会话
+                    try:
+                        server.close()
+                    except Exception:
+                        pass
+                    self._servers.pop(sid, None)
+                    server = None
                 if server is None:
-                    server = MCPServerSession(cfg)
-                    server.start()
+                    server = MCPServerSession(cfg, cache_dir=self.cache_dir)
                     self._servers[sid] = server
-                if not server.connected:
-                    continue
-                for t in server.tools:
+                if server.should_connect():
+                    server.start_background(timeout=self.connect_timeout)
+                for t in server.available_tools():
                     tools.append(
                         make_mcp_tool(server, cfg, t["name"], t["description"], t["inputSchema"])
                     )
@@ -304,6 +450,14 @@ def make_mcp_tool(
     """把 MCP 工具包装成 LangChain StructuredTool（同步调用）。"""
 
     def _invoke(**kwargs):
+        if not server.connected:
+            return {
+                "summary": f"MCP[{server.name}] {tool_name} 暂不可用：服务器未连接",
+                "error": (
+                    f"MCP 服务器 {server.name} 当前未连接（连接中或不可达），"
+                    "该工具暂不可用。请改用其他工具或方式完成任务，不要重复调用本工具。"
+                ),
+            }
         try:
             # 补默认参数：Playwright MCP 部分工具 schema 声明可选但服务端必填
             call_args = _mcp_default_args(tool_name, kwargs)

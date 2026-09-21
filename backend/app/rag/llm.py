@@ -9,8 +9,8 @@ import json
 import re
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
+from ..llm_text import message_text
 from ..tracing import get_usage_collector
 
 SYSTEM_TEMPLATE = """# 角色
@@ -56,38 +56,29 @@ HYDE_TEMPLATE = """请针对用户的问题，写一段 100~200 字的假设性�
 
 
 class DeepSeekChat:
-    """基于检索上下文的生成模型。"""
+    """基于检索上下文的生成模型（API 格式由供应商配置决定）。"""
 
     def __init__(
         self,
-        api_key: str,
-        base_url: str,
-        model: str,
+        provider: dict,
         temperature: float = 0.3,
         rewrite_temperature: float = 0.0,
-        thinking_enabled: bool = True,
-        thinking_effort: str = "high",
     ):
-        from ..runtime_config import thinking_extra_body
+        from ..runtime_config import build_chat_model, thinking_extra_body, thinking_param
 
-        cfg = {
-            "thinking_enabled": thinking_enabled,
-            "thinking_effort": thinking_effort,
-        }
-        self._llm = ChatOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
+        cfg = provider or {}
+        self._llm = build_chat_model(
+            cfg,
             temperature=temperature,
+            thinking=thinking_param(cfg),
             extra_body=thinking_extra_body(cfg),
         )
         # 改写用温度 0：同样的输入必须产出同样的改写查询，保证检索结果可复现。
         # 检索改写是确定性输出，关闭思考（思考模式下 temperature 无效）
-        self._rewrite_llm = ChatOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
+        self._rewrite_llm = build_chat_model(
+            cfg,
             temperature=rewrite_temperature,
+            thinking={"type": "disabled"},
             extra_body={"thinking": {"type": "disabled"}},
         )
 
@@ -109,7 +100,7 @@ class DeepSeekChat:
             history,
         )
         response = self._llm.invoke(messages, config=self._config())
-        return response.content
+        return message_text(response.content)
 
     async def astream(
         self,
@@ -124,8 +115,9 @@ class DeepSeekChat:
             history,
         )
         async for chunk in self._llm.astream(messages, config=self._config()):
-            if chunk.content:
-                yield chunk.content
+            text = message_text(chunk.content)
+            if text:
+                yield text
 
     def rewrite_queries(
         self,
@@ -145,7 +137,7 @@ class DeepSeekChat:
 
         try:
             response = self._rewrite_llm.invoke(messages, config=self._config())
-            queries = self._parse_queries(response.content)
+            queries = self._parse_queries(message_text(response.content))
             if queries:
                 return queries
         except Exception:
@@ -170,9 +162,9 @@ class DeepSeekChat:
             history,
         )
         try:
-            content = self._rewrite_llm.invoke(
-                messages, config=self._config()
-            ).content.strip()
+            content = message_text(
+                self._rewrite_llm.invoke(messages, config=self._config()).content
+            ).strip()
             content = content.strip('"“”')
             return content if content else question
         except Exception:
@@ -194,9 +186,9 @@ class DeepSeekChat:
             history,
         )
         try:
-            content = self._rewrite_llm.invoke(
-                messages, config=self._config()
-            ).content.strip()
+            content = message_text(
+                self._rewrite_llm.invoke(messages, config=self._config()).content
+            ).strip()
             return content if content else question
         except Exception:
             return question

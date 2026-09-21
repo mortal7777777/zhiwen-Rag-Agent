@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -92,6 +93,28 @@ class DocumentMeta(Base):
     )
 
 
+class DocumentVersion(Base):
+    """文档历史版本（只存归档行；当前版本 = data/ 里的文件本身）。
+
+    归档文件落盘位置：{data_dir.parent}/data_versions/{doc_relative_path}/{file_name}。
+    版本号是标识、当前/归档是状态（当前版本不一定是最大号）。
+    """
+
+    __tablename__ = "document_versions"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    doc_relative_path = Column(String(500), nullable=False, index=True)
+    version_no = Column(String(50), nullable=False)
+    file_name = Column(String(255), nullable=False)
+    original_name = Column(String(255), nullable=False)
+    note = Column(Text, nullable=True)
+    size = Column(BigInteger, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    __table_args__ = (
+        UniqueConstraint("doc_relative_path", "version_no", name="uq_doc_version"),
+    )
+
+
 class AgentRun(Base):
     """Agent 决策运行记录：问题、计划、工具轨迹（含耗时）、状态、延迟。"""
 
@@ -145,6 +168,10 @@ class Memory(Base):
     category = Column(String(50), default="other", nullable=False)
     status = Column(String(20), default="active", nullable=False)
     source_conversation_id = Column(BigInteger, nullable=True)
+    # 被注入上下文的累计次数与最后一次时间：给记忆一个"衰减"依据——
+    # 长期零命中的琐碎记忆可在整合时优先归档（此前所有记忆一律平等）
+    hit_count = Column(Integer, default=0, nullable=False)
+    last_hit_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(
         DateTime,

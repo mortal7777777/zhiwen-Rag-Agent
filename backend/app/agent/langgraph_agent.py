@@ -80,11 +80,19 @@ class LangGraphAgentService(AgentService):
         return self._checkpoint_saver
 
     def refresh(self) -> None:
-        """设置变更后重置懒加载缓存；图结构不变，无需重建。"""
+        """设置变更后重置懒加载缓存；图结构不变，无需重建。
+
+        不重置 MCP 管理器：连接由 MCPManager.configure() 按配置签名自行
+        增删/重建，重建设置页保存会把所有 MCP 连接掐断重连（连接失败即
+        工具数组变化 → 该模型全部会话的前缀缓存作废）。
+        """
         super().refresh()
-        self._mcp = None
 
     # ---------------- 扩展工具（P0：MCP / 受控执行）----------------
+
+    def _mcp_cache_dir(self):
+        """MCP 工具 schema 缓存目录（连接失败时靠它保持工具定义字节稳定）。"""
+        return self.settings.data_dir / "mcp_schema"
 
     def mcp_tools(self, db: Session | None) -> list:
         """加载启用中的 MCP 服务器工具（连接失败自动降级跳过）。"""
@@ -93,7 +101,7 @@ class LangGraphAgentService(AgentService):
         if self._mcp is None:
             from ..mcp_manager import MCPManager
 
-            self._mcp = MCPManager()
+            self._mcp = MCPManager(cache_dir=self._mcp_cache_dir())
         servers = self._load_mcp_servers(db)
         if not servers:
             return []

@@ -94,17 +94,30 @@ class Settings:
     # 历史窗口 token 预算（按提示词模板类别取用，检索型可小、编码/写作需要更长原始上下文）
     history_budget_general: int = 64000
     history_budget_knowledge: int = 64000
-    history_budget_coding: int = 96000
-    history_budget_writing: int = 96000
+    # 编码/写作给足长上下文（配合 [1m] 长窗口模型；非长窗口模型会被
+    # _clamp_to_context_window 自动夹回 窗口−预留，不会超窗报错）
+    history_budget_coding: int = 400000
+    history_budget_writing: int = 400000
     history_budget_translate: int = 64000
+    # 模型上下文窗口建模：历史预算会被夹到"窗口 − 固定开销"，防止换小窗口
+    # 模型时预算超窗报错。0 = 按模型名自动推断（[1m] 后缀 → 1M，其余 128K）
+    model_context_window: int = 0
+    # 窗口内为其他内容预留的 token：静态区 + 工具定义 + D 块 + 输出
+    context_window_reserve: int = 32000
     memory_enabled: bool = True         # 长期事实记忆
     # 自动提取记忆的最小回答长度：短问答不触发记忆提取 LLM 调用（省钱提速）
     memory_auto_extract_min_chars: int = 400
     memory_top_k: int = 3               # 每次注入最相关的记忆条数
     memory_min_score: float = 0.35      # 记忆召回相似度阈值（BGE 余弦）
     memory_max_tokens: int = 600        # 每次注入记忆的 token 预算
-    memory_candidate_limit: int = 100   # 记忆召回粗筛后的候选上限（避免全量 embedding）
-    memory_recent_fallback: int = 50    # 语义不足时用最近 N 条记忆补位
+    memory_candidate_limit: int = 100   # （保留兼容）旧粗筛候选上限
+    memory_recent_fallback: int = 50    # （保留兼容）粗筛时最近 N 条补足
+    # 召回扫描范围：全库向量精排（向量按 id+updated_at 缓存，缺失才补算），
+    # 比 n-gram 粗筛召回更准（换说法也能命中）
+    memory_recall_scan_limit: int = 500
+    # 零命中兜底："介绍一下我"这类问题与具体事实相似度低，一个都没命中时
+    # 注入最近 N 条；曾经是"补位凑满 top_k"，会让每轮都注入无关的最近记忆
+    memory_empty_fallback: int = 2
     memory_consolidate_interval_hours: int = 24  # 自动整合整理间隔
     memory_consolidate_threshold: int = 10      # 活跃记忆超过此条数才触发自动整合
     planner_enabled: bool = True        # 复杂问题先规划（Plan-and-Execute 轻量版）
@@ -187,6 +200,9 @@ class Settings:
     skill_sandbox_enabled: bool = False   # 技能沙箱执行开关（默认关）
     reasoning_summary_enabled: bool = False  # 最终作答前生成"思考摘要"（已深度思考折叠区）；默认关闭
     project_memory_file: str = ""         # 文件型项目记忆（AGENTS.md）路径；空=项目根/AGENTS.md
+    # 单个项目记忆文件的注入上限（按行边界截断）：文件是"完整文档"，
+    # 注入的是"节选"——记忆库再涨也不会让每次请求的上下文无限膨胀
+    project_memory_max_chars: int = 2600
     mcp_enabled: bool = True              # MCP 工具接入总开关
     checkpoint_enabled: bool = True       # 会话中断 checkpoint 恢复
     checkpoint_native_enabled: bool = True  # LangGraph 原生 checkpointer（快照审计）
@@ -265,9 +281,11 @@ class Settings:
             history_max_tokens=int(_env("HISTORY_MAX_TOKENS", "64000")),
             history_budget_general=int(_env("HISTORY_BUDGET_GENERAL", "64000")),
             history_budget_knowledge=int(_env("HISTORY_BUDGET_KNOWLEDGE", "64000")),
-            history_budget_coding=int(_env("HISTORY_BUDGET_CODING", "96000")),
-            history_budget_writing=int(_env("HISTORY_BUDGET_WRITING", "96000")),
+            history_budget_coding=int(_env("HISTORY_BUDGET_CODING", "400000")),
+            history_budget_writing=int(_env("HISTORY_BUDGET_WRITING", "400000")),
             history_budget_translate=int(_env("HISTORY_BUDGET_TRANSLATE", "64000")),
+            model_context_window=int(_env("MODEL_CONTEXT_WINDOW", "0")),
+            context_window_reserve=int(_env("CONTEXT_WINDOW_RESERVE", "32000")),
             memory_enabled=_env("MEMORY_ENABLED", "1") == "1",
             memory_auto_extract_min_chars=int(
                 _env("MEMORY_AUTO_EXTRACT_MIN_CHARS", "400")
@@ -277,6 +295,8 @@ class Settings:
             memory_max_tokens=int(_env("MEMORY_MAX_TOKENS", "600")),
             memory_candidate_limit=int(_env("MEMORY_CANDIDATE_LIMIT", "100")),
             memory_recent_fallback=int(_env("MEMORY_RECENT_FALLBACK", "50")),
+            memory_empty_fallback=int(_env("MEMORY_EMPTY_FALLBACK", "2")),
+            memory_recall_scan_limit=int(_env("MEMORY_RECALL_SCAN_LIMIT", "500")),
             memory_consolidate_interval_hours=int(
                 _env("MEMORY_CONSOLIDATE_INTERVAL_HOURS", "24")
             ),

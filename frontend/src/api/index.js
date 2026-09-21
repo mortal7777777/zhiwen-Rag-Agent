@@ -136,9 +136,9 @@ export const deleteTemplate = (id) =>
 
 // ---------------- 长期记忆 ----------------
 
-/** 已提取的长期记忆列表 */
-export const listMemories = () =>
-  client.get('/memories').then((res) => res.data)
+/** 已提取的长期记忆列表（status: active | archived | all） */
+export const listMemories = (status = 'active') =>
+  client.get('/memories', { params: { status } }).then((res) => res.data)
 
 /** 手动新增长期记忆 */
 export const addMemory = (payload) =>
@@ -162,16 +162,51 @@ export const consolidateMemories = () =>
 export const listDocuments = () =>
   client.get('/documents').then((res) => res.data)
 
-/** 上传多个文件（multipart/form-data） */
-export const uploadDocuments = (files) => {
+/** 上传多个文件（multipart/form-data）
+ *  options: { dryRun, conflictPolicy: 'ask'|'proceed', archiveVersionNo, archiveNote }
+ *  冲突时后端返回 409：detail={code:'upload_conflict', files:[{would_replace, suggested_version_no, conflicts}]}
+ */
+export const uploadDocuments = (files, options = {}) => {
   const form = new FormData()
   files.forEach((file) => form.append('files', file))
+  if (options.dryRun) form.append('dry_run', 'true')
+  if (options.conflictPolicy) form.append('conflict_policy', options.conflictPolicy)
+  if (options.archiveVersionNo) form.append('archive_version_no', options.archiveVersionNo)
+  if (options.archiveNote) form.append('archive_note', options.archiveNote)
   return client.post('/documents/upload', form).then((res) => res.data)
 }
 
-/** 删除知识库文件 */
-export const deleteDocument = (relativePath) =>
-  client.delete(`/documents/${encodeURIComponent(relativePath)}`).then((res) => res.data)
+/** 删除知识库文件；purgeVersions=true 时同时删除其全部历史版本 */
+export const deleteDocument = (relativePath, purgeVersions = false) =>
+  client
+    .delete(`/documents/${encodeURIComponent(relativePath)}`, {
+      params: purgeVersions ? { purge_versions: true } : {},
+    })
+    .then((res) => res.data)
+
+/** 重命名知识库文档（重名 / 非法名后端会拒绝） */
+export const renameDocument = (relativePath, newName) =>
+  client
+    .post('/documents/rename', { relative_path: relativePath, new_name: newName })
+    .then((res) => res.data)
+
+/** 某文档的版本列表（当前版本 + 历史版本） */
+export const listDocumentVersions = (relativePath) =>
+  client
+    .get('/documents/versions', { params: { path: relativePath } })
+    .then((res) => res.data)
+
+/** 把 source_path 文档归档为 target_path 文档的历史版本 */
+export const archiveDocumentVersion = (payload) =>
+  client.post('/documents/versions/archive', payload).then((res) => res.data)
+
+/** 恢复某历史版本为当前（当前版本归档为 new_version_no） */
+export const restoreDocumentVersion = (versionId, payload) =>
+  client.post(`/documents/versions/${versionId}/restore`, payload).then((res) => res.data)
+
+/** 彻底删除某历史版本 */
+export const deleteDocumentVersion = (versionId) =>
+  client.delete(`/documents/versions/${versionId}`).then((res) => res.data)
 
 /** 强制重建索引 */
 export const rebuildIndex = () =>
