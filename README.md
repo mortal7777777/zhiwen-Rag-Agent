@@ -289,7 +289,7 @@ rag_knowledge_base/
 │   └── vite.config.js               # 开发代理 /api -> 127.0.0.1:8000
 ├── data/                            # 知识库文档目录（可配置 DATA_DIR）
 ├── opensearch_meta/                 # 索引账本 + traces/
-├── docs/                            # 项目设计与评测文档（RAG / 编排 / 记忆 / 评测）
+├── docs/                            # 索引方案与评测体系文档
 ├── Dockerfile                       # 后端镜像（lite/full 两档，见下方 Docker 章节）
 ├── docker-compose.yml               # 一键启动（lite 模式）
 ├── docker-compose.full.yml          # full 模式覆盖（本地模型 + GPU）
