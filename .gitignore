@@ -80,11 +80,34 @@ backend/retrieval_summary.py
 backend/rewrite_demo.py
 backend/stability_test.py
 
+# 学习/教程向文档（公开仓库只保留项目自身的设计与评测文档；教程保留在磁盘不入库）
+docs/PYTHON_*_GUIDE.md
+docs/LINUX_GUIDE.md
+docs/DOCKER_GUIDE.md
+docs/DOCKER_MASTER_GUIDE.md
+docs/KUBERNETES_GUIDE.md
+docs/MYSQL_GUIDE.md
+docs/REDIS_GUIDE.md
+docs/NGINX_GUIDE.md
+docs/VUE_GUIDE.md
+docs/FASTAPI_GUIDE.md
+docs/DATA_FLOW_GUIDE.md
+docs/LANGCHAIN_LANGGRAPH_GUIDE.md
+docs/MCP_GUIDE.md
+docs/SKILLS_GUIDE.md
+docs/TOOL_CALLING_GUIDE.md
+docs/OPENSEARCH_GUIDE.md
+docs/AGENT_COMPARISON.md
+docs/CLAUDECODE_COMPARISON.md
+docs/HERMES_STYLE_AGENT.md
+docs/PRODUCTION_ARCHITECTURE.md
+
 # full 模式离线 wheel（构建上下文用，不提交）
 torch_wheels/
 
 # 私人文档（面试笔记等，不进入公开仓库 / 源码包）
 docs/interview*
+docs/INTERVIEW_*
 
 backend/cmrc2018_dev.json
 backend/cmrc2018_eval_result.jsonl

@@ -2,9 +2,6 @@
 
 > **Latest release: [v0.1.0](https://github.com/mortal7777777/zhiwen-Rag-Agent/releases)** —
 > 源码包（zip / tar.gz）可从 Releases 页面下载，不含数据、模型与私有文档。
->
-> 与主流 Agent 应用（Claude Code / Codex / Hermes）的架构与功能对比，见
-> [docs/AGENT_COMPARISON.md](docs/AGENT_COMPARISON.md)。
 
 前后端分离的个人知识库 + 智能助手：基于 **LangChain 框架**，Agent 编排层使用
 **LangGraph 状态图**（7 节点 + 条件路由）实现按需工具调用，支持个人知识库问答、
@@ -290,7 +287,7 @@ rag_knowledge_base/
 │   └── vite.config.js               # 开发代理 /api -> 127.0.0.1:8000
 ├── data/                            # 知识库文档目录（可配置 DATA_DIR）
 ├── opensearch_meta/                 # 索引账本 + traces/
-├── docs/AGENT_COMPARISON.md         # 与主流 Agent 的架构/功能对比
+├── docs/                            # 项目设计与评测文档（RAG / 编排 / 记忆 / 评测）
 ├── Dockerfile                       # 后端镜像（lite/full 两档，见下方 Docker 章节）
 ├── docker-compose.yml               # 一键启动（lite 模式）
 ├── docker-compose.full.yml          # full 模式覆盖（本地模型 + GPU）
