@@ -15,7 +15,7 @@ RRF_K = 60  # RRF 平滑常数：排名越靠前，融合分越高
 
 # 检索代码版本：改检索逻辑时 +1（eval_ragas 检索缓存指纹的一部分，
 # 保证代码改动后评测不会命中旧检索缓存）。
-RETRIEVAL_VERSION = 5
+RETRIEVAL_VERSION = 6
 
 # ---- 书名感知路由（S1，2026-09-11）----
 # 问题含《书名》时，命中该书的候选在跨查询融合中加权（TITLE_BOOST），且在
@@ -98,12 +98,15 @@ def book_scoped_children(
     top_k: int = 3,
     per_leg: int = 100,
     demote_toc: bool = True,
+    query_vector: list[float] | None = None,
 ) -> list[Document]:
     """S3′ 书内检索：在点名书的来源过滤下跑 kNN+BM25 本地 RRF，取书内 top_k child。
 
     全局检索里点名书的正文块会被"引用块（他书提及书名）/同主题书/目录块"
-    挤出（书名信号不对称），书内检索没有这些竞争，相关正文能直接浮现。"""
-    query_vector = embeddings.embed_query(question)
+    挤出（书名信号不对称），书内检索没有这些竞争，相关正文能直接浮现。
+    多本书共享同一问题向量：传入 query_vector 时跳过重复编码。"""
+    if query_vector is None:
+        query_vector = embeddings.embed_query(question)
     dense = store.search_vector(query_vector, per_leg, filter_rel_path=rel_path)
     sparse = store.search_bm25(question, per_leg, filter_rel_path=rel_path)
     merged: dict[str, dict] = {}
@@ -136,13 +139,17 @@ def hybrid_search(
     recall_k: int = 40,
     candidate_pool: int = 24,
     demote_toc: bool = True,
+    query_vector: list[float] | None = None,
 ) -> list[Document]:
     """两路检索融合：
     - 稠密检索：kNN 向量相似度，擅长语义；
     - 稀疏检索：BM25 关键词，擅长精确词/专有名词；
     - RRF：融合分 = Σ 1/(K + rank)，两路都靠前的文本块分数更高。
+
+    传入 query_vector 时跳过内部编码（批量编码 / 并行检索场景复用）。
     """
-    query_vector = embeddings.embed_query(question)
+    if query_vector is None:
+        query_vector = embeddings.embed_query(question)
     dense_docs = store.search_vector(query_vector, recall_k)
     sparse_docs = store.search_bm25(question, recall_k)
 

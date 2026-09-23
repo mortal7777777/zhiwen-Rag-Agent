@@ -155,6 +155,29 @@ class LocalBGEEmbeddings:
                 return self.embed_documents(texts, batch_size=batch_size)
             raise
 
+    def embed_queries(self, texts: list[str], batch_size: int = 8) -> list[list[float]]:
+        """批量生成查询向量（带 BGE 查询前缀；一次 encode 替代逐条调用）。"""
+        if not texts:
+            return []
+        cleaned = [QUERY_PREFIX + text.strip() for text in texts if text.strip()]
+        if not cleaned:
+            return []
+        try:
+            model = self._ensure_model()
+            vectors = model.encode(
+                cleaned,
+                normalize_embeddings=True,
+                batch_size=batch_size,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+            )
+            return vectors.tolist()
+        except Exception as exc:
+            if self.device.startswith("cuda") and is_cuda_error(exc):
+                self._fallback_to_cpu(exc)
+                return self.embed_queries(texts, batch_size=batch_size)
+            raise
+
 
 class APIBGEEmbeddings:
     """OpenAI 兼容 API 嵌入（/v1/embeddings），接口与 LocalBGEEmbeddings 一致。
@@ -235,3 +258,9 @@ class APIBGEEmbeddings:
                     raise RuntimeError(f"嵌入 API 响应缺少 embedding：{item}")
                 out.append(vec)
         return out
+
+    def embed_queries(
+        self, texts: list[str], batch_size: int | None = None
+    ) -> list[list[float]]:
+        """批量查询嵌入（与 embed_query 同口径，保持输入顺序）。"""
+        return self.embed_documents(texts, batch_size=batch_size)

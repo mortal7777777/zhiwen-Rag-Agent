@@ -10,6 +10,7 @@ import json
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -613,17 +614,36 @@ class RAGService:
         start = time.perf_counter()
         # S2 目录块降权：枚举类问题（哪些/哪几/列举）豁免——清单式篇目就是答案
         demote_toc = not is_enumeration_question(question)
-        per_query = [
-            hybrid_search(
+        # 提速：扩展查询一次性批量编码（省 N-1 次模型调用）；编码全部成功时
+        # kNN/BM25 并发执行（OpenSearch 请求是 IO，httpx client 线程安全）。
+        # 编码失败退回逐路串行编码（GPU 模型不允许并发 encode）。
+        try:
+            batch = list(self.embeddings.embed_queries(list(queries)))
+        except Exception as exc:
+            logger.warning("批量查询编码失败，退回逐路编码：%s", exc)
+            batch = []
+        vectors: list[list[float] | None] = (
+            batch if len(batch) == len(queries) else [None] * len(queries)
+        )
+
+        def _search_one(pair: tuple[str, list[float] | None]) -> list[Document]:
+            query, vector = pair
+            return hybrid_search(
                 store,
                 self.embeddings,
                 query,
                 recall_k=self.settings.recall_k,
                 candidate_pool=self.settings.candidate_pool,
                 demote_toc=demote_toc,
+                query_vector=vector,
             )
-            for query in queries
-        ]
+
+        pairs = list(zip(queries, vectors))
+        if len(pairs) > 1 and all(v is not None for v in vectors):
+            with ThreadPoolExecutor(max_workers=min(8, len(pairs))) as pool:
+                per_query = list(pool.map(_search_one, pairs))
+        else:
+            per_query = [_search_one(p) for p in pairs]
         # S1 书名感知路由：问题里点名的书加权 + 保底（篇名匹配不到时自动退化）
         titles = extract_titles(question)
         candidates = merge_query_results(
@@ -640,6 +660,8 @@ class RAGService:
                     f.relative_to(self.settings.data_dir).as_posix()
                     for f in list_data_files(self.settings.data_dir)
                 ]
+                # 多本书共享原问题向量（queries[0] 即原问题），免重复编码
+                original_vector = vectors[0] if vectors else None
                 for rel in match_book_paths(titles, rel_paths):
                     scoped_children.extend(
                         book_scoped_children(
@@ -648,6 +670,7 @@ class RAGService:
                             question,
                             rel,
                             demote_toc=demote_toc,
+                            query_vector=original_vector,
                         )
                     )
             except Exception as exc:
