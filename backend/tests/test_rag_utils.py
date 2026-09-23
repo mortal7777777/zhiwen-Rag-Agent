@@ -27,3 +27,19 @@ def test_is_cuda_error_negative():
 
 def test_detect_device():
     assert detect_device() in ("cuda", "cpu")
+
+
+def test_tessdata_probe_disabled():
+    """PDF 解析前应短路 pymupdf 的 Tesseract 探测。
+
+    否则每份 PDF 会起两次子进程（tesseract --list-langs / where tesseract），
+    中文 Windows 下输出 GBK 而进程处于 UTF-8 模式 → 读取线程刷
+    UnicodeDecodeError traceback（结果不受影响，但日志噪音且白耗两次进程启动）。
+    """
+    from app.rag.loader import _silence_tessdata_probe
+
+    _silence_tessdata_probe()
+    import pymupdf
+
+    assert getattr(pymupdf, "_zhiwen_no_tessdata", False) is True
+    assert pymupdf.get_tessdata() is None  # 不再触发子进程探查

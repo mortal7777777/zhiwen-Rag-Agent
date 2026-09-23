@@ -185,6 +185,35 @@ def load_pdf(
     return docs
 
 
+def _silence_tessdata_probe() -> None:
+    """让 pymupdf 不再探测 Tesseract（每份 PDF 少起两个子进程 + 免解码噪音）。
+
+    pymupdf.get_tessdata() 会执行 `tesseract --list-langs` 与 `where tesseract`
+    两个子进程；中文 Windows 下它们往 stderr 写 GBK（如"信息: 用提供的模式
+    无法找到文件。"），而进程跑在 UTF-8 模式时，subprocess 的读取线程会抛
+    UnicodeDecodeError —— 解析结果本身不受影响（pymupdf4llm 用 try/except
+    接住了异常，判定"无 Tesseract"继续），但每份 PDF 会刷一屏 traceback。
+
+    本项目扫描件 OCR 走 SenseNova（`pdf_vision_ocr_enabled`），不依赖
+    Tesseract，因此把探测结果直接固定为"未安装"（返回 None，与现状等价）。
+    """
+    try:
+        import pymupdf
+    except Exception:
+        return
+    if getattr(pymupdf, "_zhiwen_no_tessdata", False):
+        return
+
+    def _get_tessdata(tessdata=None):
+        return tessdata
+
+    try:
+        pymupdf.get_tessdata = _get_tessdata
+        pymupdf._zhiwen_no_tessdata = True
+    except Exception:  # pragma: no cover - 库结构变化时静默降级
+        pass
+
+
 def _pdf_page_count(file_path: str) -> int:
     """快速获取 PDF 页数（不加载版面模型）。"""
     import fitz
@@ -195,6 +224,7 @@ def _pdf_page_count(file_path: str) -> int:
 
 def _layout_markdown_serial(file_path: str) -> list[Document]:
     """串行布局解析：整本一次转 Markdown（带页码）。"""
+    _silence_tessdata_probe()
     import pymupdf4llm
 
     pages = pymupdf4llm.to_markdown(
@@ -249,6 +279,7 @@ def _layout_markdown_parallel(file_path: str, workers: int) -> list[Document]:
 
 def _layout_range(file_path: str, start: int, end: int) -> list[Document]:
     """子进程任务：解析 [start, end) 页范围（0 基页码）。"""
+    _silence_tessdata_probe()  # 子进程是 spawn 出来的，父进程的补丁不继承
     import pymupdf4llm
 
     pages = pymupdf4llm.to_markdown(
