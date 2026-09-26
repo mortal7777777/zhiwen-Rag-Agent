@@ -4,7 +4,7 @@
 > 源码包（zip / tar.gz）可从 Releases 页面下载，不含数据、模型与私有文档。
 
 前后端分离的个人知识库 + 智能助手：基于 **LangChain 框架**，Agent 编排层使用
-**LangGraph 状态图**（7 节点 + 条件路由）实现按需工具调用，支持个人知识库问答、
+**LangGraph 状态图**（6 节点 + 条件路由）实现按需工具调用，支持个人知识库问答、
 联网搜索、视觉识别、本机 Skills 复用、三层对话记忆（MySQL）、预设提示词模板、
 多供应商模型管理与可视化设置。
 <img width="2520" height="1174" alt="image" src="https://github.com/user-attachments/assets/ec283eff-59a9-4bf9-b9da-ef8d7e451709" />
@@ -18,7 +18,8 @@
 ### Agent 编排（LangGraph）
 
 编排不是手工循环，而是显式状态图（见"架构设计"）：
-`prepare → [dispatch → subagent → merge] → agent → tools → (循环) → finalize`。
+`prepare → agent → tools → (循环) → finalize`，其中 agent 可**自己声明**并行子任务
+（`dispatch → subagent(Send 并行) → merge → agent`），也可自主进入计划模式先出方案。
 
 - 输入框上方开关控制：
   - **知识库检索** `knowledge_base_search`：复用完整 RAG 管道（查询扩展 + 混合检索 + Parent-Child + 本地重排），内置 CRAG 兜底；
@@ -26,11 +27,13 @@
   - **识图** `image_to_text`：主模型无视觉时按需调用 SenseNova；
   - **技能检索** `skill_lookup`：按需取回本机已启用的 Skills 指令（结构化分节）。
 - 四种模式：**自动**（模型按需决定）/ **知识库** / **联网** / **不启用**（纯对话）；
+- **计划模式**（设置 → 工具与集成，默认开）：允许模型对复杂任务先出计划让你确认；关闭即不注册相关工具、模型无法进入；
 - **文件与终端工具**（见下节）：读取自动执行，写/命令敏感操作弹窗人工确认。
-- **Send 子代理并行**：计划里有多个“工具型步骤”时，用 LangGraph `Send`
-  把每个步骤派给独立上下文的子代理（只读/检索类工具）并行执行，
-  各分支返回结论摘要后由 merge 节点合并来源与轨迹、同步任务清单；
-  主 Agent 只做拆解与汇总，避免重复检索；
+- **声明式并行子代理**：主 Agent 在运行中判断某步"自包含且值得隔离上下文"时，
+  用 `dispatch_subtasks` 声明子任务（`research` 只读 / `execute` 可写），
+  条件边用 LangGraph `Send` 扇出并行子代理，结果按 tool_call 一一对应回填为
+  `ToolMessage`（含**产物证据**：新建/覆盖、字节数、命令与退出码、写后校验），
+  未经核实由主 Agent 自行判断采信或重派；每轮最多 4 个子任务、execute 只放开一个；
 - **知识库写入**：新增 `add_document` 工具（txt/md/csv/json），
   保存文档并增量建索引；属敏感操作，经人工确认后才执行；
 - **TodoWrite 任务清单（计划硬约束）**：规划后自动播种任务清单（MySQL 持久化、跨轮跟踪），
@@ -84,7 +87,13 @@
 - **自动分步规划**：是否需要规划由 Agent 自己判断（多步/涉及文件或检索的复杂任务
   自动拆解），规划结果直接列给用户；执行时每完成一步前端自动打对钩
   （任务清单与计划进度联动），Agent 每完成一个小阶段会先汇报进度再继续，
-  全部完成后再给最终总结；不需要用户手动切换任何"计划模式"开关。
+  全部完成后再给最终总结。
+- **计划模式（模型自主 + 用户可关）**：涉及写文件/命令、影响面大的任务，
+  模型可自行 `enter_plan_mode` 只读探索，再用 `exit_plan_mode` 提交结构化步骤；
+  前端渲染成**可编辑的确认卡**，确认（或改完步骤）后按同一份清单执行，
+  清单同时成为任务列表。**键盘可达**：卡片出现即自动聚焦，Enter / Ctrl+Enter 确认、Esc 取消；
+  审批卡同样支持键盘（数字键 1/2/3 批准/拒绝/记住，无需先把焦点点进卡片）。
+  设置页的"计划模式"开关是**硬否决**：关掉后对应工具根本不注册，模型物理上无法进入。
 - 命令白名单（如 `python, git status`）= **自动放行前缀**，命中无需确认；
   未命中命令在 `ask` 模式下仍弹窗批准。模式可切换为 `allow`（全自动批准，
   等价 Claude Code 的 `--dangerously-skip-permissions`，谨慎使用）；
@@ -218,17 +227,22 @@ config.py      全局配置（环境变量可覆盖）
 ```text
 START ──> prepare ──> agent ──> tools ──> agent ──> ...
                         │            ▲
-                        └──有工具调用──┘   （循环，直到无工具调用 / 超限 / 停止）
+                        ├──有工具调用──┘   （循环，直到无工具调用 / 超限 / 停止）
+                        ├──声明了子任务──> dispatch ──> subagent（Send 并行分支）──> merge ──┐
+                        │                                                                  │
+                        └──────────────────────────── agent <───────────────────────────────┘
                     无工具调用 / 停止 ──> finalize ──> END
-
-   prepare 有可拆子任务 ──> dispatch ──> subagent（Send 并行分支）──> merge ──> agent
 ```
 
-- **prepare**：会话/历史/滚动摘要、标题后台线程、计划（含工具映射）、KB 文档清单、
-  记忆召回（GPU 锁内）、视觉识别、时间注入，组装分层消息与工具；广播 `session/plan/vision`。
-- **dispatch / subagent / merge**：计划里有多个"工具型步骤"时，dispatch 用 LangGraph `Send`
-  把每个步骤派给独立上下文的子代理（只读/检索类工具）并行执行，merge 合并各分支
-  结论摘要、来源重编号并同步任务清单；
+- **prepare**：会话/历史/滚动摘要、标题后台线程、KB 文档清单、记忆召回（GPU 锁内）、
+  视觉识别、时间注入，组装分层消息与工具；广播 `session/vision`。
+  （计划不再由独立的 planner 生成——2026-09-25 移除：它只看单条问题、
+  不知道对话与磁盘现状，却决定了派发与预算；现在计划由主 Agent 自己声明。）
+- **dispatch / subagent / merge**：主 Agent 声明子任务后（`dispatch_subtasks`），
+  dispatch 受理并落任务清单，用 LangGraph `Send` 把每个子任务派给独立上下文的
+  子代理并行执行（research=只读，execute=可写、敏感操作走人工确认），merge 把结果
+  **按 tool_call 一一对应回填成 `ToolMessage`**（子代理自述 + 结构化产物证据），
+  来源重编号、同步任务清单；
 - **agent**：LLM 并发锁内流式生成（token 聚合），有 `tool_calls` 走 tools，否则收尾。
 - **tools**：执行工具、回填 `ToolMessage`、注入计划进度、检查调用上限、空参数兜底；广播 `tool_start/tool_result`。
 - **finalize**：来源去重、联网附录、持久化消息、运行记录 + trace、标题事件、`done`。
@@ -487,17 +501,20 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 | `WEB_SEARCH_MAX_RESULTS` | `6` | 单次联网搜索结果条数 |
 | `SEARXNG_BASE_URL` / `SEARXNG_ENGINES` | `http://localhost:8888` / 空 | 自托管 SearXNG 地址 / 指定引擎（如 bing,baidu,sogou） |
 | `AGENT_MAX_ITERATIONS` | `12` | 工具调用循环上限（参考 Claude Code 单轮约 10 次） |
-| `AGENT_TASK_MAX_ITERATIONS` | `30` | 项目级任务（task_mode）的工具调用上限 |
+| `AGENT_TASK_MAX_ITERATIONS` | `50` | 项目级任务（task_mode）的工具调用上限 |
 | `AGENT_TASK_MAX_FAILURES` | `6` | 项目级任务的连续失败上限 |
 | `TASK_MODE_DETECT` | `1` | 自动识别项目级任务并使用独立预算 |
-| `AGENT_SUBAGENTS_ENABLED` | `1` | Send 子代理并行总开关 |
-| `AGENT_SUBAGENT_MAX_ROUNDS` | `2` | 每个子代理最多 LLM 轮数 |
+| `AGENT_SUBAGENTS_ENABLED` | `1` | 子代理派发总开关（关闭=不注册 dispatch_subtasks） |
+| `AGENT_SUBAGENT_MAX_ROUNDS` | `2` | research 子代理最多 LLM 轮数 |
+| `AGENT_SUBAGENT_EXEC_MAX_ROUNDS` | `6` | execute 子代理最多 LLM 轮数（写→验→修至少三轮） |
+| `AGENT_MAX_DISPATCH_ROUNDS` | `3` | 单轮对话内最多派发几轮（防失控扇出） |
+| `AGENT_LLM_STALL_TIMEOUT_S` | `150` | 流式看门狗：多久没收到任何 chunk 判定卡死并报错收尾 |
 | `VERIFY_COMMAND` | 空 | 写/改文件后自动运行的验证命令（显式配置优先，空=按类型自动检测） |
 | `VERIFY_AUTO_DETECT` | `1` | 未配置 VERIFY_COMMAND 时按扩展名自动验证（.py→py_compile / .js→node --check / .json/.yaml 语法） |
 | `VERIFY_MAX_RETRIES` | `1` | 验证失败后允许模型继续修复并复验的次数，超过则要求如实说明 |
 | `CHECKPOINT_NATIVE_ENABLED` | `1` | LangGraph 原生 checkpointer（快照时间线） |
 | `AGENT_MAX_FAILURES` | `3` | 工具失败重试上限（失败不占迭代预算） |
-| `AGENT_RECURSION_LIMIT` | `40` | LangGraph 图执行最大步数（超限友好收尾） |
+| `AGENT_RECURSION_LIMIT` | `110` | LangGraph 图执行最大步数（超限友好收尾） |
 | `CHAT_TEMPERATURE` | `0.5` | 回答温度 |
 | `AGENT_TITLE_MODEL` | `deepseek-v4-flash` | 标题生成模型 |
 | `HISTORY_MAX_MESSAGES` | `400` | 历史窗口行数上限（超 1.5× 才压缩到该条数，粘滞窗口） |
@@ -539,7 +556,7 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 |---|---|---|
 | GET | `/api/health` | 健康检查 |
 | POST | `/api/agent/chat` | Agent 问答（JSON：question / conversation_id / tool_mode / template_id / images） |
-| POST | `/api/agent/stream` | Agent 流式问答（SSE：session / plan / vision / tool_start / tool_result / token / title / done / error；空闲 15s 发 `: keepalive`） |
+| POST | `/api/agent/stream` | Agent 流式问答（SSE：session / plan / plan_progress / plan_approval / vision / tool_start / tool_result / token / title / done / error；空闲 15s 发 `: keepalive`） |
 | POST | `/api/agent/permission/{id}/resolve` | 人工确认：批准/拒绝敏感操作（写文件/编辑/删除/执行命令） |
 | GET | `/api/agent/permissions` | 当前待人工确认的审批请求列表 |
 | GET/PUT | `/api/todos/{conversation_id}` | 读取 / 保存某会话的 TodoWrite 任务清单 |

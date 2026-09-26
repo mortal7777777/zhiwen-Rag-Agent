@@ -33,7 +33,7 @@ python evaluate_agent.py                        # 全量（支持 session 多轮
 python evaluate_agent.py --approve              # 自动化：临时切 allow 模式，跑完恢复 ask
 ```
 
-每题记录：difficulty / category / latency / 工具轨迹 / 计划 / token / 状态，
+每题记录：difficulty / category / latency / 工具轨迹 / 计划 / token / 状态（**注意：2026-09-25 起 `plan` 字段语义变了**——planner 已移除，该字段记录的是主 Agent 的自有声明/计划模式提交，简单问答轮为空是正常的），
 追加到 `eval_report.jsonl`（gitignored），改动前后对比即可发现回归。
 
 ## 三层评分法（系统化评估 Agent）
