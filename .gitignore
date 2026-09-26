@@ -9,6 +9,7 @@ venv/
 *.log
 .env
 backend/_*.py
+backend/scripts/dev/_*.py
 backend/eval_questions.local.json*
 backend/eval_report.jsonl
 backend/logs_e2e.txt
@@ -71,14 +72,14 @@ docs/DEV_PITFALLS.md
 docs/GIT_GUIDE.md
 docs/DOCUMENT_VIEWER_PLAN.md
 docs/RESUME_TECH_DETAILS.md
-backend/chunk_experiment.py
-backend/compare_retrieval.py
+backend/scripts/dev/chunk_experiment.py
+backend/scripts/dev/compare_retrieval.py
 backend/concurrency_test.py
 backend/expansion_demo.py
-backend/http_smoke.py
-backend/retrieval_summary.py
+backend/scripts/dev/http_smoke.py
+backend/scripts/dev/retrieval_summary.py
 backend/rewrite_demo.py
-backend/stability_test.py
+backend/scripts/dev/stability_test.py
 
 # 学习/教程向文档（公开仓库只保留项目自身的设计与评测文档；教程保留在磁盘不入库）
 docs/PYTHON_*_GUIDE.md
@@ -112,6 +113,8 @@ docs/RAG_OPTIMIZATION_LESSONS.md
 docs/RAG_PIPELINE_DETAILED.md
 docs/RETRIEVAL_OPTIMIZATION.md
 docs/CACHE_MEMORY_OPTIMIZATION.md
+docs/TOOL_PIPELINE_DETAILED.md
+docs/INDEX_DEDUP_PIPELINE_DETAILED.md
 
 # full 模式离线 wheel（构建上下文用，不提交）
 torch_wheels/
