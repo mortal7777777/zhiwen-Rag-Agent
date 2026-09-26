@@ -666,6 +666,10 @@
                   <el-switch v-model="toolsForm.agent_subagents_enabled" size="small" />
                 </div>
                 <div class="generic-row">
+                  <span class="generic-label">计划模式（模型自主出计划）</span>
+                  <el-switch v-model="toolsForm.plan_mode_allowed" size="small" />
+                </div>
+                <div class="generic-row">
                   <span class="generic-label">子代理最大轮数</span>
                   <el-input-number
                     v-model="toolsForm.agent_subagent_max_rounds"
@@ -1020,6 +1024,7 @@ const providers = ref([])
 const toolsForm = ref({
   advanced_tools_enabled: false,
   agent_subagents_enabled: true,
+  plan_mode_allowed: true,
   agent_subagent_max_rounds: 2,
   verify_command: '',
   verify_auto_detect: true,
@@ -1125,6 +1130,7 @@ async function loadSettings() {
     toolsForm.value = {
       advanced_tools_enabled: editable.advanced_tools_enabled !== false,
       agent_subagents_enabled: editable.agent_subagents_enabled !== false,
+      plan_mode_allowed: editable.plan_mode_allowed !== false,
       agent_subagent_max_rounds: editable.agent_subagent_max_rounds ?? 2,
       verify_command: editable.verify_command || '',
       verify_auto_detect: editable.verify_auto_detect !== false,
@@ -1318,6 +1324,7 @@ async function saveToolsSettings() {
     await saveSettings({
       advanced_tools_enabled: f.advanced_tools_enabled,
       agent_subagents_enabled: f.agent_subagents_enabled,
+      plan_mode_allowed: f.plan_mode_allowed,
       agent_subagent_max_rounds: f.agent_subagent_max_rounds,
       verify_command: f.verify_command,
       verify_auto_detect: f.verify_auto_detect,

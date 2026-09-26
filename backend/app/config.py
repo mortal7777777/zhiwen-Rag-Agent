@@ -79,10 +79,18 @@ class Settings:
     # ---- Agent 参数 ----
     agent_max_iterations: int = 12      # ReAct 循环最大轮数（2026-08:6→12，参考 Claude Code 单轮约 10 次）
     agent_max_failures: int = 3         # 工具连续失败重试上限（失败不占迭代预算，超过则强制收尾）
-    agent_task_max_iterations: int = 30  # 项目级任务（task_mode）的工具调用上限（2026-08:24→30）
+    agent_task_max_iterations: int = 50  # 项目级任务（task_mode）的工具调用上限
+    # 2026-09-24: 30→50。Claude Code 单轮工具调用实测 p50=6 / p90=40 / max=150
+    # 且没有硬上限（靠上下文满+用户中断）。30 低于其 p90，"设计HTML页面并测试"
+    # 这类任务会在做到一半时被强制收尾。
     agent_task_max_failures: int = 6     # 项目级任务的连续失败上限
     task_mode_detect: bool = True        # 自动识别项目级任务并使用独立预算
-    agent_recursion_limit: int = 40     # LangGraph 图执行最大步数（2026-08:30→40，给失败重试留余量，超过则兜底收尾）
+    # LangGraph 图执行最大步数（superstep）。必须与工具调用上限配套：
+    # 一次 agent→tools 迭代 = 2 步，最坏情况（每轮只调 1 个工具）达成
+    # agent_task_max_iterations 需要 2×N 步。2026-09-24: 40→110
+    # （= 50×2 + prepare/dispatch/subagent/merge/finalize 余量），
+    # 否则 recursion_limit 会先于工具上限触发，改工具上限就白改了。
+    agent_recursion_limit: int = 110
     chat_temperature: float = 0.5       # 普通回答温度
     history_max_messages: int = 400     # 历史窗口行数上限：超 1.5× 才压缩到该条数（粘滞窗口，见 compact_conversation）
     agent_title_model: str = "deepseek-v4-flash"
@@ -120,7 +128,6 @@ class Settings:
     memory_empty_fallback: int = 2
     memory_consolidate_interval_hours: int = 24  # 自动整合整理间隔
     memory_consolidate_threshold: int = 10      # 活跃记忆超过此条数才触发自动整合
-    planner_enabled: bool = True        # 复杂问题先规划（Plan-and-Execute 轻量版）
 
     # ---- CRAG（知识库不足时自动补联网）----
     crag_fallback_enabled: bool = True
@@ -184,8 +191,18 @@ class Settings:
     # 默认开启：读取自动执行，写入/编辑/删除/命令默认走人工确认（ask），
     # 确认后才会真正执行，因此默认开启是安全的；不想要该能力可关掉总开关。
     advanced_tools_enabled: bool = True
-    agent_subagents_enabled: bool = True   # Send 子代理并行总开关
-    agent_subagent_max_rounds: int = 2     # 每个子代理最多 LLM 轮数
+    agent_subagents_enabled: bool = True   # Send 子代理并行总开关（关闭=不注册派发工具）
+    agent_subagent_max_rounds: int = 2     # research 子代理最多 LLM 轮数
+    # execute 子代理：写文件→验证→修复至少三轮，2 轮做不完，故单独给预算
+    agent_subagent_exec_max_rounds: int = 6
+    agent_max_dispatch_rounds: int = 3     # 单轮对话内最多派发几轮（防失控扇出）
+    # 计划模式总开关（设置页可改）：关闭时不注册 enter/exit_plan_mode 工具，
+    # 模型物理上无法进入计划模式——硬否决，不靠提示词自觉
+    plan_mode_allowed: bool = True
+    # 流式看门狗：超过该秒数没收到任何 chunk 判定为卡死并中断报错。
+    # httpx read timeout 只限制单次 socket 读、SDK 还会静默重发，卡死时
+    # 用户会长时间看不到任何输出（2026-09-24 实测 606s 只出 1 token）。
+    agent_llm_stall_timeout_s: float = 150.0
     verify_command: str = ""               # 写/改文件后自动运行的验证命令（空=按类型自动检测）
     verify_auto_detect: bool = True        # 未配置 verify_command 时按文件类型自动选验证命令（py_compile/node --check/JSON 语法）
     verify_max_retries: int = 1            # 验证失败后允许模型继续修复并复验的次数，超过则要求如实说明
@@ -269,10 +286,10 @@ class Settings:
             searxng_engines=_env("SEARXNG_ENGINES", ""),
             agent_max_iterations=int(_env("AGENT_MAX_ITERATIONS", "12")),
             agent_max_failures=int(_env("AGENT_MAX_FAILURES", "3")),
-            agent_task_max_iterations=int(_env("AGENT_TASK_MAX_ITERATIONS", "30")),
+            agent_task_max_iterations=int(_env("AGENT_TASK_MAX_ITERATIONS", "50")),
             agent_task_max_failures=int(_env("AGENT_TASK_MAX_FAILURES", "6")),
             task_mode_detect=_env("TASK_MODE_DETECT", "1") == "1",
-            agent_recursion_limit=int(_env("AGENT_RECURSION_LIMIT", "40")),
+            agent_recursion_limit=int(_env("AGENT_RECURSION_LIMIT", "110")),
             chat_temperature=float(_env("CHAT_TEMPERATURE", "0.5")),
             history_max_messages=int(_env("HISTORY_MAX_MESSAGES", "400")),
             agent_title_model=_env("AGENT_TITLE_MODEL", "deepseek-v4-flash"),
@@ -303,7 +320,6 @@ class Settings:
             memory_consolidate_threshold=int(
                 _env("MEMORY_CONSOLIDATE_THRESHOLD", "10")
             ),
-            planner_enabled=_env("PLANNER_ENABLED", "1") == "1",
             crag_fallback_enabled=_env("CRAG_FALLBACK_ENABLED", "1") == "1",
             crag_min_score=float(_env("CRAG_MIN_SCORE", "0.45")),
             pdf_layout_enabled=_env("PDF_LAYOUT_ENABLED", "1") == "1",
@@ -335,6 +351,16 @@ class Settings:
             advanced_tools_enabled=_env("ADVANCED_TOOLS_ENABLED", "1") == "1",
             agent_subagents_enabled=_env("AGENT_SUBAGENTS_ENABLED", "1") == "1",
             agent_subagent_max_rounds=int(_env("AGENT_SUBAGENT_MAX_ROUNDS", "2")),
+            agent_subagent_exec_max_rounds=int(
+                _env("AGENT_SUBAGENT_EXEC_MAX_ROUNDS", "6")
+            ),
+            agent_max_dispatch_rounds=int(
+                _env("AGENT_MAX_DISPATCH_ROUNDS", "3")
+            ),
+            plan_mode_allowed=_env("PLAN_MODE_ALLOWED", "1") == "1",
+            agent_llm_stall_timeout_s=float(
+                _env("AGENT_LLM_STALL_TIMEOUT_S", "150")
+            ),
             verify_command=_env("VERIFY_COMMAND", ""),
             verify_auto_detect=_env("VERIFY_AUTO_DETECT", "1") == "1",
             verify_max_retries=int(_env("VERIFY_MAX_RETRIES", "1")),

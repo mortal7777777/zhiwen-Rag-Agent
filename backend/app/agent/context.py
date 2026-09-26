@@ -48,14 +48,6 @@ _memory_vec_lock = threading.Lock()
 # ---------------- 结构化输出 schema（with_structured_output 用） ----------------
 
 
-class PlanSteps(BaseModel):
-    """任务规划输出：简单问题返回空数组。"""
-
-    steps: list[str] = Field(
-        default_factory=list, description="2~5 步执行计划，一步即可完成时为空数组"
-    )
-
-
 class FactItem(BaseModel):
     """一条值得长期记住的事实。"""
 
@@ -764,48 +756,3 @@ class ContextService:
         except Exception:
             pass
         return False
-
-    # ---------------- 任务规划 ----------------
-
-    def plan(self, question: str) -> list[str]:
-        """复杂问题生成 2~5 步执行计划；简单问题返回 []。"""
-        if not self.settings.planner_enabled or not self._looks_complex(question):
-            return []
-        prompt = f"""用户提出了一个问题。判断它是否需要多步骤处理
-（例如：需要检索多个资料、联网搜索+推理、对比分析、整理综述）。
-如果需要，输出 2~5 步执行计划；如果一步即可完成，输出空数组。
-要求：
-1. 每步一句话，可包含建议手段（如"检索知识库""联网搜索""推理总结"）。
-2. 当问题涉及书籍/文档（如询问某本书讲了什么）时，第一步必须是"检索知识库"，
-   因为用户的知识库中可能已有该文档；联网搜索只能作为补充手段。
-3. 只输出 JSON 字符串数组，不要任何解释。
-
-问题：{question[:1000]}"""
-        # 优先结构化输出（steps 由 schema 约束为数组，杜绝嵌套/多余文本解析问题）
-        try:
-            out = self._structured(PlanSteps, prompt)
-            if out is not None and getattr(out, "steps", None) is not None:
-                steps = [str(x).strip() for x in out.steps if str(x).strip()]
-                return steps[:5]
-        except Exception as exc:
-            logger.warning("结构化规划失败，回退正则解析：%s", exc)
-        # 回退：正文 JSON + 正则抽取（旧路径）
-        try:
-            resp = self._invoke([HumanMessage(content=prompt)])
-            content = message_text(resp.content).strip()
-            match = re.search(r"\[.*\]", content, re.DOTALL)
-            if not match:
-                return []
-            data = json.loads(match.group(0))
-            steps = [str(x).strip() for x in data if str(x).strip()]
-            return steps[:5]
-        except Exception as exc:
-            logger.warning("任务规划失败：%s", exc)
-            return []
-
-    @staticmethod
-    def _looks_complex(question: str) -> bool:
-        if len(question) >= 30:
-            return True
-        keywords = ("总结", "分析", "对比", "计划", "步骤", "方案", "优缺点", "整理", "综述")
-        return any(k in question for k in keywords)

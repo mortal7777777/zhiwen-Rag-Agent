@@ -59,6 +59,9 @@ export async function streamAgentChat(payload = {}, handlers = {}, options = {})
         handlers.onReasoning(data)
       } else if (event === 'plan_progress' && handlers.onPlanProgress) {
         handlers.onPlanProgress(data)
+      } else if (event === 'plan_approval' && handlers.onPlanApproval) {
+        // 计划模式：模型提交了结构化计划，等用户确认后以 resume_plan 执行
+        handlers.onPlanApproval(data)
       } else if (event === 'vision' && handlers.onVision) {
         handlers.onVision(data)
       } else if (event === 'tool_start' && handlers.onToolStart) {

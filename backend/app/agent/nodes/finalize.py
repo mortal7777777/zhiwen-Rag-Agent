@@ -46,6 +46,25 @@ def _finalize_node(state: AgentState) -> dict:
     tool_trace = state.get("tool_trace") or []
     conv_id = runtime.get("conv_id")
 
+    # 空正文兜底：输出预算被思考吃光或上游卡死时可能一个字都没有。
+    # 静默返回空回答且 status=ok 会让用户完全不知道发生了什么
+    # （2026-09-24 实测 answer_len=0 / status=ok / 前端"没有回答"），
+    # 这里降级为明确错误并推送 error 事件。
+    if not final_text and runtime.get("status") == "ok":
+        runtime["status"] = "error"
+        runtime["error"] = runtime.get("error") or (
+            "本轮未产出正文（输出预算可能被思考耗尽，或上游流中断）。请重试；"
+            "若反复出现，检查供应商状态或调高 max_tokens。"
+        )
+        bus.emit(
+            "error",
+            {
+                "message": runtime["error"],
+                "phase": "finalize",
+                "code": "empty_answer",
+            },
+        )
+
     # 收尾同步任务清单：纯推理/总结类步骤视为被最终回答覆盖，自动补完成；
     # 工具型步骤若仍未完成则保留未勾选状态（审计留痕，不假装完成）
     if db is not None and conv_id is not None and runtime.get("status") == "ok":
@@ -160,6 +179,13 @@ def _finalize_node(state: AgentState) -> dict:
                     marker["__reasoning__"] = (
                         reasoning if reasoning is not None else ""
                     )
+                    # Anthropic 格式的思考块（含 signature）也要落库：下一轮从
+                    # DB 重建历史时若不带上，工具轮同样会 400（回传要求跨轮成立）
+                    thinking_blocks = (
+                        getattr(m, "additional_kwargs", {}) or {}
+                    ).get("anthropic_thinking")
+                    if thinking_blocks:
+                        marker["__thinking__"] = list(thinking_blocks)
                     repo.add_message(
                         db,
                         conv_id,
@@ -179,7 +205,15 @@ def _finalize_node(state: AgentState) -> dict:
                     sources=deduped,
                 )
         except Exception as exc:
+            # 单条落库失败会让 Session 处于 failed 事务，后续写入全部连带失败
+            # （2026-09-24 实测：tool_trace 溢出后 agent_runs 与轨迹压缩一起丢）
+            db.rollback()
             logger.warning("保存对话消息失败：%s", exc)
+
+    # 计划模式提交：run 以「等待用户确认」收尾（不是 error、不种 todos）
+    plan_approval = runtime.get("plan_approval") or None
+    if plan_approval and plan_approval.get("steps"):
+        bus.emit("plan", {"steps": plan_approval["steps"]})
 
     # 决策运行记录 + 结构化 trace（可观测性）
     if db is not None:
@@ -189,6 +223,8 @@ def _finalize_node(state: AgentState) -> dict:
                 if runtime.get("status") == "stopped"
                 else "error"
                 if runtime.get("error")
+                else "awaiting_approval"
+                if plan_approval
                 else "ok"
             )
             run = repo.create_agent_run(
@@ -235,13 +271,14 @@ def _finalize_node(state: AgentState) -> dict:
                     "memory_hits": (state.get("memory_hits") or [])[:5],
                     "todos": state.get("todos") or [],
                     "plan_done_count": state.get("plan_done_count", 0),
-                    "subagents": len(state.get("subagent_results") or []),
+                    "subagents": int(state.get("subagent_round_count") or 0),
                     "usage": usage_summary(),
                     "calls": runtime.get("calls") or [],
                     "timings": dict(runtime.get("timings") or {}),
                 },
             )
         except Exception as exc:
+            db.rollback()
             logger.warning("写入 Agent 运行记录失败：%s", exc)
 
     # 长任务轨迹压缩（P1）：工具调用 >= 3 次时生成过程摘要，下次提问注入
@@ -263,6 +300,7 @@ def _finalize_node(state: AgentState) -> dict:
                 tool_trace,
             )
         except Exception as exc:
+            db.rollback()
             logger.warning("轨迹压缩失败：%s", exc)
 
     # checkpoint：正常/停止收尾后清除快照

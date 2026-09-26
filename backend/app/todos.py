@@ -108,6 +108,44 @@ def seed_todos_from_plan(
     return items
 
 
+def append_plan_todos(
+    db: Session | None,
+    conversation_id: int | None,
+    steps: list[str],
+) -> list[dict]:
+    """把新的计划步骤**追加**进清单（文本已存在则跳过，保留原勾选状态）。
+
+    用于运行中主代理声明子任务的场景：声明就是本轮的工作清单，追加而不像
+    refresh_todos_for_plan 那样整表替换，避免把已完成的历史步骤冲掉。
+    """
+    items = load_todos(db, conversation_id)
+    existing = {str(i.get("text", "")).strip() for i in items}
+    now = time.time()
+    next_index = max([int(i.get("step_index") or 0) for i in items] or [-1]) + 1
+    added = False
+    for step in steps or []:
+        text = str(step).strip()[:200]
+        if not text or text in existing:
+            continue
+        existing.add(text)
+        items.append(
+            {
+                "id": f"todo_{uuid.uuid4().hex[:8]}",
+                "text": text,
+                "done": False,
+                "source": "plan",
+                "step_index": next_index,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        next_index += 1
+        added = True
+    if added:
+        save_todos(db, conversation_id, items)
+    return items
+
+
 def refresh_todos_for_plan(
     db: Session | None,
     conversation_id: int | None,

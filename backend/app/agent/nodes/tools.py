@@ -14,6 +14,11 @@ from ...runtime_config import effective
 
 logger = logging.getLogger(__name__)
 from ..state import AgentState, EventBus
+from ..tools import (
+    PLAN_ENTER_TOOL_NAME,
+    PLAN_EXIT_TOOL_NAME,
+    PLAN_MODE_SYSTEM_HINT,
+)
 from .common import (_failure_limit, _generate_reasoning_summary,
                      _iteration_limit, _plan_hint)
 from ..utils import (
@@ -41,6 +46,7 @@ def _tools_node(state: AgentState) -> dict:
     db: Session | None = state["db"]
     stop_event = state.get("stop_event")
     from ...permissions import (
+        SENSITIVE_TOOLS,
         describe_tool_call,
         display_args,
         get_permission_manager,
@@ -56,7 +62,6 @@ def _tools_node(state: AgentState) -> dict:
         pass
 
     tools_by_name = {t.name: t for t in state["tools"]}
-    counter = state["counter"]
     tool_calls = state.get("pending_tool_calls") or []
     if not tool_calls:
         return {}
@@ -90,7 +95,8 @@ def _tools_node(state: AgentState) -> dict:
             if is_sensitive_tool(name, args):
                 blocked[tc.get("id")] = (
                     "当前为计划模式（只读）：不允许写文件/编辑/删除/执行命令。"
-                    "请基于已有信息整理出清晰的执行计划，等待用户确认后再执行。"
+                    "请用只读手段把现状摸清，然后用 exit_plan_mode 提交结构化计划，"
+                    "等待用户确认后再执行。"
                 )
 
     # ---- 人工确认（HITL）：敏感操作先请求用户批准，再进入执行 ----
@@ -261,11 +267,45 @@ def _tools_node(state: AgentState) -> dict:
 
     failed_ids: set[str] = set()
     hook_contexts: list[str] = []
+    plan_approval = False
+    plan_entered = False
     for tc, result in outcomes:
         if stop_event is not None and stop_event.is_set():
             runtime["status"] = "stopped"
             break
         name = tc.get("name", "")
+        # ---- 计划模式控制工具：在这里改状态/发事件（工具本身无副作用）----
+        # 注意：提示语必须在**所有 ToolMessage 追加完之后**再插进链里——
+        # Anthropic 要求 tool_use 紧邻其 tool_result，中间夹 SystemMessage
+        # 会直接 400（实测 messages.2 tool_use ids without tool_result）。
+        if name == PLAN_ENTER_TOOL_NAME and "error" not in result:
+            if not state.get("plan_only"):
+                state["plan_only"] = True
+                plan_entered = True
+                bus.emit(
+                    "status",
+                    {"phase": "plan", "text": "已进入计划模式（只读探索）"},
+                )
+        elif name == PLAN_EXIT_TOOL_NAME and "error" not in result:
+            steps = [
+                str(s).strip()
+                for s in (result.get("steps") or (tc.get("args") or {}).get("steps") or [])
+                if str(s).strip()
+            ][:8]
+            if steps:
+                # 结构化计划：前端据此渲染确认卡（可编辑），确认后以
+                # resume_plan 重发 → prepare 沿用并种进任务清单
+                runtime["plan_approval"] = {
+                    "steps": steps,
+                    "summary": str((tc.get("args") or {}).get("summary") or "")[:200],
+                }
+                state["plan_steps"] = steps
+                state["plan_map"] = [_plan_hint(s) for s in steps]
+                plan_approval = True
+                bus.emit(
+                    "plan_approval",
+                    {"steps": steps, "summary": runtime["plan_approval"]["summary"]},
+                )
         entry = {
             "name": name,
             "arguments": tc.get("args") or {},
@@ -349,6 +389,10 @@ def _tools_node(state: AgentState) -> dict:
                 )
                 if r.get("additional_context"):
                     hook_contexts.append(f"[{r['name']}] {r['additional_context']}")
+
+    if plan_entered:
+        # 所有 ToolMessage 都已入链，此时插计划模式规则才不破坏 tool_use/tool_result 配对
+        messages.append(SystemMessage(content=PLAN_MODE_SYSTEM_HINT))
 
     if hook_contexts:
         messages.append(
@@ -500,10 +544,15 @@ def _tools_node(state: AgentState) -> dict:
             done = total = 0
             remaining = []
     if not todos and plan_map:
-        # 任务清单不可用（如 DB 降级）时退回计划步骤顺序
+        # 任务清单不可用（如 DB 降级/计划模式尚未确认）时退回计划步骤顺序。
+        # 注意 plan_map 的字段是 "step" 而非 "text"，渲染时两者都要认，
+        # 否则进度行会出现空步骤（"剩余步骤：；；；"）。
         done = min(int(state.get("plan_done_count") or 0), len(plan_map))
         total = len(plan_map)
-        remaining = plan_map[done:]
+        remaining = [
+            {**m, "text": str(m.get("step") or m.get("text") or "")}
+            for m in plan_map[done:]
+        ]
     state["plan_done_count"] = done
     state["todos"] = todos
     if todos:
@@ -528,7 +577,12 @@ def _tools_node(state: AgentState) -> dict:
         else:
             progress.append("剩余：无，可以基于已获取的信息作答。")
         progress_text = "\n".join(progress)
-        messages.append(SystemMessage(content=progress_text))
+        # 进度行只在内容变化时追加：tools 节点每轮 ReAct 循环都会走到这里，
+        # 无变化时重复追加会在链上堆叠同值行（实测单 run 达 13 行），每行都是
+        # 缓存 miss 且此后常驻历史。前端 progress 事件仍照发，不影响 UI。
+        if state.get("plan_progress_sig") != progress_text:
+            state["plan_progress_sig"] = progress_text
+            messages.append(SystemMessage(content=progress_text))
         # 计划进度事件：前端按完成/当前/未开始渲染步骤状态
         bus.emit(
             "plan_progress",
@@ -539,6 +593,17 @@ def _tools_node(state: AgentState) -> dict:
                 "text": progress_text,
             },
         )
+
+    # ---- 任务态升格：本轮已产生副作用即按项目级任务给预算 ----
+    # 关键词表永远补不全：实测"设计一个HTML页面，内容是svg绘制一个鹈鹕骑自行车
+    # 的2D动画"（44 字 < 80、计划 3 步 < 4、零关键词命中）被判为非任务态，预算
+    # 只有 12 次，两轮都撞上限被迫收尾。一旦真的动手写文件/跑命令，就该按
+    # 项目级任务（30 次）给预算，而不是靠猜问题措辞。
+    if not state.get("task_mode") and any(
+        isinstance(tc, dict) and tc.get("name") in SENSITIVE_TOOLS
+        for tc in tool_calls
+    ):
+        state["task_mode"] = True
 
     # 达到工具调用上限：强制收尾（下一轮 agent 不绑定工具）
     if (
@@ -616,7 +681,7 @@ def _tools_node(state: AgentState) -> dict:
                     "verify_fail_count": int(state.get("verify_fail_count") or 0),
                     "plan_done_count": state.get("plan_done_count", 0),
                     "plan_push_count": state.get("plan_push_count", 0),
-                    "dispatch_done": bool(state.get("dispatch_done")),
+                    "dispatch_rounds": int(state.get("dispatch_rounds") or 0),
                     "todos": state.get("todos") or [],
                 },
             )
@@ -630,12 +695,19 @@ def _tools_node(state: AgentState) -> dict:
         "sources": state["sources"],
         "tool_calls_used": state["tool_calls_used"],
         "failure_count": state.get("failure_count", 0),
-        "forced_final": state["forced_final"],
+        # 提交计划后强制收尾：本轮不再派工具，由模型把计划讲清楚，等用户确认
+        "forced_final": bool(state["forced_final"]) or plan_approval,
         "last_call_warned": state["last_call_warned"],
         "verify_fail_count": int(state.get("verify_fail_count") or 0),
         "plan_done_count": state.get("plan_done_count", 0),
+        "plan_progress_sig": state.get("plan_progress_sig", ""),
+        "task_mode": bool(state.get("task_mode")),
         "force_continue": False,
         "plan_push_count": state.get("plan_push_count", 0),
+        # 计划模式：进入后 plan_only 生效，敏感工具被拦截（见本函数开头）
+        "plan_only": bool(state.get("plan_only")),
+        "plan_steps": state.get("plan_steps") or [],
+        "plan_map": state.get("plan_map") or [],
         "todos": state.get("todos") or [],
     }
 

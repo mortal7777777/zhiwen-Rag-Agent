@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import time
@@ -86,8 +87,41 @@ def _atomic_write(target: Path, content: str) -> None:
                 pass
 
 
+_COMPOUND_OPS = {
+    ">": "重定向", "<": "输入重定向", "|": "管道", "&": "后台/串联",
+    ";": "串联", "(": "子 shell/命令替换", ")": "子 shell/命令替换",
+}
+
+
+def _compound_reason(line: str) -> str:
+    """检测未加引号包裹的 shell 操作符；安全则返回空串。
+
+    前缀匹配挡不住复合命令：`ls > x.txt`、`ls | xargs rm`、`echo $(rm -rf x)`
+    都以白名单前缀开头，却会写文件或串联破坏性操作。用 shlex 按 shell 词法
+    拆分——裸操作符会成为独立 token，引号内的保持在同一 token 里，正好区分
+    `python -c "import a; print(b)"`（分号是普通字符）和 `ls; rm -rf x`。
+    `/dev/null` 重定向与 `2>&1` 属于无害形式，先剔除再判。
+    """
+    body = re.sub(r"\d?>{1,2}\s*(?:/dev/null|&\d+)", "", line)
+    try:
+        toks = list(shlex.shlex(body, posix=True, punctuation_chars="();<>|&;"))
+    except ValueError:
+        return "命令引号不闭合，无法判定"
+    # shlex 会把连续的同类标点合并成一个 token（`>>`、`&&`、`||`），
+    # 所以按字符判定而不是整 token 查表
+    hits: set[str] = set()
+    for t in toks:
+        if t and all(c in _COMPOUND_OPS for c in t):
+            hits.update(_COMPOUND_OPS[c] for c in t)
+    return ("命令含" + "、".join(sorted(hits))) if hits else ""
+
+
 def command_allowed(settings, command_line: str) -> tuple[bool, str]:
-    """命令白名单判断：命中前缀即自动放行；空白名单 = 全部走人工确认。"""
+    """命令白名单判断：命中前缀即自动放行；空白名单 = 全部走人工确认。
+
+    白名单只覆盖**单条**只读命令；含重定向/管道/串联/命令替换的一律不自动
+    放行，退回人工确认（见 _compound_reason）。
+    """
     raw = (effective(settings, "command_allowlist") or "").strip()
     line = command_line.strip()
     if not line:
@@ -95,9 +129,50 @@ def command_allowed(settings, command_line: str) -> tuple[bool, str]:
     if not raw:
         return False, ""
     for prefix in [p.strip() for p in raw.split(",") if p.strip()]:
-        if line.startswith(prefix):
-            return True, ""
+        if not line.startswith(prefix):
+            continue
+        reason = _compound_reason(line)
+        if reason:
+            return False, f"{reason}（白名单只对单条只读命令生效）"
+        return True, ""
     return False, f"命令不在自动放行白名单内：{line[:80]}"
+
+
+def _bash_argv(command: str) -> list[str] | None:
+    """Windows 上改用 Git Bash 执行命令；返回 None 表示沿用默认 shell。
+
+    `shell=True` 在 Windows 上走 COMSPEC（cmd.exe）：模型训练分布以 Unix
+    语法为主，写 grep/find/sed/ls 全部失效，转而用 cd /d 这类 cmd 语法反复
+    试错，白耗工具预算（实测单轮 5 次 bash 里 2 次 exit=255）。改成显式走
+    Git Bash 后，命令语义与 Claude Code 在 Windows 上的行为一致。
+    非 Windows 或找不到 bash 时返回 None，保持原行为。
+    """
+    if os.name != "nt":
+        return None
+    bash = shutil.which("bash") or shutil.which("bash.exe")
+    if not bash:
+        return None
+    return [bash, "-c", command]
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """超时后尽力杀掉整棵进程树（子 shell 可能又起了后台进程）。"""
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=15,
+            )
+            return
+        import signal
+
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 def _run_command(
@@ -123,21 +198,55 @@ def _run_command(
     if sandbox == "docker":
         return _run_docker_command(settings, command, workdir)
     try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            timeout=max(1, int(effective(settings, "command_timeout") or 60)),
-            encoding="utf-8",
-            errors="replace",
-        )
-        output = (proc.stdout or "") + (("\n[stderr] " + proc.stderr) if proc.stderr else "")
+        argv = _bash_argv(command)
+        timeout = max(1, int(effective(settings, "command_timeout") or 60))
+        # 输出走**临时文件**而不是管道：命令里用 `&` 起的后台进程（例如预览页面时
+        # `python -m http.server 8123 &`）会继承并长期持有管道，而
+        # subprocess.run(capture_output=True) 在子 shell 退出后仍要等管道 EOF
+        # → 工具永久挂住、整轮对话僵死（2026-09-26 实测卡死 45 分钟，
+        # 超时 kill 也救不了：TimeoutExpired 之后仍会再等一次管道）。
+        # 写文件则父进程只等子进程本身，后台进程继续跑（正是起静态服务想要的语义）。
+        with tempfile.TemporaryFile(
+            "w+", encoding="utf-8", errors="replace"
+        ) as out_f, tempfile.TemporaryFile(
+            "w+", encoding="utf-8", errors="replace"
+        ) as err_f:
+            proc = subprocess.Popen(
+                argv if argv else command,
+                shell=argv is None,
+                cwd=workdir,
+                stdout=out_f,
+                stderr=err_f,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                # 独立进程组：超时能整棵树杀掉（含它起的子进程）
+                start_new_session=os.name != "nt",
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+                ),
+            )
+            timed_out = False
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _kill_process_tree(proc)
+            out_f.seek(0)
+            err_f.seek(0)
+            stdout = out_f.read()
+            stderr = err_f.read()
+        output = stdout + (("\n[stderr] " + stderr) if stderr else "")
+        if timed_out:
+            return {
+                "error": f"命令超时（>{timeout}s）已终止",
+                "summary": "命令超时已终止",
+                "output": _truncate(output),
+            }
         # "伪成功"盲区提示：exit=0 但 stdout/stderr 全空——命令很可能没按预期
         # 执行（Windows git-bash 下引号转义、python -c 多行参数、cmd 语法
         # cd /d 等），不提示的话模型会换写法无限重试直到撞图步数上限。
-        if proc.returncode == 0 and not proc.stdout and not proc.stderr:
+        if proc.returncode == 0 and not stdout and not stderr:
             summary = (
                 "命令执行完成（exit=0）但没有任何输出——命令可能没按预期执行："
                 "请检查引号转义、python -c 多行参数、路径写法（cd /d 是 cmd "
@@ -149,11 +258,6 @@ def _run_command(
             "summary": summary,
             "exit_code": proc.returncode,
             "output": _truncate(output),
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "error": f"命令超时（>{effective(settings, 'command_timeout')}s）已终止",
-            "summary": "命令超时已终止",
         }
     except Exception as exc:
         return {"error": str(exc), "summary": f"命令执行失败：{exc}"}
@@ -412,6 +516,11 @@ def make_write_file_tool(settings, project_dir: str | None = None) -> BaseTool:
                 "summary": f"{'覆盖' if existed else '新建'} {path}（{len(content)} 字符）",
                 "path": str(target),
                 "relative_path": str(target.relative_to(workspace)).replace("\\", "/"),
+                # 产物证据：created 区分"本步新建"与"覆盖旧文件"，
+                # 子代理回报与主 agent 核验都用它（2026-09-24 复用旧产物事故）
+                "created": not existed,
+                "bytes": len(content.encode("utf-8")),
+                "lines": content.count("\n") + 1,
             }
         except Exception as exc:
             return {"error": str(exc), "summary": f"写入文件失败：{exc}"}
@@ -462,6 +571,10 @@ def make_edit_file_tool(settings, project_dir: str | None = None) -> BaseTool:
                 "replaced": count if replace_all else 1,
                 "remaining_occurrences": max(0, count - (count if replace_all else 1)),
                 "diff": {"before": before, "after": after},
+                # 产物证据：edit 只描述"改了哪个文件"，created 恒为 False
+                "created": False,
+                "bytes": len(new_text.encode("utf-8")),
+                "lines": new_text.count("\n") + 1,
             }
         except Exception as exc:
             return {"error": str(exc), "summary": f"编辑文件失败：{exc}"}
@@ -547,8 +660,12 @@ def make_bash_tool(
         name="bash",
         description=(
             "在工作目录内执行 shell 命令（Python/Node/Git 等），带超时与输出截断。"
-            "用于运行脚本、跑测试、查看目录、执行简单工具。敏感操作："
-            "默认每次执行都会请求用户确认；命中命令白名单的会自动放行。"
+            "用于运行脚本、跑测试、查看目录、执行简单工具。"
+            "环境是 Git Bash（Unix 语法）：grep/find/sed/ls 均可用，路径用正斜杠"
+            "（C:/Users/... 或 /c/Users/...），空设备写 /dev/null 而不是 NUL，"
+            "不要用 cd /d 这类 cmd 语法。多行脚本先写入文件再执行，"
+            "避免 python -c 的引号转义坑。敏感操作：默认每次执行都会请求用户确认；"
+            "命中命令白名单的会自动放行。"
         ),
         args_schema=None,
     )
@@ -561,7 +678,7 @@ def make_bash_tool(
 
 def make_file_tool(settings) -> BaseTool:
     """文件工具：白名单目录内的 list/read/write/append。"""
-    workspace = _resolve_workspace(settings, project_dir)
+    workspace = _resolve_workspace(settings)
 
     def _invoke(operation: str, path: str, content: str = "") -> dict:
         try:

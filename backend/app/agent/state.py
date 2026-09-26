@@ -38,6 +38,7 @@ class AgentState(TypedDict, total=False):
     messages: list
     tools: list
     pending_tool_calls: list
+    pending_subtasks: list[dict]
     sources: list[dict]
     tool_trace: list[dict]
     counter: list[int]
@@ -55,16 +56,20 @@ class AgentState(TypedDict, total=False):
     kb_documents: list[str]
     memory_hits: list[str]
     xml_retry_count: int
+    empty_retry_count: int
     memory_summary: str | None
     vision_descriptions: list[str]
     summary_text: str | None
     todos: list[dict]
     plan_done_count: int
+    plan_progress_sig: str
     force_continue: bool
     plan_push_count: int
     sub_task: dict
     subagent_results: Annotated[list[dict], operator.add]
-    dispatch_done: bool
+    subagent_consumed: int
+    subagent_round_count: int
+    dispatch_rounds: int
 
     title_holder: list[str]
     title_thread: threading.Thread | None

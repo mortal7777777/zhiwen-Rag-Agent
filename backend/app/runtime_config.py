@@ -56,6 +56,7 @@ EDITABLE_KEYS = {
     "task_mode_detect",
     "agent_subagents_enabled",
     "agent_subagent_max_rounds",
+    "plan_mode_allowed",
     "verify_command",
     "verify_auto_detect",
     "verify_max_retries",
@@ -393,7 +394,55 @@ class _AnthropicSystemNormalizer:
             else:
                 seen_non_system = True
             out.append(m)
-        return out if converted else messages
+        if converted:
+            messages = out
+        return _AnthropicSystemNormalizer._inject_thinking(messages)
+
+    @staticmethod
+    def _inject_thinking(messages):
+        """把工具轮暂存的 Anthropic 思考块还原进 content。
+
+        langchain-anthropic 不认 OpenAI 风格的 `reasoning_content`，只认 content 里的
+        `{"type": "thinking"}` 块；启用思考时带 tool_use 的 assistant 消息必须把思考
+        原样回传（含 signature），否则 DeepSeek /anthropic 端点报
+        "The `content[].thinking` in the thinking mode must be passed back"（2026-09-26 实测）。
+
+        纯函数 → 同一输入每轮转换结果一致，不破坏前缀缓存的"纯追加"不变量；
+        只作用于发往 provider 的请求，不改动本地落库链路。
+        """
+        from langchain_core.messages import AIMessage
+
+        out = []
+        changed = False
+        for m in messages:
+            blocks = None
+            if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+                blocks = (getattr(m, "additional_kwargs", {}) or {}).get(
+                    "anthropic_thinking"
+                )
+            if not blocks:
+                out.append(m)
+                continue
+            content = m.content
+            if isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "thinking"
+                for b in content
+            ):
+                out.append(m)  # 已有思考块：不重复注入
+                continue
+            if isinstance(content, str):
+                tail = (
+                    [{"type": "text", "text": content}] if content.strip() else []
+                )
+            elif isinstance(content, list):
+                tail = list(content)
+            else:
+                tail = []
+            out.append(
+                m.model_copy(update={"content": [dict(b) for b in blocks] + tail})
+            )
+            changed = True
+        return out if changed else messages
 
     def invoke(self, input, config=None, **kwargs):
         return self._inner.invoke(self._normalize(input), config=config, **kwargs)
@@ -521,7 +570,11 @@ def build_chat_model(
 
     - openai 格式：ChatOpenAI（思考配置走 extra_body）；
     - anthropic 格式：ChatAnthropic（思考配置走顶层 thinking 参数；
-      max_tokens 必填且思考 token 计入，默认 8192）。
+      max_tokens 必填且**思考 token 计入**，默认 32000）。
+      不能设小：思考模式下 output 会被 reasoning 吃光，正文一个字都出不来
+      ——实测 8192 时整轮 answer_len=0（HTTP 200、无异常，纯被截断）。
+      Claude Code 用同一模型单次输出实测峰值 16,517 tokens 未撞限，
+      32000 留足余量。
 
     注意：Anthropic 兼容端点上 DeepSeek 仍是**自动前缀缓存**，cache_control
     断点被忽略（官方兼容表）；命中量体现在 usage 的 cache_read_input_tokens，
@@ -539,7 +592,7 @@ def build_chat_model(
             temperature=temp,
             timeout=timeout,
             max_retries=max_retries,
-            max_tokens=max_tokens or 8192,
+            max_tokens=max_tokens or 32000,
         )
         if thinking is not None:
             kwargs["thinking"] = thinking

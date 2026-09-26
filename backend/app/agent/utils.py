@@ -94,6 +94,16 @@ def _parse_xml_tool_calls(text: str) -> list[dict]:
     return calls
 
 
+def _q(p) -> str:
+    """拼进 shell 命令的路径：正斜杠 + 双引号。
+
+    Windows 命令经 Git Bash 执行（见 tools_extra._bash_argv），反斜杠会被
+    bash 当转义符吃掉——`D:\\conda_envs\\py.exe` 变成 `D:conda_envspy.exe`，
+    直接 command not found(127)。正斜杠两种 shell 都认。
+    """
+    return '"' + str(p).replace("\\", "/") + '"'
+
+
 def _pick_verify_command(settings, path: str) -> str | None:
     """为单个写入/编辑的文件选择验证命令。
 
@@ -109,14 +119,18 @@ def _pick_verify_command(settings, path: str) -> str | None:
         return None
     ext = Path(path).suffix.lower()
     if ext == ".py":
-        return f'{sys.executable} -m py_compile "{path}"'
+        return f"{_q(sys.executable)} -m py_compile {_q(path)}"
     if ext in (".js", ".mjs", ".cjs"):
-        return f'node --check "{path}"'
+        return f"node --check {_q(path)}"
     if ext == ".json":
         # python -m json.tool：语法错误时非零退出，输出原样捕获，避免嵌套引号
-        return f'{sys.executable} -m json.tool "{path}"'
+        return f"{_q(sys.executable)} -m json.tool {_q(path)}"
     if ext in (".yaml", ".yml"):
-        return f'{sys.executable} -c "import yaml,sys; yaml.safe_load(open(sys.argv[1], encoding=\'utf-8\'))" "{path}"'
+        return (
+            f"{_q(sys.executable)} -c "
+            f"\"import yaml,sys; yaml.safe_load(open(sys.argv[1], encoding='utf-8'))\" "
+            f"{_q(path)}"
+        )
     return None
 
 
@@ -432,17 +446,23 @@ def _rows_to_history(rows: list[dict], history_messages: list | None = None) -> 
                     marker = {}
                     calls = []
                 reasoning = marker.get("__reasoning__")
+                extra: dict = {
+                    # 无条件回传（含空串）：旧数据缺 __reasoning__ 时
+                    # 补空串，避免工具轮消息无字段触发 API 400
+                    "reasoning_content": (
+                        reasoning if reasoning is not None else ""
+                    )
+                }
+                # Anthropic 格式的思考块（含 signature）原样带回，请求时由
+                # _AnthropicSystemNormalizer 还原成 content 块（否则工具轮 400）
+                thinking = marker.get("__thinking__")
+                if thinking:
+                    extra["anthropic_thinking"] = list(thinking)
                 out.append(
                     AIMessage(
                         content="",
                         tool_calls=calls,
-                        # 无条件回传（含空串）：旧数据缺 __reasoning__ 时
-                        # 补空串，避免工具轮消息无字段触发 API 400
-                        additional_kwargs={
-                            "reasoning_content": (
-                                reasoning if reasoning is not None else ""
-                            )
-                        },
+                        additional_kwargs=extra,
                     )
                 )
             else:
@@ -508,49 +528,5 @@ def _tool_has_required_args(tool) -> bool:
     except Exception:
         return True  # 判断失败时保守拦截
 
-
-
-_CACHEABLE_TOOLS = frozenset(
-    {
-        "knowledge_base_search",
-        "web_search",
-        "list_dir",
-        "read_file",
-        "grep_search",
-        "skill_lookup",
-    }
-)
-
-
-
-_XML_TOOL_TAG_RE = re.compile(
-    r"</?(?:tool_calls|tool_call|invoke|tool_use|function_calls|function|arguments|parameter)[^>]*>",
-    re.I,
-)
-
-# 完整工具调用块（含内部参数值）：整体删除，避免仅删标签后参数内容泄漏。
-# 覆盖 <tool_calls>…</tool_calls>、<invoke name=…>…</invoke>、
-# <tool_use>…</tool_use>、<tool_call>…</tool_call>、<function>…</function>，
-# 以及完整的 <parameter>…</parameter>/<arguments>…</arguments> 子元素
-# （外层标签未闭合时子元素仍可能完整，逐元素删除防内容残留）。
-
-_XML_TOOL_BLOCK_RE = re.compile(
-    r"<(?:tool_calls|tool_call|tool_use|invoke|function|function_calls|parameter|arguments)\b[^>]*>.*?"
-    r"</(?:tool_calls|tool_call|tool_use|invoke|function|function_calls|parameter|arguments)>",
-    re.S | re.I,
-)
-
-# 工具轮检测标记：模型输出这些片段即视为 XML 风格工具调用（含变体）
-
-_XML_TOOL_MARKERS = (
-    "<tool_calls",
-    "<invoke",
-    "<tool_use",
-    "<function_calls",
-    "<user|tool_calls",
-    "<|tool_calls",
-    "<|DSML|tool_calls",
-    "<function name=",
-)
 
 

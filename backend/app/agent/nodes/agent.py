@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import logging
+import queue as _queue
+import threading as _threading
 import time
 
 
 from ...config import Settings
-from ...llm_text import message_text
+from ...llm_text import extract_thinking_blocks, message_text
 from ...runtime_config import effective
 
 logger = logging.getLogger(__name__)
 from ..state import AgentState, EventBus
 from .common import _iteration_limit
-from .subagent import _remaining_needs_tools
+from .subagent import (
+    _parse_declared_subtasks,
+    _remaining_needs_tools,
+    _split_declaration,
+)
 from ..utils import (
     _XML_TOOL_MARKERS,
     _normalize_tool_markers,
@@ -28,6 +34,72 @@ if TYPE_CHECKING:
 from ...tracing import get_usage_collector
 
 # ==== 函数体（原文）====
+def _render_plan_text(approval: dict) -> str:
+    """把提交的计划渲染成给用户看的正文（不再让模型多说一轮）。"""
+    steps = approval.get("steps") or []
+    lines = [f"计划已就绪（{len(steps)} 步），确认或修改后即按此执行："]
+    lines.extend(f"{i}. {s}" for i, s in enumerate(steps, 1))
+    summary = str(approval.get("summary") or "").strip()
+    if summary:
+        lines.append(f"\n{summary}")
+    lines.append("\n（在计划卡片上点「确认执行」开始；也可以先改步骤。）")
+    return "\n".join(lines)
+
+
+
+_STREAM_DONE = object()
+_DEFAULT_STALL_TIMEOUT_S = 150.0
+# 空正文重试上限：思考模式下一次 32000 输出预算全被 reasoning 吃光并不罕见
+# （2026-09-24 实测），只给一次机会太紧；重试轮本身已改用无思考模型。
+_EMPTY_RETRY_LIMIT = 2
+
+
+def _should_retry_empty(
+    *,
+    tool_calls: list,
+    merged_text: str,
+    usage: dict | None,
+    forced_final: bool,
+    status: str | None,
+    retry_count: int,
+    limit: int = _EMPTY_RETRY_LIMIT,
+) -> bool:
+    """是否给一次"带明确指令的空正文重试"。
+
+    命中条件：本轮没有工具调用、正文为空、不是强制收尾、且模型**确实产生过
+    输出**（output_tokens>0，说明是被长度上限截断而非真空响应）。
+    重试次数受 limit 约束，且计数需每轮重置（见 prepare/langgraph_agent 的
+    empty_retry_count 初始化，checkpointer 会把 state 跨轮带下去）。
+    """
+    if tool_calls or forced_final or status == "stopped":
+        return False
+    if merged_text.strip():
+        return False
+    if any(marker in merged_text for marker in _XML_TOOL_MARKERS):
+        return False
+    if int((usage or {}).get("output_tokens") or 0) <= 0:
+        return False
+    return retry_count < limit
+
+
+class _StreamError:
+    """守护线程捕获的传输异常。"""
+
+    __slots__ = ("exc",)
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+
+def _stall_timeout(settings: Settings) -> float:
+    raw = getattr(settings, "agent_llm_stall_timeout_s", None)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = _DEFAULT_STALL_TIMEOUT_S
+    return value if value > 0 else _DEFAULT_STALL_TIMEOUT_S
+
+
 def _agent_node(state: AgentState) -> dict:
     service: LangGraphAgentService = state["service"]
     bus: EventBus = state["bus"]
@@ -43,6 +115,23 @@ def _agent_node(state: AgentState) -> dict:
     if stopped():
         runtime["status"] = "stopped"
         return {}
+
+    # 计划已提交：不再调模型（实测提交后还会再多跑两轮共 4 分钟），
+    # 直接把计划渲染成正文收尾，把回合让给用户确认
+    approval = runtime.get("plan_approval") or {}
+    if approval.get("steps"):
+        text = _render_plan_text(approval)
+        runtime["final_text"] = (runtime.get("final_text") or "") + text
+        bus.emit("token", text)
+        return {
+            "pending_tool_calls": [],
+            "pending_subtasks": [],
+            "force_continue": False,
+            "plan_done_count": state.get("plan_done_count", 0),
+            "todos": state.get("todos") or [],
+            "plan_steps": state.get("plan_steps") or [],
+            "plan_map": state.get("plan_map") or [],
+        }
 
     # 还剩最后一次工具调用时提前提示：优先补充检索，随后必须作答
     remaining_calls = _iteration_limit(state, settings) - state["tool_calls_used"]
@@ -93,10 +182,16 @@ def _agent_node(state: AgentState) -> dict:
         # （实测同消息去/加 tools 命中从 768 掉到 640），去掉会让末次调用
         # 整链失效。若模型在 forced_final 下仍反复调工具，兜底 2 轮后
         # （forced_tool_rounds>=2）才解除绑定，保证终止。
+        # 空正文重试轮改用无思考模型：reasoning 与正文共用输出预算，
+        # 上一次就是被思考吃光的，重试再开思考大概率重演（2026-09-24 实测）。
+        thinking_off = bool(state.get("empty_retry_pending"))
+        if thinking_off:
+            state["empty_retry_pending"] = False
+        model = service.chat_plain if thinking_off else service.chat
         chat = (
-            service.chat
+            model
             if not tools or runtime.get("forced_tool_rounds", 0) >= 2
-            else service.chat.bind_tools(tools)
+            else model.bind_tools(tools)
         )
         chunks: list = []
         stream = chat.stream(
@@ -112,10 +207,57 @@ def _agent_node(state: AgentState) -> dict:
         # 注意：判定必须放在合并文本上做——XML 标签（如 <tool_calls>）跨
         # 分片时逐片检测会漏判，导致工具调用信息泄漏进最终回答。
         buf_parts: list[str] = []
-        for chunk in stream:
+        # ---- 卡死看门狗 ----
+        # 直接 `for chunk in stream` 阻塞在 socket 读上时无法被中断：httpx 的
+        # read timeout 只限制单次 socket 读，服务端持续发 SSE 心跳就永不触发，
+        # SDK 还会静默重发（max_retries=2）。2026-09-24 实测末次调用 606s 只
+        # 产出 1 个 token、日志无完成记录，用户只看到"没有回答"。
+        # 这里把消费放到守护线程，主线程按 chunk 间隔判定：超过阈值即报错收尾。
+        # 判定按**任意 chunk**计时（思考期也在流式输出），不看正文是否为空。
+        stall_s = _stall_timeout(settings)
+        stream_queue: "_queue.Queue" = _queue.Queue(maxsize=256)
+
+        def _producer() -> None:
+            try:
+                for chunk in stream:
+                    try:
+                        stream_queue.put(chunk, timeout=1.0)
+                    except _queue.Full:
+                        # 消费者已放弃（卡死/停止）：收尾并关闭流，避免继续挂连接
+                        break
+            except Exception as exc:  # 传输异常也要变成用户可见错误
+                try:
+                    stream_queue.put(_StreamError(exc), timeout=1.0)
+                except _queue.Full:
+                    pass
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+                try:
+                    stream_queue.put(_STREAM_DONE, timeout=1.0)
+                except _queue.Full:
+                    pass
+
+        _threading.Thread(target=_producer, daemon=True).start()
+        stream_error: Exception | None = None
+        stalled = False
+        while True:
             if stopped():
                 runtime["status"] = "stopped"
                 break
+            try:
+                item = stream_queue.get(timeout=stall_s)
+            except _queue.Empty:
+                stalled = True
+                break
+            if item is _STREAM_DONE:
+                break
+            if isinstance(item, _StreamError):
+                stream_error = item.exc
+                break
+            chunk = item
             chunks.append(chunk)
             delta = message_text(getattr(chunk, "content", None))
             if delta:
@@ -129,6 +271,52 @@ def _agent_node(state: AgentState) -> dict:
     finally:
         service.rag.release_llm()
 
+    if stalled:
+        runtime["status"] = "error"
+        runtime["error"] = (
+            f"模型响应卡死：连续 {stall_s:.0f} 秒未收到任何输出，已中断本轮。"
+            "请重试；若反复出现，检查网络/代理或供应商状态。"
+        )
+        bus.emit(
+            "error",
+            {"message": runtime["error"], "phase": "llm", "code": "llm_stall"},
+        )
+        if stop_event is not None:
+            stop_event.set()
+        state["pending_tool_calls"] = []
+        return {
+            "pending_tool_calls": [],
+            "plan_done_count": state.get("plan_done_count", 0),
+            "force_continue": False,
+            "plan_push_count": state.get("plan_push_count", 0),
+            "empty_retry_pending": False,
+            "todos": state.get("todos") or [],
+        }
+    if stream_error is not None:
+        runtime["status"] = "error"
+        runtime["error"] = (
+            f"模型调用中断：{type(stream_error).__name__}: {stream_error}"
+        )
+        bus.emit(
+            "error",
+            {
+                "message": runtime["error"],
+                "phase": "llm",
+                "code": "llm_stream_error",
+            },
+        )
+        if stop_event is not None:
+            stop_event.set()
+        state["pending_tool_calls"] = []
+        return {
+            "pending_tool_calls": [],
+            "plan_done_count": state.get("plan_done_count", 0),
+            "force_continue": False,
+            "plan_push_count": state.get("plan_push_count", 0),
+            "empty_retry_pending": False,
+            "todos": state.get("todos") or [],
+        }
+
     if stopped():
         return {}
     if not chunks:
@@ -139,6 +327,7 @@ def _agent_node(state: AgentState) -> dict:
             "plan_done_count": state.get("plan_done_count", 0),
             "force_continue": False,
             "plan_push_count": state.get("plan_push_count", 0),
+            "empty_retry_pending": False,
             "todos": state.get("todos") or [],
         }
 
@@ -186,6 +375,56 @@ def _agent_node(state: AgentState) -> dict:
         if parsed_xml_calls:
             tool_calls = parsed_xml_calls
             logger.info("XML 工具调用兜底解析：%s", [tc.get("name") for tc in parsed_xml_calls])
+    # ---- 派发声明：从工具调用里摘出来，交给图条件边扇出（不走 tools 节点）----
+    # 消息形状仍复用 tool_calls（思考模式 reasoning 回传、缓存前缀形状统一），
+    # 但执行路径是 dispatch → Send 并行 → merge 回填 ToolMessage。
+    declared, others = _split_declaration(tool_calls)
+    exec_calls = tool_calls
+    dispatch_cap = int(effective(settings, "agent_max_dispatch_rounds") or 3)
+    if declared and int(state.get("dispatch_rounds") or 0) >= dispatch_cap:
+        # 达上限：不再受理声明，让它作为普通工具调用走 tools 节点（链形状合法、
+        # 该工具无副作用），并明确要求模型自己收尾，避免无界扇出。
+        declared = []
+        messages.append(
+            SystemMessage(
+                content=(
+                    f"本轮派发已达上限（{dispatch_cap} 轮），不再受理新的派发声明。"
+                    "请自己完成剩余工作或直接作答。"
+                )
+            )
+        )
+    if declared:
+        subtasks, downgraded = _parse_declared_subtasks(declared)
+        if not subtasks:
+            # 解析不出任何子任务（空 task 等）：当作普通工具调用走 tools 节点，
+            # 由它回一条结果——否则这条 tool_call 无人应答，链上就断了配对
+            declared = []
+        else:
+            # 消息里只保留声明调用：协议要求一个 tool_call 对应一条结果，
+            # 而声明的结果由 merge 回填；混进来的普通调用下一轮重发。
+            tool_calls = declared
+            exec_calls = []
+            state["pending_subtasks"] = subtasks
+            if others:
+                messages.append(
+                    SystemMessage(
+                        content=(
+                            "本轮已受理派发声明，同轮的其它工具调用未执行"
+                            f"（{', '.join(str((tc or {}).get('name') or '') for tc in others)}）。"
+                            "子任务结果返回后，如仍需这些调用请重新发起。"
+                        )
+                    )
+                )
+            if downgraded:
+                messages.append(
+                    SystemMessage(
+                        content=(
+                            f"本轮声明了多个 execute 子任务，只放开第一个；"
+                            f"其余 {downgraded} 个已按 research 只读执行"
+                            "（并行写同一目录有冲突风险）。需要串行执行请下一轮再派。"
+                        )
+                    )
+                )
     # 工具轮：content 是过渡思考文本，不写入消息历史（避免下一轮
     # 重复发送 + 污染上下文）；只保留 tool_calls 供 tools 节点执行
     if tool_calls:
@@ -204,23 +443,25 @@ def _agent_node(state: AgentState) -> dict:
     reasoning = (getattr(merged, "additional_kwargs", {}) or {}).get(
         "reasoning_content"
     )
+    # Anthropic 格式（DeepSeek /anthropic 等）的思考不在 additional_kwargs 里，
+    # 而是 content 里的 thinking 块；工具轮必须把它原样回传（signature 也要），
+    # 否则端点报 "The content[].thinking ... must be passed back"（2026-09-26 实测）。
+    thinking_blocks = extract_thinking_blocks(getattr(merged, "content", None))
+    extra_kwargs: dict = {}
+    if tool_calls:
+        extra_kwargs["reasoning_content"] = (
+            reasoning if reasoning is not None else ""
+        )
+        if thinking_blocks:
+            extra_kwargs["anthropic_thinking"] = thinking_blocks
     messages.append(
         AIMessage(
             content=stored_content,
             tool_calls=tool_calls,
-            # 仅工具轮（带 tool_calls）必须回传 reasoning_content
-            additional_kwargs=(
-                {
-                    "reasoning_content": (
-                        reasoning if reasoning is not None else ""
-                    )
-                }
-                if tool_calls
-                else {}
-            ),
+            additional_kwargs=extra_kwargs,
         )
     )
-    state["pending_tool_calls"] = tool_calls
+    state["pending_tool_calls"] = exec_calls
 
     # ---- 工具轮判定（基于合并后的完整文本，跨分片 XML 标签不漏判）----
     # 有 tool_calls 或 XML 工具调用标记 → 工具轮：缓冲文本（过渡思考 +
@@ -256,6 +497,32 @@ def _agent_node(state: AgentState) -> dict:
             )
         )
         xml_force = True
+
+    # ---- 空正文兜底：输出预算被思考吃光，正文一个字都没剩 ----
+    # 判定抽成纯函数（_should_retry_empty）便于单测；重试轮会改用无思考
+    # 模型（chat_plain），否则重试可能再次把预算全花在 reasoning 上。
+    empty_force = False
+    if _should_retry_empty(
+        tool_calls=tool_calls,
+        merged_text=merged_text,
+        usage=usage,
+        forced_final=bool(state["forced_final"]),
+        status=runtime.get("status"),
+        retry_count=int(state.get("empty_retry_count") or 0),
+    ):
+        state["empty_retry_count"] = int(state.get("empty_retry_count") or 0) + 1
+        # 下一轮用无思考模型：只有一次机会，不能再被 reasoning 吃光
+        state["empty_retry_pending"] = True
+        messages.append(
+            SystemMessage(
+                content=(
+                    "你上一条输出没有产生任何正文（内容可能全部消耗在思考上、"
+                    "并被输出长度上限截断）。请直接输出给用户的回答正文，"
+                    "不要再重复思考；若信息确实不足，明确说明缺少什么。"
+                )
+            )
+        )
+        empty_force = True
 
     # ---- 计划硬约束：还有未完成的工具型步骤时，不允许提前收尾 ----
     force_continue = False
@@ -306,14 +573,18 @@ def _agent_node(state: AgentState) -> dict:
 
     return {
         "messages": messages,
-        "pending_tool_calls": tool_calls,
+        "pending_tool_calls": exec_calls,
         "tool_calls_used": state["tool_calls_used"],
         "forced_final": state["forced_final"],
         "last_call_warned": state["last_call_warned"],
         "plan_done_count": state.get("plan_done_count", 0),
-        "force_continue": force_continue or xml_force,
+        "force_continue": force_continue or xml_force or empty_force,
         "plan_push_count": state.get("plan_push_count", 0),
         "xml_retry_count": state.get("xml_retry_count", 0),
+        "empty_retry_count": state.get("empty_retry_count", 0),
+        "empty_retry_pending": bool(state.get("empty_retry_pending")),
+        # 派发声明必须经返回值写回（节点内直接改 state 不生效，历史大坑）
+        "pending_subtasks": state.get("pending_subtasks") or [],
         "todos": state.get("todos") or [],
     }
 

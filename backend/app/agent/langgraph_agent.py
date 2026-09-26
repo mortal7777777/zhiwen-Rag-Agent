@@ -233,6 +233,7 @@ class LangGraphAgentService(AgentService):
             "messages": [],
             "tools": [],
             "pending_tool_calls": [],
+            "pending_subtasks": [],
             "sources": [],
             "tool_trace": [],
             "counter": [0],
@@ -252,8 +253,12 @@ class LangGraphAgentService(AgentService):
             "force_continue": False,
             "plan_push_count": 0,
             "xml_retry_count": 0,
+            # 每轮重置：checkpointer 按 conv:<id> 持久化 state，不重置的话
+            # 一次用掉就整个会话再也享受不到空正文兜底（2026-09-24 实测）
+            "empty_retry_count": 0,
+            "empty_retry_pending": False,
             "early_created": early_created,
-            "dispatch_done": False,
+            "dispatch_rounds": 0,
             "task_mode": False,
             "subagent_results": [],
             "sub_task": {},

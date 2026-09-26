@@ -19,6 +19,11 @@ from .models import (
     Message,
     PromptTemplate,
 )
+from .sanitize import (
+    sanitize_sources,
+    sanitize_token_usage,
+    truncate_tool_trace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -183,8 +188,8 @@ def add_message(
         conversation_id=conversation_id,
         role=role,
         content=content,
-        tool_trace=_json_dumps(tool_trace),
-        sources=_json_dumps(sources),
+        tool_trace=_json_dumps(truncate_tool_trace(tool_trace)),
+        sources=_json_dumps(sanitize_sources(sources)),
     )
     db.add(msg)
     # 顺手刷新会话排序
@@ -504,12 +509,12 @@ def create_agent_run(
         conversation_id=conversation_id,
         question=question[:4000],
         plan=_json_dumps(plan),
-        tool_trace=_json_dumps(tool_trace),
+        tool_trace=_json_dumps(truncate_tool_trace(tool_trace)),
         answer_len=answer_len,
         latency_ms=latency_ms,
         status=status,
         error=(error or "")[:4000] or None,
-        token_usage=_json_dumps(token_usage),
+        token_usage=_json_dumps(sanitize_token_usage(token_usage)),
     )
     db.add(run)
     db.commit()

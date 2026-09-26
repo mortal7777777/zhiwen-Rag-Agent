@@ -53,6 +53,37 @@ def _truncate(text: str, limit: int = 900) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+# 已知的 MCP 侧失败 → 可执行的替代做法。实测（traces 里 119 次 MCP 调用、14 次失败）
+# 绝大多数失败集中在下面两类"死路"上：模型不知道约束，会反复重试或绕远路
+# （09-24 那次为了预览一个本地 HTML，先试 file:// 被拒、又试 Node 读取，白烧了十几轮）。
+_MCP_ERROR_HINTS: tuple[tuple[str, str], ...] = (
+    (
+        'Access to "file:" protocol is blocked',
+        "提示：Playwright MCP 禁止 file:// 协议，不能直接打开本地文件。"
+        "预览本地 HTML 请先在工作目录起静态服务器（如 `python -m http.server 8123`，"
+        "本项目实测 :8123 可用），再用 http://127.0.0.1:8123/<文件名> 访问；"
+        "不要再尝试 file:// 地址。",
+    ),
+    (
+        "require is not defined",
+        "提示：browser_run_code_unsafe 在无 Node API 的沙箱里执行，require/import 不可用；"
+        "只能用浏览器同步 API（document/querySelector 等），读本地文件请改用 read_file。",
+    ),
+    (
+        "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING",
+        "提示：沙箱不支持动态 import；browser_run_code_unsafe 只能用同步浏览器 API。",
+    ),
+)
+
+
+def _append_error_hint(output: str) -> str:
+    """给已知的 MCP 失败补一条"下一步怎么做"的提示（幂等，不重复追加）。"""
+    for marker, hint in _MCP_ERROR_HINTS:
+        if marker in output and hint not in output:
+            return f"{output}\n\n{hint}"
+    return output
+
+
 def _schema_to_model(input_schema: dict | None):
     """把 MCP 工具的 JSON Schema 转成 pydantic 参数模型（支持常用基础类型）。"""
     from pydantic import BaseModel, Field, create_model
@@ -456,6 +487,8 @@ def make_mcp_tool(
                 "error": (
                     f"MCP 服务器 {server.name} 当前未连接（连接中或不可达），"
                     "该工具暂不可用。请改用其他工具或方式完成任务，不要重复调用本工具。"
+                    "（若后端刚重启：Playwright MCP 冷启动约需 1 分钟，"
+                    "可先用其它方式，稍后再试一次；一直失败说明该服务没起来。）"
                 ),
             }
         try:
@@ -464,7 +497,7 @@ def make_mcp_tool(
             output = server.call_tool(tool_name, call_args or {})
             return {
                 "summary": f"MCP[{server.name}] {tool_name} 调用完成",
-                "output": _truncate(output, 1500),
+                "output": _append_error_hint(_truncate(output, 1500)),
             }
         except Exception as exc:
             return {

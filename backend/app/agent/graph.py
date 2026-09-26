@@ -15,7 +15,6 @@ from .nodes.agent import _agent_node
 from .nodes.finalize import _finalize_node
 from .nodes.prepare import _prepare_node
 from .nodes.subagent import (
-    _build_subagent_tasks,
     _dispatch_node,
     _dispatch_tasks,
     _merge_node,
@@ -24,25 +23,13 @@ from .nodes.subagent import (
 from .nodes.tools import _tools_node
 
 # ==== 函数体（原文）====
-def _route_after_prepare(state: AgentState) -> str:
-    if state.get("stop_event") is not None and state["stop_event"].is_set():
-        return "agent"
-    subagents_on = True
-    if state.get("service") is not None:
-        val = effective(state["service"].settings, "agent_subagents_enabled")
-        subagents_on = val is not False
-    if (
-        subagents_on
-        and not state.get("dispatch_done")
-        and _build_subagent_tasks(state)
-    ):
-        return "dispatch"
-    return "agent"
-
-
 def _route_after_agent(state: AgentState) -> str:
     if state.get("stop_event") is not None and state["stop_event"].is_set():
         return "finalize"
+    # 派发声明优先：声明由主代理在运行中自己发起（不再是 prepare 之后
+    # 由 planner + 规则层做的一次性预派发），扇出仍走 Send 真并行
+    if state.get("pending_subtasks"):
+        return "dispatch"
     if state.get("pending_tool_calls"):
         return "tools"
     if state.get("force_continue"):
@@ -83,7 +70,8 @@ def _timed_node(name: str, fn):
 
 
 def build_agent_graph(checkpointer=None):
-    """构建 LangGraph：prepare -> [dispatch -> subagents -> merge] -> agent -> tools -> finalize。"""
+    """构建 LangGraph：prepare -> agent ⇄ tools -> finalize
+    （agent 可自行声明 → dispatch -> subagents -> merge -> agent）。"""
     graph = StateGraph(AgentState)
     graph.add_node("prepare", _timed_node("prepare", _prepare_node))
     graph.add_node("dispatch", _timed_node("dispatch", _dispatch_node))
@@ -94,18 +82,23 @@ def build_agent_graph(checkpointer=None):
     graph.add_node("finalize", _timed_node("finalize", _finalize_node))
 
     graph.add_edge(START, "prepare")
+    graph.add_edge("prepare", "agent")
     graph.add_conditional_edges(
-        "prepare",
-        _route_after_prepare,
-        {"dispatch": "dispatch", "agent": "agent"},
+        "dispatch",
+        _dispatch_tasks,
+        ["subagent", "merge"],
     )
-    graph.add_conditional_edges("dispatch", _dispatch_tasks, ["subagent"])
     graph.add_edge("subagent", "merge")
     graph.add_edge("merge", "agent")
     graph.add_conditional_edges(
         "agent",
         _route_after_agent,
-        {"tools": "tools", "agent": "agent", "finalize": "finalize"},
+        {
+            "dispatch": "dispatch",
+            "tools": "tools",
+            "agent": "agent",
+            "finalize": "finalize",
+        },
     )
     graph.add_conditional_edges(
         "tools",

@@ -26,3 +26,27 @@ def message_text(content) -> str:
                     parts.append(str(item.get("text") or ""))
         return "".join(parts)
     return str(content)
+
+
+def extract_thinking_blocks(content) -> list[dict]:
+    """从 Anthropic 格式的 content 里抽出 thinking 块（原样保留 signature）。
+
+    为什么需要：DeepSeek 的 `/anthropic` 端点把思考放在 content 块里，
+    `additional_kwargs` 是空的（实测 2026-09-26）；而启用 thinking 时，
+    带 tool_use 的 assistant 消息**必须把思考块原样回传**，否则 400：
+    "The `content[].thinking` in the thinking mode must be passed back to the API"。
+    本函数负责抽出来暂存，回传时由 `_AnthropicSystemNormalizer` 还原成块。
+    """
+    if not isinstance(content, list):
+        return []
+    out: list[dict] = []
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "thinking":
+            continue
+        if not str(item.get("thinking") or "").strip():
+            continue
+        keep = {
+            k: item[k] for k in ("type", "thinking", "signature") if k in item
+        }
+        out.append(keep)
+    return out

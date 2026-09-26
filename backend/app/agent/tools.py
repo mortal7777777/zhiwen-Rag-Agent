@@ -12,7 +12,8 @@ import json
 import logging
 
 from langchain_core.messages import ToolMessage
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, StructuredTool, tool
+from pydantic import BaseModel, Field
 
 from ..rag.retriever import KnowledgeBaseRetriever
 
@@ -304,7 +305,15 @@ def make_knowledge_base_tool(
 
     @tool
     def knowledge_base_search(query: str) -> dict:
-        """在用户的个人知识库中检索相关信息。知识库包含用户上传的全部文档（书籍、笔记、资料等），文档清单会列在系统提示中。当问题涉及任何书籍/文档内容时，或你不确定某本书是否在知识库中时，都应先调用本工具确认。返回最相关的文本片段及来源（每条带 index 引用编号）。"""
+        """在用户的个人知识库中检索相关信息。知识库包含用户上传的全部文档（书籍、笔记、资料等），文档清单会列在系统提示中。
+
+何时用：问题涉及任何书籍/文档内容时；不确定某本书是否在知识库中时（先查再决定要不要联网）。
+
+何时不用：纯常识问答、闲聊、与文档无关的写作或计算——这些直接回答，不要为了"确认一下"而空跑一次检索。
+
+参数：query 写成一个明确的检索意图（如"《与神对话》中关于创造的论述"），不要整句照搬用户原话；查一个点就调一次，不要在一次 query 里塞多个不相关的问题。
+
+返回：最相关的文本片段及来源（每条带 index 引用编号，回答时用 [n] 标注）。"""
         # GPU 锁只覆盖检索段（embedding/rerank），生成阶段不占用，避免检索排队
         rag_service.acquire_gpu()
         try:
@@ -560,6 +569,77 @@ def build_tools(
         except Exception as exc:
             logger.warning("技能工具注册失败：%s", exc)
     return tools
+
+
+# ---------------- 计划模式控制工具（模型自主进入 + 结构化提交）----------------
+
+PLAN_ENTER_TOOL_NAME = "enter_plan_mode"
+PLAN_EXIT_TOOL_NAME = "exit_plan_mode"
+
+PLAN_MODE_SYSTEM_HINT = (
+    "# 计划模式（只读）\n"
+    "你已进入计划模式：只能读取/检索/搜索来了解现状，"
+    "写文件、编辑、删除、执行命令都会被系统拦截。\n"
+    "请先用只读手段把现状摸清（必要时用 dispatch_subtasks 并行探索），"
+    "然后输出一份可执行的完整计划（步骤、每步要动什么、预期影响、需要用户确认的点），"
+    "并调用 exit_plan_mode 提交结构化步骤。用户确认后，系统会按同一份计划发起执行。"
+)
+
+_ENTER_PLAN_DESCRIPTION = (
+    "进入计划模式（只读）：先探索、出方案、等用户确认，再动手。\n"
+    "适合：涉及写文件/执行命令的多步任务；方案不确定、需要先与用户对齐的任务；"
+    "改动影响面大、不可逆的操作。\n"
+    "不适合：问答与检索类请求；一两步就能完成的小改动——那会白白多一轮确认。\n"
+    "进入后写文件/命令会被拦截，只能用只读手段；整理好计划后用 exit_plan_mode 提交，"
+    "用户确认后系统按同一计划执行。每个会话只允许进入一次。"
+)
+
+_EXIT_PLAN_DESCRIPTION = (
+    "提交结构化执行计划并结束本轮，等待用户确认。\n"
+    "steps 必须是可执行的步骤（动词开头、含具体对象/路径），用户会看到并可修改它们——"
+    "确认后系统将按这份清单逐步执行（清单也会成为任务列表）。"
+)
+
+
+class _ExitPlanArgs(BaseModel):
+    steps: list[str] = Field(
+        description="3~5 步可执行计划；每步动词开头、含具体对象或文件路径"
+    )
+    summary: str = Field(
+        default="", description="一句话说明计划目标与整体影响（可选）"
+    )
+
+
+def make_enter_plan_mode_tool() -> BaseTool:
+    """计划模式入口（无副作用：真正改状态在 tools 节点）。"""
+
+    def _invoke(reason: str = "") -> dict:
+        return {"summary": "已进入计划模式（只读）", "reason": str(reason)[:200]}
+
+    return StructuredTool.from_function(
+        func=_invoke,
+        name=PLAN_ENTER_TOOL_NAME,
+        description=_ENTER_PLAN_DESCRIPTION,
+        args_schema=None,
+    )
+
+
+def make_exit_plan_mode_tool() -> BaseTool:
+    """计划模式出口：提交结构化步骤（由 tools 节点转成等待确认状态）。"""
+
+    def _invoke(steps: list[str], summary: str = "") -> dict:
+        clean = [str(s).strip() for s in (steps or []) if str(s).strip()][:8]
+        return {
+            "summary": f"计划已提交（{len(clean)} 步），等待用户确认",
+            "steps": clean,
+        }
+
+    return StructuredTool.from_function(
+        func=_invoke,
+        name=PLAN_EXIT_TOOL_NAME,
+        description=_EXIT_PLAN_DESCRIPTION,
+        args_schema=_ExitPlanArgs,
+    )
 
 
 # ---------------- 结果解析 ----------------

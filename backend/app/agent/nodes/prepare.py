@@ -153,38 +153,25 @@ def _prepare_node(state: AgentState) -> dict:
     state["title_holder"] = title_holder
     state["title_thread"] = title_thread
 
-    # ---- 复杂问题先规划（支持计划模式确认后按同一计划执行） ----
-    tools_enabled = (
-        use_knowledge_base
-        or use_web_search
-        or effective(settings, "advanced_tools_enabled", True)
-    )
+    # ---- 计划来源：仅剩「用户确认过的计划」与「恢复的快照」 ----
+    # 2026-09-25 删除 planner：它只看单条问题、不知道对话与磁盘现状，却决定了
+    # 派发与预算（背景见 subagent.py 顶部注释与 CLAUDE.md 编排段）。现在主代理在
+    # 运行中用 dispatch_subtasks 自行声明子任务，计划清单由声明追加。
     plan_steps: list[str] = []
     plan_map: list[dict] = []
     resume_plan = state.get("resume_plan") or []
     if resume_plan:
-        # 计划模式确认后：沿用用户已确认的计划，不重新规划
+        # 计划模式确认后：沿用用户已确认的计划
         plan_steps = list(resume_plan)
         plan_map = [_plan_hint(step) for step in plan_steps]
-    elif tools_enabled and not stopped():
-        try:
-            plan_steps = service.context.plan(question)
-            plan_map = [_plan_hint(step) for step in plan_steps]
-        except Exception as exc:
-            logger.warning("任务规划失败：%s", exc)
-            plan_steps = []
     if restored is not None and restored.get("plan_steps"):
-        # 恢复任务沿用原计划（不重新规划）
+        # 恢复任务沿用原计划
         plan_steps = restored.get("plan_steps")
         plan_map = restored.get("plan_map") or [_plan_hint(s) for s in plan_steps]
     state["plan_steps"] = plan_steps
     state["plan_map"] = plan_map
-    task_mode = _is_project_task(settings, question, plan_steps)
-    if restored is not None and restored.get("task_mode"):
-        task_mode = True
-    state["task_mode"] = task_mode
 
-    # ---- TodoWrite 任务清单：规划后播种，跨轮跟踪进度 ----
+    # ---- TodoWrite 任务清单：按计划播种，跨轮跟踪进度 ----
     todos: list[dict] = []
     if db is not None and conv_id is not None and not stopped():
         try:
@@ -213,6 +200,12 @@ def _prepare_node(state: AgentState) -> dict:
         plan_push_count = int(restored.get("plan_push_count") or 0)
     state["todos"] = todos
     state["plan_done_count"] = plan_done_count
+    # ---- 复杂度判定：必须放在 todos 之后——存在未完成任务清单即视为任务态，
+    #      否则"继续"类追问会掉回非任务预算（12 次）做到一半被迫收尾 ----
+    task_mode = _is_project_task(settings, question, plan_steps, todos, plan_map)
+    if restored is not None and restored.get("task_mode"):
+        task_mode = True
+    state["task_mode"] = task_mode
     state["force_continue"] = False
     state["plan_push_count"] = plan_push_count
     if todos:
@@ -418,7 +411,9 @@ def _prepare_node(state: AgentState) -> dict:
         state["plan_push_count"] = int(restored.get("plan_push_count") or 0)
         state["xml_retry_count"] = int(restored.get("xml_retry_count") or 0)
         state["force_continue"] = False
-        state["dispatch_done"] = bool(restored.get("dispatch_done"))
+        # 派发状态不随快照恢复：本轮重新计数，避免恢复后立刻撞派发上限
+        state["dispatch_rounds"] = 0
+        state["pending_subtasks"] = []
         runtime["final_text"] = restored.get("final_text") or ""
     else:
         # 纯追加链（DeepSeek 自动前缀缓存无显式断点，只能靠前缀字节稳定）：
@@ -519,6 +514,26 @@ def _prepare_node(state: AgentState) -> dict:
             tools.append(make_todo_tool(db, conv_id))
         except Exception as exc:
             logger.warning("任务清单工具加载失败：%s", exc)
+    # 声明式派发工具：让主代理（而非 planner + 规则层）决定派什么子任务。
+    # 必须**无条件**注册——bind_tools 的 tools 数组是 DeepSeek 前缀缓存键的
+    # 一部分，会话内变化会整链断缓存（CLAUDE.md 不变量）。
+    if effective(settings, "agent_subagents_enabled") is not False:
+        try:
+            from .subagent import make_dispatch_tool
+
+            tools.append(make_dispatch_tool(settings))
+        except Exception as exc:
+            logger.warning("派发工具加载失败：%s", exc)
+    # 计划模式控制工具：设置页开关（runtime_config）关闭时不注册——模型物理上
+    # 无法进入，是硬否决而不是靠提示词自觉。
+    if effective(settings, "plan_mode_allowed", True) is not False:
+        try:
+            from ..tools import make_enter_plan_mode_tool, make_exit_plan_mode_tool
+
+            tools.append(make_enter_plan_mode_tool())
+            tools.append(make_exit_plan_mode_tool())
+        except Exception as exc:
+            logger.warning("计划模式工具加载失败：%s", exc)
 
     # ---- 工具定义哈希（缓存前缀监测）----
     # bind_tools 的工具定义是缓存前缀的一部分，会话内变化会断缓存。
@@ -606,9 +621,17 @@ def _prepare_node(state: AgentState) -> dict:
         "title_thread": title_thread,
         "todos": todos,
         "plan_done_count": plan_done_count,
+        # 每轮重置进度行去重标记：保证本轮至少注入一条计划进度
+        "plan_progress_sig": "",
+        # 每轮重置空正文重试计数：checkpointer 会把上一轮的计数带进来，
+        # 不重置则一次用掉后整个会话都失去兜底（2026-09-24 实测）
+        "empty_retry_count": 0,
+        "empty_retry_pending": False,
         "force_continue": False,
         "plan_push_count": plan_push_count,
-        "dispatch_done": bool(state.get("dispatch_done")),
+        # 每轮重置派发状态：上一轮的声明/轮数绝不能跨轮残留在 checkpointer 里
+        "pending_subtasks": [],
+        "dispatch_rounds": 0,
         "sources": state["sources"],
         "tool_trace": state["tool_trace"],
         "tool_calls_used": state["tool_calls_used"],

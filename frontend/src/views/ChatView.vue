@@ -209,6 +209,55 @@ wo<template>
                   </li>
                 </ol>
               </div>
+
+              <!-- 计划审批卡：模型进入计划模式后提交的结构化计划 -->
+              <div
+                v-if="msg.planApproval && msg.planApproval.state !== 'cancelled'"
+                class="plan-approval-box"
+                :data-plan-state="msg.planApproval.state"
+                tabindex="0"
+                @keydown="onPlanCardKeydown(msg, $event)"
+              >
+                <div class="plan-head">
+                  <el-icon :size="14"><List /></el-icon>
+                  计划已就绪，确认后开始执行
+                </div>
+                <div v-if="msg.planApproval.summary" class="plan-approval-summary">
+                  {{ msg.planApproval.summary }}
+                </div>
+                <template v-if="msg.planApproval.state === 'pending'">
+                  <el-input
+                    v-model="msg.planApproval.text"
+                    type="textarea"
+                    :autosize="{ minRows: 3, maxRows: 10 }"
+                    class="plan-approval-input"
+                  />
+                  <div class="plan-approval-hint">
+                    直接编辑上面的步骤（一行一步）；<b>Enter 或 Ctrl+Enter 确认执行</b>，Esc 取消。
+                  </div>
+                  <div class="plan-approval-actions">
+                    <el-button
+                      type="primary"
+                      size="small"
+                      :disabled="loading"
+                      @click="confirmPlan(msg)"
+                    >
+                      确认执行
+                    </el-button>
+                    <el-button size="small" :disabled="loading" @click="cancelPlan(msg)">
+                      取消
+                    </el-button>
+                  </div>
+                </template>
+                <div v-else class="plan-approval-done">
+                  <ol class="plan-steps">
+                    <li v-for="(s, i) in msg.planApproval.steps" :key="i" class="plan-step">
+                      <span class="plan-step-icon">{{ i + 1 }}</span>
+                      <span class="plan-step-text">{{ s }}</span>
+                    </li>
+                  </ol>
+                </div>
+              </div>
               <div v-if="msg.reasoning" class="reasoning-box">
                 <div
                   class="reasoning-head"
@@ -1191,6 +1240,18 @@ function pendingPermission() {
   return null
 }
 
+/** 按 id 找待审批项：键盘焦点在哪个卡片上，就应该操作哪个卡片 */
+function findPendingPermission(id) {
+  if (!id || !messages.value) return null
+  for (const msg of messages.value) {
+    const p = (msg.permissions || []).find(
+      (x) => x.id === id && x.status === 'pending',
+    )
+    if (p) return p
+  }
+  return null
+}
+
 /** 跳到审批选项卡：焦点移入卡片，方便用 ↑↓/数字/Enter 操作 */
 function focusPermissionCard() {
   const p = pendingPermission()
@@ -1209,26 +1270,36 @@ function focusPermissionCard() {
   })
 }
 
-/** 全局键盘：焦点在审批选项卡内时，数字/方向键/Enter/Esc 操作审批 */
+/** 全局键盘：数字键在任何位置都可用（不会抢走输入框焦点，也避免"键盘按不动"）；
+ * 方向键/Enter/Esc 需要焦点在审批卡片内，防止误触批准。 */
 function onPermissionKeydown(event) {
-  const p = pendingPermission()
-  if (!p) return
-  // 在备注输入框/正文输入框里打字时，数字和 Enter 保持文本语义
+  // 在输入框里打字时，数字和 Enter 保持文本语义
   const tag = event.target?.tagName
   if (tag === 'INPUT' || tag === 'TEXTAREA') return
-  const inCard = event.target.closest?.('.permission-card')
-  if (!inCard) return
+  // 焦点在哪个卡片上就操作哪个（多张待审批卡片时不能都落到第一张）
+  const cardEl = event.target.closest?.('[data-perm-id]')
+  const p = cardEl
+    ? findPendingPermission(cardEl.getAttribute('data-perm-id'))
+    : pendingPermission()
+  if (!p) return
   const count = p.rememberable ? 3 : 2
   if (event.key >= '1' && event.key <= String(count)) {
     event.preventDefault()
     decidePermission(p, Number(event.key) - 1)
-  } else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+    return
+  }
+  // 其余按键（含 Enter 批准）只在卡片内生效：焦点不在卡片里时按 Enter
+  // 多半是在做别的事，误批准写文件/执行命令的代价太高
+  if (!cardEl) return
+  if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
     event.preventDefault()
     p._focusIndex = (p._focusIndex + 1) % count
   } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
     event.preventDefault()
     p._focusIndex = (p._focusIndex + count - 1) % count
   } else if (event.key === 'Enter') {
+    // 焦点在某个选项按钮上时交给原生激活（焦点在"拒绝"上按 Enter 就该拒绝）
+    if (event.target.closest?.('.perm-opt')) return
     event.preventDefault()
     decidePermission(p, p._focusIndex ?? 0)
   } else if (event.key === 'Escape') {
@@ -1702,6 +1773,58 @@ function ask(suggestion) {
   send()
 }
 
+/** 计划确认：把（可编辑过的）步骤作为 resume_plan 发回，后端按同一份清单执行 */
+function confirmPlan(msg) {
+  const approval = msg.planApproval
+  if (!approval || loading.value) return
+  const steps = String(approval.text || '')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (!steps.length) {
+    ElMessage.warning('计划不能为空')
+    return
+  }
+  approval.steps = steps
+  approval.state = 'confirmed'
+  question.value = '按计划开始执行'
+  send({ resumePlan: steps })
+}
+
+function cancelPlan(msg) {
+  if (msg.planApproval) msg.planApproval.state = 'cancelled'
+}
+
+/** 计划卡键盘：Enter / Ctrl+Enter 确认，Esc 取消（输入框内 Enter 保留换行语义） */
+function onPlanCardKeydown(msg, event) {
+  const approval = msg?.planApproval
+  if (!approval || approval.state !== 'pending') return
+  const inTextarea = event.target?.tagName === 'TEXTAREA'
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+    event.preventDefault()
+    confirmPlan(msg)
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    cancelPlan(msg)
+  } else if (event.key === 'Enter' && !inTextarea) {
+    event.preventDefault()
+    confirmPlan(msg)
+  }
+}
+
+/** 计划卡出现时把焦点移进去，键盘可直接 Enter 确认（不抢输入框的焦点） */
+function focusPlanCard() {
+  nextTick(() => {
+    const card = document.querySelector('.plan-approval-box[data-plan-state="pending"]')
+    if (!card) return
+    if (document.activeElement === questionInput.value) {
+      // 正在输入下一句话时不打断（点击卡片即可进入键盘操作）
+      if ((questionInput.value?.value?.length || 0) > 0) return
+    }
+    card.focus?.()
+  })
+}
+
 async function send(options = {}) {
   flushTypewriter() // 清理上一轮残留（如异常中断）
   const hasImages = attachedImages.value.length > 0
@@ -1749,20 +1872,37 @@ async function send(options = {}) {
   } else if (useKnowledgeBase.value) {
     effectiveMode = 'knowledge'
   }
+  const payload = {
+    question: text,
+    images: imageDataUrls,
+    conversation_id: activeId.value,
+    tool_mode: effectiveMode,
+    template_id: templateId.value || null,
+  }
+  if (options.resumePlan && options.resumePlan.length) {
+    // 计划确认后按同一份清单执行（后端据此播种任务清单）
+    payload.resume_plan = options.resumePlan
+  }
   try {
     await streamAgentChat(
-      {
-        question: text,
-        images: imageDataUrls,
-        conversation_id: activeId.value,
-        tool_mode: effectiveMode,
-        template_id: templateId.value || null,
-      },
+      payload,
       {
         onSession: (data) => {
           activeId.value = data.conversation_id
           if (data.title) currentTitle.value = data.title
           upsertSession(data)
+        },
+        onPlanApproval: (data) => {
+          // 计划模式：模型提交结构化计划 → 渲染可编辑的确认卡
+          streamMsg.planApproval = {
+            text: (data.steps || []).map((s) => String(s)).join('\n'),
+            steps: (data.steps || []).map((s) => String(s)),
+            summary: data.summary || '',
+            state: 'pending',
+          }
+          scrollToBottom()
+          // 焦点移入卡片：Enter 即可确认，不用鼠标（回车在卡内不是换行）
+          focusPlanCard()
         },
         onTitle: (data) => {
           // 新会话标题是后台生成的，生成完成后推送到前端更新
@@ -2492,6 +2632,42 @@ onBeforeUnmount(() => {
   border: 1px solid var(--plan-border);
 }
 
+/* 计划审批卡：模型提交计划后等用户确认，可编辑步骤再执行 */
+.plan-approval-box {
+  margin-bottom: 8px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--plan-bg);
+  border: 1px solid var(--primary);
+}
+
+.plan-approval-summary {
+  font-size: 12.5px;
+  color: var(--text-2);
+  margin-bottom: 6px;
+}
+
+.plan-approval-input {
+  margin-bottom: 4px;
+}
+
+.plan-approval-input :deep(.el-textarea__inner) {
+  font-size: 13px;
+  line-height: 1.7;
+  font-family: inherit;
+}
+
+.plan-approval-hint {
+  font-size: 11.5px;
+  color: var(--text-3, var(--text-2));
+  margin-bottom: 8px;
+}
+
+.plan-approval-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .plan-head {
   display: flex;
   align-items: center;
@@ -2505,6 +2681,7 @@ onBeforeUnmount(() => {
 .plan-progress {
   margin-left: auto;
   font-size: 11px;
+
   font-weight: 500;
   color: var(--text-3);
   background: var(--bg-hover);
