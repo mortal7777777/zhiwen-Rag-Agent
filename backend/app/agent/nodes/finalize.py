@@ -212,11 +212,6 @@ def _finalize_node(state: AgentState, runtime) -> dict:
             db.rollback()
             logger.warning("保存对话消息失败：%s", exc)
 
-    # 计划模式提交：run 以「等待用户确认」收尾（不是 error、不种 todos）
-    plan_approval = rt.get("plan_approval") or None
-    if plan_approval and plan_approval.get("steps"):
-        bus.emit("plan", {"steps": plan_approval["steps"]})
-
     # 决策运行记录 + 结构化 trace（可观测性）
     if db is not None:
         try:
@@ -225,8 +220,6 @@ def _finalize_node(state: AgentState, runtime) -> dict:
                 if rt.get("status") == "stopped"
                 else "error"
                 if rt.get("error")
-                else "awaiting_approval"
-                if plan_approval
                 else "ok"
             )
             run = repo.create_agent_run(
@@ -305,14 +298,18 @@ def _finalize_node(state: AgentState, runtime) -> dict:
             db.rollback()
             logger.warning("轨迹压缩失败：%s", exc)
 
-    # checkpoint：正常/停止收尾后清除快照
-    if settings.checkpoint_enabled and db is not None and conv_id is not None:
+    # 原生检查点裁剪：每线程只留最近 N 条快照
+    # （每 superstep 一条含完整 messages 的快照，长会话会让 checkpoints.sqlite 单调增长；
+    #   实测曾到 700MB+。收尾时无未完成任务，裁剪不会碰挂起中的线程。）
+    if conv_id is not None:
         try:
-            from ...checkpoint import get_store
+            saver = deps.service.checkpoint_saver
+            if saver is not None:
+                from ...native_checkpoint import prune_thread
 
-            get_store(settings).clear(conv_id)
+                prune_thread(saver, f"conv:{conv_id}")
         except Exception as exc:
-            logger.warning("清除 checkpoint 失败：%s", exc)
+            logger.warning("裁剪原生检查点失败：%s", exc)
 
     # 标题后置：后台已生成则推送给前端更新（未完成则由会话刷新兜底）
     title_thread = deps.title_thread

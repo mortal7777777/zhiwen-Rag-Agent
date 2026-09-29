@@ -39,13 +39,30 @@ PENDING_PAYLOAD = {
 
 
 class ResumeService:
-    def __init__(self, pending: bool = True, payload: dict | None = None):
+    def __init__(
+        self,
+        pending: bool = True,
+        payload: dict | None = None,
+        interrupted: bool = False,
+    ):
         self.pending = pending
         self.payload = payload or PENDING_PAYLOAD
+        self.interrupted = interrupted
         self.got: dict | None = None
+        self.continued: int | None = None
+        self.abandoned: int | None = None
 
     def has_pending_approval(self, conversation_id):
         return self.pending
+
+    def pending_state(self, conversation_id):
+        payload = self.payload if self.pending else None
+        return {
+            "pending": self.pending,
+            "interrupted": self.interrupted,
+            "ops": (payload or {}).get("ops") or [],
+            "plan": (payload or {}).get("plan"),
+        }
 
     def pending_approval_payload(self, conversation_id):
         return self.payload if self.pending else None
@@ -67,6 +84,15 @@ class ResumeService:
         }
         yield {"event": "session", "data": {"conversation_id": conversation_id}}
         yield {"event": "done", "data": {"ok": True}}
+
+    def continue_run(self, conversation_id, db=None, stop_event=None):
+        self.continued = conversation_id
+        yield {"event": "session", "data": {"conversation_id": conversation_id}}
+        yield {"event": "done", "data": {"ok": True}}
+
+    def abandon_run(self, conversation_id):
+        self.abandoned = conversation_id
+        return True
 
     def run(self, **kwargs):
         yield {"event": "session", "data": {}}
@@ -146,6 +172,59 @@ def test_stream_rejected_while_pending():
             service,
         )
     assert exc.value.status_code == 409
+
+
+def test_continue_endpoint_requires_interrupted():
+    from app.api.agent import agent_continue
+
+    # 无未完成任务 → 409
+    with pytest.raises(HTTPException) as exc:
+        anyio.run(agent_continue, 7, ResumeService(pending=False))
+    assert exc.value.status_code == 409
+
+    # 有挂起 → 提示走 resume
+    with pytest.raises(HTTPException) as exc:
+        anyio.run(agent_continue, 7, ResumeService(pending=True))
+    assert exc.value.status_code == 409
+    assert "resume" in exc.value.detail
+
+    service = ResumeService(pending=False, interrupted=True)
+
+    async def scenario():
+        response = await agent_continue(7, service)
+        return await _drain(response)
+
+    frames = anyio.run(scenario)
+    assert service.continued == 7
+    assert any(f["event"] == "done" for f in frames)
+
+
+def test_stream_rejected_while_interrupted():
+    with pytest.raises(HTTPException) as exc:
+        anyio.run(
+            agent_stream,
+            AgentChatRequest(question="你好", conversation_id=8),
+            ResumeService(pending=False, interrupted=True),
+        )
+    assert exc.value.status_code == 409
+    assert "中断" in exc.value.detail
+
+
+def test_abandon_endpoint():
+    from app.api.agent import agent_abandon
+
+    service = ResumeService(pending=False, interrupted=True)
+    res = agent_abandon(11, service)
+    assert res["ok"] is True
+    assert service.abandoned == 11
+
+
+def test_pending_endpoint_reports_interrupted():
+    from app.api.agent import agent_pending_approval
+
+    res = agent_pending_approval(12, ResumeService(pending=False, interrupted=True))
+    assert res["interrupted"] is True
+    assert res["pending"] is False
 
 
 def test_stream_rejected_while_conversation_active():

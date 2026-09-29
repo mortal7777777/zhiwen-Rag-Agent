@@ -19,56 +19,8 @@ from .deps import get_agent_service
 router = APIRouter(tags=["advanced"])
 
 
-# ---------------- 人工确认（HITL）审批 ----------------
-
-
-class PermissionResolveRequest(BaseModel):
-    approve: bool = True
-    reason: str = ""
-    remember: bool = False        # 批准并永久记住（写入命令白名单）
-    remember_session: bool = False  # 批准并在本会话内不再询问
-
-
-@router.post("/agent/permission/{request_id}/resolve")
-def resolve_permission(
-    request_id: str,
-    payload: PermissionResolveRequest,
-    db: Session = Depends(get_db),
-) -> dict:
-    """用户批准/拒绝一次敏感操作（写文件 / 编辑 / 删除 / 执行命令）。"""
-    from ..permissions import get_permission_manager
-    from ..runtime_config import load_overrides, save_overrides, effective
-
-    req = get_permission_manager().resolve(
-        request_id,
-        payload.approve,
-        (payload.reason or "").strip()[:200],
-        remember_forever=bool(payload.remember),
-        remember_session=bool(payload.remember_session),
-    )
-    if req is None:
-        raise HTTPException(status_code=404, detail="审批请求不存在或已处理")
-    if payload.approve and payload.remember and req.tool in ("bash", "command_tool"):
-        # 永久记住：把命令写入白名单（自动放行前缀），以后不再询问
-        settings = get_settings()
-        load_overrides(db)
-        command = str((req.arguments or {}).get("command") or "").strip()
-        if command:
-            current = effective(settings, "command_allowlist") or ""
-            prefixes = [p.strip() for p in current.split(",") if p.strip()]
-            if command not in prefixes:
-                prefixes.append(command)
-            save_overrides(db, {"command_allowlist": ", ".join(prefixes)})
-    return {"ok": True}
-
-
-@router.get("/agent/permissions")
-def list_pending_permissions() -> dict:
-    """当前待人工确认的审批请求列表（调试/监控用）。"""
-    from ..permissions import get_permission_manager
-
-    mgr = get_permission_manager()
-    return {"pending": mgr.pending()}
+# 人工确认（HITL）审批接口已移除：审批走原生 interrupt 挂起，
+# 决定经 POST /api/agent/resume 提交（见 api/agent.py），不再有 per-id 端点。
 
 
 # ---------------- TodoWrite 任务清单 ----------------

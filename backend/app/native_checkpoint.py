@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
@@ -17,6 +18,8 @@ from pathlib import Path
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
+
+logger = logging.getLogger(__name__)
 
 _SENTINEL = "__unserializable__"
 
@@ -65,6 +68,66 @@ def build_saver(meta_dir: Path):
     saver = SqliteSaver(conn, serde=SafeJsonPlusSerializer())
     saver.setup()
     return saver, conn
+
+
+def prune_thread(saver, thread_id: str, keep: int = 20) -> int:
+    """裁剪某线程的旧检查点：只保留最近 keep 个快照（连同其写入）。
+
+    原生 saver 每个 superstep 存一条含完整 messages 的快照，长会话会让
+    checkpoints.sqlite 单调增长（实测 700MB+）。收尾（finalize）后调用；
+    此时线程已无未完成任务，裁剪不会碰到挂起/中断中的状态。
+    删除的行不回收磁盘空间（需要 VACUUM，见 prune_all）。
+    """
+    conn = getattr(saver, "conn", None)
+    if conn is None or keep <= 0:
+        return 0
+    try:
+        rows = conn.execute(
+            "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? "
+            "ORDER BY checkpoint_id DESC LIMIT -1 OFFSET ?",
+            (thread_id, keep),
+        ).fetchall()
+        stale = [r[0] for r in rows]
+        if not stale:
+            return 0
+        conn.executemany(
+            "DELETE FROM writes WHERE thread_id = ? AND checkpoint_id = ?",
+            [(thread_id, cid) for cid in stale],
+        )
+        conn.executemany(
+            "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_id = ?",
+            [(thread_id, cid) for cid in stale],
+        )
+        conn.commit()
+        return len(stale)
+    except Exception as exc:
+        logger.warning("裁剪检查点失败（thread=%s）：%s", thread_id, exc)
+        return 0
+
+
+def prune_all(saver, keep: int = 20) -> dict:
+    """全库裁剪：每个线程保留最近 keep 条（维护脚本用）。"""
+    conn = getattr(saver, "conn", None)
+    if conn is None:
+        return {"threads": 0, "deleted": 0}
+    threads = [
+        r[0] for r in conn.execute("SELECT DISTINCT thread_id FROM checkpoints").fetchall()
+    ]
+    deleted = 0
+    for tid in threads:
+        deleted += prune_thread(saver, tid, keep)
+    return {"threads": len(threads), "deleted": deleted}
+
+
+def vacuum(saver) -> None:
+    """回收 sqlite 空间：删除大量行后文件不会自动缩小。"""
+    conn = getattr(saver, "conn", None)
+    if conn is None:
+        return
+    try:
+        conn.execute("VACUUM")
+    except Exception as exc:
+        logger.warning("VACUUM 失败：%s", exc)
 
 
 def messages_to_history_rows(messages: list) -> list[dict]:

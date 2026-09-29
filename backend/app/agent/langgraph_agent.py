@@ -55,9 +55,11 @@ class LangGraphAgentService(AgentService):
 
     @property
     def checkpoint_saver(self):
-        """原生 checkpointer（失败时返回 None，不影响运行）。"""
-        if not effective(self.settings, "checkpoint_native_enabled"):
-            return None
+        """原生 checkpointer（HITL 挂起/续跑依赖它）。
+
+        sqlite 初始化失败时降级为内存版（同进程内功能完整，重启后挂起/续跑丢失），
+        而不是返回 None——否则 interrupt 会直接崩、人工确认不可用。
+        """
         if self._checkpoint_saver is None:
             try:
                 from ..native_checkpoint import build_saver
@@ -66,8 +68,13 @@ class LangGraphAgentService(AgentService):
                     self.settings.meta_dir
                 )
             except Exception as exc:
-                logger.warning("原生 checkpointer 初始化失败，降级为无快照：%s", exc)
-                self._checkpoint_saver = None
+                logger.error(
+                    "原生 checkpointer 初始化失败，降级为内存版（重启后挂起/续跑丢失）：%s",
+                    exc,
+                )
+                from langgraph.checkpoint.memory import InMemorySaver
+
+                self._checkpoint_saver = InMemorySaver()
         return self._checkpoint_saver
 
     def refresh(self) -> None:
@@ -148,7 +155,6 @@ class LangGraphAgentService(AgentService):
         stop_event: threading.Event | None,
         images: list[str] | None,
         plan_only: bool = False,
-        resume_plan: list[str] | None = None,
         project_dir: str | None = None,
         command_sandbox: str | None = None,
     ):
@@ -193,14 +199,7 @@ class LangGraphAgentService(AgentService):
         queue: Queue = Queue()
         bus = EventBus(queue)
         # 请求级活对象走 Runtime context（不进检查点）；state 只留可序列化数据
-        # approval_mode：有原生检查点走 interrupt 挂起，否则回落旧的阻塞式收集
-        deps = Deps(
-            service=self,
-            bus=bus,
-            db=db,
-            stop_event=stop_event,
-            approval_mode="interrupt" if self.checkpoint_saver is not None else "blocking",
-        )
+        deps = Deps(service=self, bus=bus, db=db, stop_event=stop_event)
         runtime: dict = {
             "conv_id": conversation_id,
             "started": time.perf_counter(),
@@ -224,7 +223,6 @@ class LangGraphAgentService(AgentService):
             "system_prompt": system_prompt,
             "tool_mode": tool_mode,
             "plan_only": bool(plan_only),
-            "resume_plan": list(resume_plan) if resume_plan else None,
             "project_dir": project_dir,
             "messages": [],
             "pending_tool_calls": [],
@@ -528,35 +526,70 @@ class LangGraphAgentService(AgentService):
         timer.daemon = True
         timer.start()
 
-    def pending_approval_payload(self, conversation_id: int) -> dict | None:
-        """读取挂起中的 interrupt 载荷（无挂起/读取失败时返回 None）。
+    def pending_state(self, conversation_id: int | None) -> dict:
+        """线程未完成状态：{pending, interrupted, ops, plan, _payload}。
 
-        判据用 `tasks[].interrupts`，不要用 `get_state().next`——实测多
-        interrupt 场景下恢复一段后 next 会是空元组，但任务仍挂起。
+        - pending：有 interrupt 等用户决定（审批/计划确认），走 /agent/resume；
+        - interrupted：有未完成任务但没有挂起（进程被杀/异常退出留下的半成品），
+          走 /agent/continue（invoke(None) 续跑）。
+        判据用 `tasks[].interrupts`，不要用 `get_state().next`——实测多 interrupt
+        场景下恢复一段后 next 会是空元组，但任务仍挂起。
         """
-        if self.checkpoint_saver is None:
-            return None
+        result = {
+            "pending": False,
+            "interrupted": False,
+            "ops": [],
+            "plan": None,
+            "_payload": None,
+        }
+        if conversation_id is None or self.checkpoint_saver is None:
+            return result
         try:
             st = self.graph.get_state(self._thread_config(conversation_id))
-            for task in st.tasks or ():
+        except Exception as exc:
+            logger.warning("读取线程状态失败：%s", exc)
+            return result
+        pending_payload = None
+        has_tasks = False
+        for task in st.tasks or ():
+            has_tasks = True
+            if pending_payload is None:
                 for item in getattr(task, "interrupts", None) or ():
                     value = getattr(item, "value", None)
                     if isinstance(value, dict):
-                        return value
-        except Exception as exc:
-            logger.warning("读取挂起审批失败：%s", exc)
-        return None
+                        pending_payload = value
+                        break
+        if pending_payload is not None:
+            result["pending"] = True
+            result["ops"] = pending_payload.get("ops") or []
+            result["plan"] = pending_payload.get("plan") or None
+            result["_payload"] = pending_payload
+        elif has_tasks:
+            result["interrupted"] = True
+        return result
+
+    def pending_approval_payload(self, conversation_id: int) -> dict | None:
+        """挂起中的 interrupt 载荷（无挂起/读取失败时返回 None；watchdog 用）。"""
+        return self.pending_state(conversation_id).get("_payload")
 
     def has_pending_approval(self, conversation_id: int | None) -> bool:
         """该会话是否有挂起中的审批（挂起期间拒绝新消息，防状态被覆盖）。"""
-        if conversation_id is None or self.checkpoint_saver is None:
+        return bool(self.pending_state(conversation_id)["pending"])
+
+    def has_unfinished_run(self, conversation_id: int | None) -> bool:
+        """挂起中或中断未跑完（两种都拒绝新消息：新输入会覆盖未完成的一轮）。"""
+        st = self.pending_state(conversation_id)
+        return bool(st["pending"] or st["interrupted"])
+
+    def abandon_run(self, conversation_id: int) -> bool:
+        """丢弃未完成的运行：删除该会话的原生检查点线程，解除新消息闸门。"""
+        if self.checkpoint_saver is None:
             return False
         try:
-            st = self.graph.get_state(self._thread_config(conversation_id))
-            return any(
-                getattr(task, "interrupts", None) for task in (st.tasks or ())
-            )
-        except Exception:
+            self.checkpoint_saver.delete_thread(f"conv:{conversation_id}")
+            return True
+        except Exception as exc:
+            logger.warning("删除会话检查点线程失败：%s", exc)
             return False
 
     def resume(
@@ -574,12 +607,53 @@ class LangGraphAgentService(AgentService):
         续跑，收尾语义与旧阻塞式的"停止"路径一致。
         plan：计划确认决定（{approved, steps?, reason?}），随同一次 resume 提交。
         """
-        queue: Queue = Queue()
-        bus = EventBus(queue)
         if stop_event is None:
             stop_event = threading.Event()
         if stopped:
             stop_event.set()
+        yield from self._continue_stream(
+            conversation_id,
+            Command(
+                resume={
+                    "stopped": bool(stopped),
+                    "decisions": decisions or {},
+                    "plan": plan,
+                }
+            ),
+            db=db,
+            stop_event=stop_event,
+        )
+
+    def continue_run(
+        self,
+        conversation_id: int,
+        db: Session | None = None,
+        stop_event: threading.Event | None = None,
+    ):
+        """续跑被中断的运行（进程被杀/异常退出留下的 pending 任务）：invoke(None)。
+
+        与 resume 的区别：resume 回答挂起中的 interrupt（提交决定）；continue
+        让框架把没跑完的节点重跑完。只重跑未完成节点、不重跑 prepare，前缀
+        缓存不断。被中断节点从头重跑，副作用可能重复一次（窗口=进程恰好死在
+        节点执行中；已提交的决定不会丢——RESUME 通道随检查点持久化）。
+        """
+        yield from self._continue_stream(
+            conversation_id,
+            None,
+            db=db,
+            stop_event=stop_event if stop_event is not None else threading.Event(),
+        )
+
+    def _continue_stream(
+        self,
+        conversation_id: int,
+        graph_input,
+        db: Session | None,
+        stop_event: threading.Event,
+    ):
+        """resume / continue 共用的续跑骨架：重建 Deps、invoke、产出事件流。"""
+        queue: Queue = Queue()
+        bus = EventBus(queue)
         # db 缺省（SSE 端点走这里）：自建会话，语义与 AgentService.run 一致
         db_owned = None
         if db is None:
@@ -590,14 +664,8 @@ class LangGraphAgentService(AgentService):
                     db_owned = SessionLocal()
                     db = db_owned
             except Exception as exc:
-                logger.warning("恢复运行：数据库不可用，降级为无记忆模式：%s", exc)
-        deps = Deps(
-            service=self,
-            bus=bus,
-            db=db,
-            stop_event=stop_event,
-            approval_mode="interrupt" if self.checkpoint_saver is not None else "blocking",
-        )
+                logger.warning("续跑：数据库不可用，降级为无记忆模式：%s", exc)
+        deps = Deps(service=self, bus=bus, db=db, stop_event=stop_event)
         config = self._thread_config(conversation_id)
         try:
             values = self.graph.get_state(config).values or {}
@@ -614,7 +682,7 @@ class LangGraphAgentService(AgentService):
                 command_sandbox=(rt or {}).get("command_sandbox"),
             )
         except Exception as exc:
-            logger.warning("恢复时重建工具列表失败：%s", exc)
+            logger.warning("续跑时重建工具列表失败：%s", exc)
 
         bus.emit("session", {"conversation_id": conversation_id})
 
@@ -624,25 +692,15 @@ class LangGraphAgentService(AgentService):
             if seed:
                 seed_usage(seed[0], seed[1])
             try:
-                result = self.graph.invoke(
-                    Command(
-                        resume={
-                            "stopped": bool(stopped),
-                            "decisions": decisions or {},
-                            "plan": plan,
-                        }
-                    ),
-                    config=config,
-                    context=deps,
-                )
+                result = self.graph.invoke(graph_input, config=config, context=deps)
                 if isinstance(result, dict) and result.get("__interrupt__"):
-                    # 恢复后新一轮敏感操作再次挂起：同样发 run_suspended
+                    # 续跑后再次挂起（新一轮敏感操作/计划）：同样发 run_suspended
                     self._emit_suspended(bus, result, conversation_id)
                     queue.put(None)
                     return
                 queue.put(None)
             except Exception as exc:
-                logger.exception("恢复运行失败")
+                logger.exception("续跑运行失败")
                 if isinstance(rt, dict):
                     rt["status"] = "error"
                     rt["error"] = str(exc)

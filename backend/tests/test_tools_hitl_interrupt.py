@@ -44,7 +44,6 @@ def _settings():
         tool_permission_mode="ask",
         permission_timeout=0,
         command_allowlist="",
-        checkpoint_enabled=False,
         agent_max_iterations=12,
         agent_max_failures=3,
         task_mode_detect=True,
@@ -87,7 +86,6 @@ def _make_env(tool_names_and_calls):
         title_holder=[],
         title_thread=None,
         reasoning=None,
-        approval_mode="interrupt",
     )
     return state, SimpleNamespace(context=deps), tools, bus
 
@@ -280,37 +278,3 @@ def test_plan_suspension_rejection_stays_in_plan_mode(monkeypatch):
     assert "用户未确认该计划" in joined and "太笼统" in joined
 
 
-def test_blocking_mode_still_uses_per_request_path(monkeypatch):
-    """approval_mode=blocking（无原生检查点）：不再走 interrupt，行为保持旧版。"""
-    state, runtime, tools, bus = _make_env(
-        [("delete_file", "call_1", {"path": "a.txt"})]
-    )
-    runtime.context.approval_mode = "blocking"
-
-    def boom(payload):  # pragma: no cover - 不应被调用
-        raise AssertionError("blocking 模式不得调用 interrupt")
-
-    monkeypatch.setattr(tools_mod, "interrupt", boom)
-
-    from app.permissions import get_permission_manager
-
-    manager = get_permission_manager()
-
-    def decide_soon():
-        # 等到 permission_request 出现后批准，避免真阻塞
-        import time
-
-        for _ in range(200):
-            pending = manager.pending()
-            if pending:
-                manager.resolve(pending[0]["id"], True)
-                return
-            time.sleep(0.01)
-
-    import threading
-
-    threading.Thread(target=decide_soon, daemon=True).start()
-    out = _tools_node(state, runtime)
-
-    assert len(tools[0].calls) == 1
-    assert len([m for m in out["messages"] if isinstance(m, ToolMessage)]) == 1

@@ -258,6 +258,18 @@ wo<template>
                   </ol>
                 </div>
               </div>
+              <!-- 中断未跑完：给「继续执行 / 丢弃这一轮」入口（刷新/切换会话恢复用） -->
+              <div v-if="msg._unfinishedBar" class="suspension-bar interrupted-bar">
+                <span class="suspension-text">上一轮执行被中断（后台退出或异常），可以继续跑完</span>
+                <span class="suspension-actions">
+                  <el-button size="small" type="primary" @click="continueInterrupted(msg)">
+                    继续执行
+                  </el-button>
+                  <el-button size="small" :disabled="loading" @click="abandonInterrupted(msg)">
+                    丢弃这一轮
+                  </el-button>
+                </span>
+              </div>
               <div v-if="msg.reasoning" class="reasoning-box">
                 <div
                   class="reasoning-head"
@@ -902,9 +914,11 @@ import DocumentViewer from '../components/DocumentViewer.vue'
 // keep-alive 按组件名匹配，显式声明
 defineOptions({ name: 'ChatView' })
 import {
+  abandonRun,
   addMemory,
   compactConversation,
   consolidateMemories,
+  continueAgentRun,
   createTemplate,
   deleteConversation,
   deleteMemory,
@@ -919,7 +933,6 @@ import {
   listMemories,
   listTemplates,
   renameConversation,
-  resolvePermission,
   resumeAgentChat,
   rewindConversation,
   streamAgentChat,
@@ -1252,37 +1265,22 @@ function formatArgs(args) {
 
 /** 用户批准/拒绝敏感操作（选项卡：0=批准，1=拒绝，2=批准并永久记住） */
 async function decidePermission(p, optionIndex) {
-  if (!p || p.status !== 'pending' || p._deciding) return
+  if (!p || p.status !== 'pending') return
   const approve = optionIndex !== 1
   const remember = optionIndex === 2
-  if (p._suspended) {
-    // 原生挂起：先在本地记录决定，整批决定齐了再一次性提交（/agent/resume）
-    p._decision = {
-      call_id: p.id,
-      approve,
-      reason: p.reason || '',
-      remember_session: false,
-      remember_forever: !!remember && approve,
-    }
-    p.status = approve ? 'approved' : 'denied'
-    if (remember && approve) {
-      p.reason = (p.reason ? `${p.reason}；` : '') + '已记住，下次不再询问'
-    }
-    await maybeSubmitSuspension()
-    return
+  // 记录决定；整批决定齐了由 maybeSubmitSuspension 一次性提交（/agent/resume）
+  p._decision = {
+    call_id: p.id,
+    approve,
+    reason: p.reason || '',
+    remember_session: false,
+    remember_forever: !!remember && approve,
   }
-  p._deciding = true
-  const prevReason = p.reason
-  try {
-    await resolvePermission(p.id, approve, prevReason || '', remember)
-    // 后端会通过 permission_resolved 事件同步状态，这里先乐观更新
-    p.status = approve ? 'approved' : 'denied'
-    if (remember && approve) p.reason = (p.reason ? `${p.reason}；` : '') + '已记住，下次不再询问'
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '提交决定失败，请重试')
-  } finally {
-    p._deciding = false
+  p.status = approve ? 'approved' : 'denied'
+  if (remember && approve) {
+    p.reason = (p.reason ? `${p.reason}；` : '') + '已记住，下次不再询问'
   }
+  await maybeSubmitSuspension()
 }
 
 /** 待审批的请求：当前查看会话的消息里第一个 pending 卡片。
@@ -1832,7 +1830,7 @@ function ask(suggestion) {
   send()
 }
 
-/** 计划确认：挂起态经 /agent/resume 提交（同一 run 继续执行）；回退态按旧 resume_plan 重发 */
+/** 计划确认：把（可编辑的）计划作为决定经 /agent/resume 提交，同一 run 继续执行 */
 function confirmPlan(msg) {
   const approval = msg.planApproval
   if (!approval || loading.value) return
@@ -1846,23 +1844,17 @@ function confirmPlan(msg) {
   }
   approval.steps = steps
   approval.state = 'confirmed'
-  if (approval._suspended && suspended && !suspended.submitted) {
-    // 原生挂起：把（可编辑的）计划作为决定提交，同一 run 继续执行（不再重发新 run）
-    suspended.planPending = false
-    suspended.submitted = true
-    runResumeStream(
-      suspended.conversationId,
-      suspendedCards()
-        .map((c) => c._decision)
-        .filter(Boolean),
-      false,
-      { approved: true, steps, reason: '' },
-    )
-    return
-  }
-  // 回退路径（无原生检查点）：旧的 resume_plan 重发
-  question.value = '按计划开始执行'
-  send({ resumePlan: steps })
+  if (!suspended || suspended.submitted) return
+  suspended.planPending = false
+  suspended.submitted = true
+  runResumeStream(
+    suspended.conversationId,
+    suspendedCards()
+      .map((c) => c._decision)
+      .filter(Boolean),
+    false,
+    { approved: true, steps, reason: '' },
+  )
 }
 
 function cancelPlan(msg) {
@@ -1926,18 +1918,6 @@ function buildStreamHandlers() {
       activeId.value = data.conversation_id
       if (data.title) currentTitle.value = data.title
       upsertSession(data)
-    },
-    onPlanApproval: (data) => {
-      // 计划模式：模型提交结构化计划 → 渲染可编辑的确认卡
-      streamMsg.planApproval = {
-        text: (data.steps || []).map((s) => String(s)).join('\n'),
-        steps: (data.steps || []).map((s) => String(s)),
-        summary: data.summary || '',
-        state: 'pending',
-      }
-      scrollToBottom()
-      // 焦点移入卡片：Enter 即可确认，不用鼠标（回车在卡内不是换行）
-      focusPlanCard()
     },
     onTitle: (data) => {
       // 新会话标题是后台生成的，生成完成后推送到前端更新
@@ -2012,24 +1992,6 @@ function buildStreamHandlers() {
       }
       scrollToBottom()
     },
-    onPermission: (data) => {
-      // 旧阻塞式审批（无原生检查点的回退路径）：逐条渲染，点击即提交
-      currentTool.value = '等待人工确认…'
-      streamMsg.permissions.push({
-        id: data.id,
-        tool: data.name,
-        summary: data.summary || `${toolName(data.name)} 需要确认`,
-        args_text: formatArgs(data.arguments),
-        args: data.arguments || {},
-        status: 'pending',
-        reason: '',
-        rememberable: data.name === 'bash' || data.name === 'command_tool',
-        _focusIndex: 0,
-      })
-      scrollToBottom()
-      // 跳到选项卡：未在输入框打字时自动把焦点移入审批卡片
-      focusPermissionCard()
-    },
     onSuspended: (data) => {
       // 原生挂起（interrupt）：本条流即将结束；渲染整批卡片/计划卡，收齐决定后一次提交
       currentTool.value = '等待人工确认…'
@@ -2052,20 +2014,6 @@ function buildStreamHandlers() {
         focusPlanCard()
       } else {
         focusPermissionCard()
-      }
-      scrollToBottom()
-    },
-    onPermissionResolved: (data) => {
-      const p = streamMsg.permissions.find((x) => x.id === data.id)
-      if (p) {
-        p.status = data.approved ? 'approved' : 'denied'
-        if (data.reason) p.reason = data.reason
-      }
-      if (data.approved) currentTool.value = ''
-      const stillPending = (streamMsg.permissions || []).some((x) => x.status === 'pending')
-      if (!stillPending) {
-        // 全部处理完：焦点回到输入框，正文继续打字机效果
-        nextTick(() => questionInput.value?.focus())
       }
       scrollToBottom()
     },
@@ -2223,16 +2171,19 @@ async function runResumeStream(conversationId, decisions, stopped, plan = null) 
 }
 
 /**
- * 刷新/切换会话后按后端状态恢复挂起审批卡。
- * 挂起的一轮还没落库（finalize 才写 MySQL），不恢复的话会话会被闸门挡住且无处可批。
+ * 刷新/切换会话后按后端状态恢复未完成的一轮。
+ * 挂起/中断的一轮还没落库（finalize 才写 MySQL），不恢复的话会话会被闸门挡住。
  */
 async function restorePendingApproval(conversationId) {
   if (!conversationId || loading.value) return
   try {
     const res = await getPendingApproval(conversationId)
-    if (!res || !res.pending || !(res.ops || []).length) return
+    if (!res) return
+    // 幂等：先清掉上一次恢复出的提示条/卡片载体
+    messages.value = messages.value.filter((m) => !m._unfinishedBar)
+    if (!res.pending && !res.interrupted) return
     let target = [...messages.value].reverse().find((m) => m.role === 'assistant')
-    if (!target) {
+    if (!target || res.interrupted) {
       target = {
         role: 'assistant',
         content: '',
@@ -2250,6 +2201,13 @@ async function restorePendingApproval(conversationId) {
       messages.value.push(target)
     }
     target.permissions = target.permissions || []
+    streamMsg = target
+    if (res.interrupted) {
+      // 进程被杀/异常退出留下的半成品：给「继续执行/丢弃」入口
+      target._unfinishedBar = true
+      scrollToBottom()
+      return
+    }
     suspended = { conversationId, msg: target, submitted: false, planPending: false }
     pushSuspendedCards(target, res.ops)
     if (res.plan && (res.plan.steps || []).length) {
@@ -2265,10 +2223,55 @@ async function restorePendingApproval(conversationId) {
     } else {
       focusPermissionCard()
     }
-    streamMsg = target
     scrollToBottom()
   } catch {
     // 恢复失败不阻塞会话加载
+  }
+}
+
+/** 续跑被中断的运行：新 SSE 流渲染进提示条所在气泡 */
+async function continueInterrupted(msg) {
+  if (!activeId.value || loading.value) return
+  flushTypewriter()
+  streamMsg = msg
+  msg._unfinishedBar = false
+  loading.value = true
+  currentTool.value = ''
+  abortController = new AbortController()
+  try {
+    await continueAgentRun(activeId.value, buildStreamHandlers(), {
+      signal: abortController.signal,
+    })
+  } catch (error) {
+    flushTypewriter()
+    if (error.name === 'AbortError' || error.message === 'aborted') {
+      dropStreamedRound()
+      if (streamMsg) streamMsg.content = streamMsg.content || '（已停止生成）'
+    } else {
+      const detail = error.message || '续跑失败，请确认后端服务已启动'
+      ElMessage.error(detail)
+      msg._unfinishedBar = true
+    }
+  } finally {
+    abortController = null
+    loading.value = false
+    currentTool.value = ''
+    if (streamMsg) streamMsg._streaming = false
+    await loadSessions()
+    scrollToBottom()
+  }
+}
+
+/** 丢弃未完成的运行：删除原生检查点线程，解除闸门 */
+async function abandonInterrupted(msg) {
+  if (!activeId.value || loading.value) return
+  try {
+    await abandonRun(activeId.value)
+    messages.value = messages.value.filter((m) => m !== msg)
+    ElMessage.success('已丢弃未完成的运行，可以继续对话')
+    scrollToBottom()
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '丢弃失败，请重试')
   }
 }
 
@@ -2332,10 +2335,6 @@ async function send(options = {}) {
     tool_mode: effectiveMode,
     template_id: templateId.value || null,
   }
-  if (options.resumePlan && options.resumePlan.length) {
-    // 计划确认后按同一份清单执行（后端据此播种任务清单）
-    payload.resume_plan = options.resumePlan
-  }
   try {
     await streamAgentChat(payload, buildStreamHandlers(), {
       signal: abortController.signal,
@@ -2351,8 +2350,8 @@ async function send(options = {}) {
       const detail = error.message || '请求失败，请确认后端服务已启动'
       ElMessage.error(detail)
       streamMsg.content = streamMsg.content || `请求失败：${detail}`
-      if (detail.includes('待确认')) {
-        // 后端闸门：该会话还有挂起审批未处理 → 恢复审批卡，让用户先决定
+      if (detail.includes('待确认') || detail.includes('被中断')) {
+        // 后端闸门：该会话还有挂起审批/中断未跑完 → 恢复卡片或提示条，让用户先处理
         await restorePendingApproval(activeId.value)
       }
     }
@@ -3304,6 +3303,18 @@ onBeforeUnmount(() => {
   background: var(--bg-soft, transparent);
   font-size: 12px;
   color: var(--text-2, #666);
+}
+
+/* 中断未跑完（进程被杀/异常退出）：警示色 */
+.interrupted-bar {
+  border-color: #e6a23c;
+  color: #b88230;
+}
+
+.suspension-actions {
+  display: inline-flex;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .permission-card {

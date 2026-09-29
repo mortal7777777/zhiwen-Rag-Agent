@@ -33,19 +33,6 @@ if TYPE_CHECKING:
 from ...tracing import get_usage_collector
 
 # ==== 函数体（原文）====
-def _render_plan_text(approval: dict) -> str:
-    """把提交的计划渲染成给用户看的正文（不再让模型多说一轮）。"""
-    steps = approval.get("steps") or []
-    lines = [f"计划已就绪（{len(steps)} 步），确认或修改后即按此执行："]
-    lines.extend(f"{i}. {s}" for i, s in enumerate(steps, 1))
-    summary = str(approval.get("summary") or "").strip()
-    if summary:
-        lines.append(f"\n{summary}")
-    lines.append("\n（在计划卡片上点「确认执行」开始；也可以先改步骤。）")
-    return "\n".join(lines)
-
-
-
 _STREAM_DONE = object()
 _DEFAULT_STALL_TIMEOUT_S = 150.0
 # 空正文重试上限：思考模式下一次 32000 输出预算全被 reasoning 吃光并不罕见
@@ -116,23 +103,6 @@ def _agent_node(state: AgentState, runtime) -> dict:
     if stopped():
         rt["status"] = "stopped"
         return {}
-
-    # 计划已提交：不再调模型（实测提交后还会再多跑两轮共 4 分钟），
-    # 直接把计划渲染成正文收尾，把回合让给用户确认
-    approval = rt.get("plan_approval") or {}
-    if approval.get("steps"):
-        text = _render_plan_text(approval)
-        rt["final_text"] = (rt.get("final_text") or "") + text
-        bus.emit("token", text)
-        return {
-            "pending_tool_calls": [],
-            "pending_subtasks": [],
-            "force_continue": False,
-            "plan_done_count": state.get("plan_done_count", 0),
-            "todos": state.get("todos") or [],
-            "plan_steps": state.get("plan_steps") or [],
-            "plan_map": state.get("plan_map") or [],
-        }
 
     # 还剩最后一次工具调用时提前提示：优先补充检索，随后必须作答
     remaining_calls = _iteration_limit(state, settings) - state["tool_calls_used"]

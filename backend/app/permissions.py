@@ -1,11 +1,9 @@
-"""人工确认（HITL）权限管理：Claude Code 式敏感操作审批。
+"""人工确认（HITL）：敏感工具判定 + 审批卡展示数据 + 会话级命令白名单。
 
-流程：
-- Agent 要执行写文件 / 编辑 / 删除 / 终端命令等敏感操作时，先在 tools 节点
-  生成 permission_request 请求并阻塞等待；
-- 前端 / 终端收到 permission_request 后展示操作内容，由用户批准或拒绝；
-- 用户通过 POST /api/agent/permission/{id}/resolve 提交决定，等待线程被唤醒，
-  Agent 继续执行（或跳过该操作并把拒绝原因回传给模型）。
+2026-09-29 改造：审批执行改走 LangGraph 原生 interrupt 挂起（tools 节点收决定、
+POST /agent/resume 续跑），本模块不再持有待审批请求，只剩两件事：
+- 判定与展示：is_sensitive_tool / describe_tool_call / display_args / build_diff_lines；
+- 会话级"不再询问"命令白名单（进程内单例，随会话生命周期）。
 
 策略（tool_permission_mode）：
 - ask   （默认）：敏感操作必须人工确认（对应 Claude Code 默认行为）；
@@ -20,8 +18,6 @@ from __future__ import annotations
 import difflib
 import logging
 import threading
-import time
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -171,122 +167,11 @@ def describe_tool_call(name: str, args: dict | None = None) -> str:
 
 
 @dataclass
-class PendingRequest:
-    """一条待人工确认的审批请求。"""
-
-    id: str
-    tool: str
-    arguments: dict
-    summary: str
-    conversation_id: int | None = None
-    created_at: float = field(default_factory=time.time)
-    status: str = "pending"  # pending | approved | denied
-    decision: bool | None = None
-    reason: str = ""
-    remember_forever: bool = False  # 批准并永久记住（写入命令白名单）
-    remember_session: bool = False  # 批准并在本会话内不再询问
-    _event: threading.Event = field(default_factory=threading.Event, repr=False)
-
-    def snapshot(self) -> dict:
-        return {
-            "id": self.id,
-            "tool": self.tool,
-            "arguments": self.arguments,
-            "summary": self.summary,
-            "status": self.status,
-            "reason": self.reason,
-            "remember_forever": self.remember_forever,
-            "remember_session": self.remember_session,
-            "created_at": self.created_at,
-        }
-
-
 class PermissionManager:
-    """审批请求注册表：提交、阻塞等待、批准/拒绝、过期清理。"""
+    """会话级"不再询问"命令白名单（原生挂起改造后仅此职责）。"""
 
-    def __init__(self) -> None:
-        self._requests: dict[str, PendingRequest] = {}
-        self._session_allowed: dict[int, set[str]] = {}
-        self._lock = threading.Lock()
-
-    def submit(
-        self,
-        tool: str,
-        arguments: dict,
-        summary: str,
-        conversation_id: int | None = None,
-    ) -> PendingRequest:
-        req = PendingRequest(
-            id=f"perm_{uuid.uuid4().hex[:12]}",
-            tool=tool,
-            arguments=arguments,
-            summary=summary,
-            conversation_id=conversation_id,
-        )
-        with self._lock:
-            self._requests[req.id] = req
-        return req
-
-    def wait(
-        self,
-        req: PendingRequest,
-        timeout: int = 300,
-        stop_event: threading.Event | None = None,
-    ) -> bool:
-        """阻塞等待用户决定；返回 True=批准。
-
-        timeout=0 表示无限等待（类 Claude Code 行为），不自动拒绝；
-        timeout>0 表示超时后自动拒绝。
-        支持停止信号中断。
-        """
-        deadline = None if timeout <= 0 else time.time() + max(1, timeout)
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                self._mark(req, False, "用户停止了回答")
-                return False
-            if req._event.wait(timeout=0.5):
-                break
-            if deadline is not None and time.time() >= deadline:
-                self._mark(req, False, "等待确认超时，已自动取消")
-                return False
-        return bool(req.decision)
-
-    def resolve(
-        self,
-        request_id: str,
-        approve: bool,
-        reason: str = "",
-        remember_forever: bool = False,
-        remember_session: bool = False,
-    ) -> PendingRequest | None:
-        """用户通过 API 提交决定；请求不存在或已处理时返回 None。"""
-        with self._lock:
-            req = self._requests.get(request_id)
-            if req is None or req.status != "pending":
-                return None
-            req.remember_forever = remember_forever
-            req.remember_session = remember_session
-        self._mark(req, approve, reason)
-        return req
-
-    def _mark(self, req: PendingRequest, approve: bool, reason: str) -> None:
-        with self._lock:
-            if req.status != "pending":
-                return
-            req.status = "approved" if approve else "denied"
-            req.decision = approve
-            req.reason = (reason or "").strip()
-            req._event.set()
-
-    def pending(self) -> list[dict]:
-        with self._lock:
-            return [
-                req.snapshot()
-                for req in self._requests.values()
-                if req.status == "pending"
-            ]
-
-    # ---- 会话级"不再询问"（批准后同会话同命令自动放行） ----
+    _session_allowed: dict[int, set[str]] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def is_session_allowed(self, conversation_id: int | None, command: str) -> bool:
         if not conversation_id:
@@ -299,21 +184,6 @@ class PermissionManager:
             return
         with self._lock:
             self._session_allowed.setdefault(conversation_id, set()).add(command.strip())
-
-    def cleanup(self, max_age: int = 3600) -> int:
-        """清理已结束且超过 max_age 的请求，防止内存膨胀。"""
-        now = time.time()
-        with self._lock:
-            stale = [
-                rid
-                for rid, req in self._requests.items()
-                if req.status != "pending" and now - req.created_at > max_age
-            ]
-            for rid in stale:
-                self._requests.pop(rid, None)
-        if stale:
-            logger.info("清理过期审批请求 %d 条", len(stale))
-        return len(stale)
 
 
 _manager = PermissionManager()

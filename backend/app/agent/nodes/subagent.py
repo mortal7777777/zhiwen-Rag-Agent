@@ -420,88 +420,47 @@ def _dispatch_tasks(state: AgentState):
     ]
 
 
-def _run_sensitive_subagent_tool(
+def _subagent_sensitive_gate(
     service: "LangGraphAgentService",
-    permission_manager,
     name: str,
     args: dict,
     invoke_fn,
     tool,
     bus,
     rt: dict,
-    stop_event,
 ) -> dict:
-    """子代理执行敏感工具：白名单自动放行，否则走与主 Agent 一致的 HITL。"""
-    from ...permissions import describe_tool_call, display_args
+    """子代理敏感操作闸门：白名单/allow 模式直接执行，其余交回主代理。
+
+    子代理跑在并行 Send 分支里，无法 interrupt 向用户提问（该分支的恢复语义
+    未经验证且牵动 merge），所以这里不开放阻塞式审批：需要写/命令时由主代理
+    自己执行（走主流程的原生挂起审批）。
+    """
+    from ...permissions import describe_tool_call, get_permission_manager
     from ...tools_extra import command_allowed
 
     settings = service.settings
     command = str(args.get("command") or "")
-    allowed_cmd = (
-        name in ("bash", "command_tool")
-        and (
-            command_allowed(settings, command)[0]
-            or permission_manager.is_session_allowed(rt.get("conv_id"), command)
-        )
-    )
-    mode = effective(settings, "tool_permission_mode") or "ask"
-    if mode == "allow" or allowed_cmd:
+    if effective(settings, "tool_permission_mode") == "allow":
+        return invoke_fn(tool, args)
+    if name in ("bash", "command_tool") and (
+        command_allowed(settings, command)[0]
+        or get_permission_manager().is_session_allowed(rt.get("conv_id"), command)
+    ):
         return invoke_fn(tool, args)
 
     summary = describe_tool_call(name, args)
-    req = permission_manager.submit(
-        tool=name,
-        arguments=display_args(name, args),
-        summary=summary,
-        conversation_id=rt.get("conv_id"),
-    )
     if bus is not None:
-        bus.emit(
-            "permission_request",
-            {
-                "id": req.id,
-                "name": name,
-                "arguments": req.arguments,
-                "summary": summary,
-            },
-        )
         bus.emit(
             "status",
-            {"phase": "permission", "text": f"子代理等待确认：{summary}"},
-        )
-    approved = permission_manager.wait(
-        req,
-        timeout=int(effective(settings, "permission_timeout", 0) or 0),
-        stop_event=stop_event,
-    )
-    if approved:
-        if bus is not None:
-            bus.emit(
-                "permission_resolved",
-                {"id": req.id, "approved": True, "reason": ""},
-            )
-        if req.remember_session and command:
-            permission_manager.mark_session_allowed(rt.get("conv_id"), command)
-        result = invoke_fn(tool, args)
-        if req.remember_forever and command:
-            result["summary"] = (
-                str(result.get("summary") or "") + "（已记住，下次不再询问）"
-            )
-        return result
-    reason = req.reason or (
-        "用户拒绝了该操作"
-        if req.status == "denied"
-        else "等待确认超时，已自动取消"
-    )
-    if bus is not None:
-        bus.emit(
-            "permission_resolved",
-            {"id": req.id, "approved": False, "reason": reason},
+            {"phase": "permission", "text": f"子代理请求敏感操作，已交回主代理：{summary}"},
         )
     return {
-        "summary": f"用户拒绝了该操作：{reason}",
-        "permission": "denied",
-        "error": f"操作未执行（用户拒绝）：{reason}。请说明影响并询问替代方案。",
+        "summary": f"子代理不能执行敏感操作：{summary}",
+        "permission": "subagent_denied",
+        "error": (
+            f"该操作需要人工确认（{summary}），子代理不开放敏感操作。"
+            "请把这一步交回主代理执行（主代理会向用户发起确认）。"
+        ),
     }
 
 
@@ -639,16 +598,14 @@ def _subagent_node(state: AgentState, runtime) -> dict:
                 if tool is None:
                     result: dict = {"error": f"子代理不可用工具：{name}"}
                 elif is_sensitive_tool(name, args):
-                    result = _run_sensitive_subagent_tool(
+                    result = _subagent_sensitive_gate(
                         service,
-                        permission_manager,
                         name,
                         args,
                         _invoke,
                         tool,
                         bus,
                         runtime,
-                        stop_event,
                     )
                 else:
                     result = _invoke(tool, args)

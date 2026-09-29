@@ -5,8 +5,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..checkpoint import get_store
-from ..config import get_settings
 from ..db import get_db
 from ..db import repository as repo
 from ..schemas import (
@@ -17,6 +15,7 @@ from ..schemas import (
     RewindRequest,
 )
 from ..todos import save_todos
+from .deps import get_agent_service
 
 router = APIRouter(tags=["conversations"])
 
@@ -75,10 +74,20 @@ def rename_conversation(
 
 
 @router.delete("/conversations/{conversation_id}", status_code=204)
-def delete_conversation(conversation_id: int, db: Session = Depends(get_db)) -> None:
-    """删除会话及其全部消息。"""
+def delete_conversation(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    agent=Depends(get_agent_service),
+) -> None:
+    """删除会话及其全部消息 + 原生检查点线程（否则快照会在 sqlite 里越积越多）。"""
     if not repo.delete_conversation(db, conversation_id):
         raise HTTPException(status_code=404, detail="会话不存在")
+    abandon = getattr(agent, "abandon_run", None)
+    if callable(abandon):
+        try:
+            abandon(conversation_id)
+        except Exception:
+            pass
 
 
 @router.get(
@@ -97,13 +106,14 @@ def rewind_conversation(
     conversation_id: int,
     payload: RewindRequest,
     db: Session = Depends(get_db),
+    agent=Depends(get_agent_service),
 ) -> dict:
     """消息级回退：删除该消息及其之后的全部消息（类 Claude Code rewind）。
 
     同时清理附属状态，保证回退干净：
     - 滚动摘要若覆盖了被删消息 → 重置（防摘要残留旧内容）；
     - 该会话的任务清单（todos）清空；
-    - 自写 checkpoint 的 pending 快照清除（防止恢复到已回退的状态）。
+    - 原生检查点线程删除（防止恢复到已回退的状态）。
     """
     conv = repo.get_conversation(db, conversation_id)
     if conv is None:
@@ -118,10 +128,12 @@ def rewind_conversation(
         save_todos(db, conversation_id, [])
     except Exception:
         pass
-    try:
-        get_store(get_settings()).clear(conversation_id)
-    except Exception:
-        pass
+    abandon = getattr(agent, "abandon_run", None)
+    if callable(abandon):
+        try:
+            abandon(conversation_id)
+        except Exception:
+            pass
     return {
         "conversation_id": conversation_id,
         "message_id": payload.message_id,

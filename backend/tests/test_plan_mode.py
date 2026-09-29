@@ -39,7 +39,6 @@ def _settings():
         tool_permission_mode="allow",
         permission_timeout=0,
         command_allowlist="",
-        checkpoint_enabled=False,
         agent_max_iterations=12,
         agent_max_failures=3,
         task_mode_detect=True,
@@ -158,26 +157,6 @@ def test_plan_mode_blocks_sensitive_tools():
 # ---------------- 提交计划 ----------------
 
 
-def test_exit_plan_mode_submits_structured_plan():
-    calls = [
-        {
-            "name": PLAN_EXIT_TOOL_NAME,
-            "id": "c3",
-            "args": {"steps": ["写 pelican.html", "跑验证命令", "修正问题"], "summary": "做一个页面"},
-        }
-    ]
-    state = _state([make_exit_plan_mode_tool()], calls)
-    out = _tools_node(state, runtime_from_state(state))
-
-    approval = state["runtime"]["plan_approval"]
-    assert approval["steps"] == ["写 pelican.html", "跑验证命令", "修正问题"]
-    assert state["plan_steps"] == approval["steps"]
-    # 提交计划后本轮收尾（不再派工具），等用户确认
-    assert out["forced_final"] is True
-    events = _events(state["bus"])
-    assert any(ev["event"] == "plan_approval" for ev in events)
-
-
 def test_exit_plan_mode_without_steps_is_ignored():
     calls = [{"name": PLAN_EXIT_TOOL_NAME, "id": "c4", "args": {"steps": []}}]
     state = _state([make_exit_plan_mode_tool()], calls)
@@ -185,77 +164,6 @@ def test_exit_plan_mode_without_steps_is_ignored():
 
     assert "plan_approval" not in state["runtime"]
     assert out["forced_final"] is False
-
-
-# ---------------- 提交后立即收尾（不再多跑一轮模型） ----------------
-
-
-class _NoCallChat:
-    def __init__(self):
-        self.called = False
-
-    def bind_tools(self, tools):
-        return self
-
-    def stream(self, messages, config=None):
-        self.called = True
-        raise AssertionError("计划提交后不应再调用模型")
-
-
-class _FakeRag:
-    def acquire_llm(self):
-        pass
-
-    def release_llm(self):
-        pass
-
-
-def test_agent_node_short_circuits_after_plan_approval():
-    """实测提交计划后模型还会再跑两轮共 4 分钟，这里直接渲染计划收尾。"""
-    import time
-
-    from app.agent.nodes.agent import _agent_node
-
-    chat = _NoCallChat()
-    bus = EventBus(queue.Queue())
-    state = {
-        "service": SimpleNamespace(
-            chat=chat,
-            chat_plain=chat,
-            rag=_FakeRag(),
-            settings=SimpleNamespace(
-                agent_max_iterations=12,
-                agent_llm_stall_timeout_s=5.0,
-                agent_max_dispatch_rounds=3,
-            ),
-        ),
-        "bus": bus,
-        "runtime": {
-            "started": time.perf_counter(),
-            "final_text": "",
-            "plan_approval": {"steps": ["第一步", "第二步"], "summary": "目标"},
-        },
-        "messages": [],
-        "tools": [],
-        "tool_calls_used": 3,
-        "forced_final": True,
-        "last_call_warned": False,
-        "todos": [],
-        "plan_map": [],
-        "plan_steps": ["第一步", "第二步"],
-        "plan_done_count": 0,
-        "plan_push_count": 0,
-        "pending_tool_calls": [],
-        "stop_event": None,
-        "question": "写个页面",
-    }
-
-    out = _agent_node(state, runtime_from_state(state))
-
-    assert chat.called is False, "计划提交后不应再发起 LLM 调用"
-    assert "第一步" in state["runtime"]["final_text"]
-    assert out["pending_tool_calls"] == []
-    assert any(ev["event"] == "token" for ev in _events(bus))
 
 
 class _PlainChat:
@@ -271,6 +179,14 @@ class _PlainChat:
         from langchain_core.messages import AIMessageChunk
 
         yield AIMessageChunk(content=self._text)
+
+
+class _FakeRag:
+    def acquire_llm(self):
+        pass
+
+    def release_llm(self):
+        pass
 
 
 def _constraint_state(todos: list[dict], chat) -> dict:
@@ -341,35 +257,5 @@ def test_hard_constraint_releases_when_all_steps_done():
     )
 
 
-# ---------------- finalize：等待确认状态 ----------------
-
-
-def test_finalize_marks_awaiting_approval():
-    from app.agent.nodes.finalize import _finalize_node
-
-    bus = EventBus(queue.Queue())
-    state = {
-        "service": SimpleNamespace(
-            settings=SimpleNamespace(
-                checkpoint_enabled=False, trajectory_compress_enabled=False
-            )
-        ),
-        "bus": bus,
-        "db": None,
-        "runtime": {
-            "final_text": "计划如下…",
-            "status": "ok",
-            "plan_approval": {"steps": ["第一步"], "summary": ""},
-        },
-        "sources": [],
-        "tool_trace": [],
-        "question": "写个页面",
-        "messages": [],
-        "plan_steps": ["第一步"],
-        "todos": [],
-    }
-    _finalize_node(state, runtime_from_state(state))
-
-    assert state["runtime"]["status"] == "ok", "提交计划不是错误"
-    events = _events(bus)
-    assert any(ev["event"] == "plan" for ev in events)
+# finalize 的「等待计划确认」状态随旧路径删除：计划确认走原生挂起，
+# 不再以 awaiting_approval 收尾（覆盖在 tests/test_tools_hitl_interrupt.py）。

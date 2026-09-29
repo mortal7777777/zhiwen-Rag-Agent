@@ -223,8 +223,6 @@ class Settings:
     # 注入的是"节选"——记忆库再涨也不会让每次请求的上下文无限膨胀
     project_memory_max_chars: int = 2600
     mcp_enabled: bool = True              # MCP 工具接入总开关
-    checkpoint_enabled: bool = True       # 会话中断 checkpoint 恢复
-    checkpoint_native_enabled: bool = True  # LangGraph 原生 checkpointer（快照审计）
     trajectory_compress_enabled: bool = True  # 长任务轨迹摘要压缩
 
     # ---- CORS（前端开发服务器地址）----
@@ -378,8 +376,6 @@ class Settings:
             reasoning_summary_enabled=_env("REASONING_SUMMARY_ENABLED", "0") == "1",
             project_memory_file=_env("PROJECT_MEMORY_FILE", ""),
             mcp_enabled=_env("MCP_ENABLED", "1") == "1",
-            checkpoint_enabled=_env("CHECKPOINT_ENABLED", "1") == "1",
-            checkpoint_native_enabled=_env("CHECKPOINT_NATIVE_ENABLED", "1") == "1",
             trajectory_compress_enabled=_env("TRAJECTORY_COMPRESS_ENABLED", "1") == "1",
             cors_origins=origins,
         )

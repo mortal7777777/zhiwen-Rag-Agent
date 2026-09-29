@@ -151,7 +151,6 @@ class AgentService:
         stop_event: threading.Event | None = None,
         images: list[str] | None = None,
         plan_only: bool = False,
-        resume_plan: list[str] | None = None,
         project_dir: str | None = None,
         command_sandbox: str | None = None,
     ):
@@ -176,7 +175,6 @@ class AgentService:
                             stop_event,
                             images,
                             plan_only=plan_only,
-                            resume_plan=resume_plan,
                             project_dir=project_dir,
                             command_sandbox=command_sandbox,
                         )
@@ -197,7 +195,6 @@ class AgentService:
             stop_event,
             images,
             plan_only=plan_only,
-            resume_plan=resume_plan,
             project_dir=project_dir,
             command_sandbox=command_sandbox,
         )
@@ -215,7 +212,6 @@ class AgentService:
         stop_event: threading.Event | None = None,
         images: list[str] | None = None,
         plan_only: bool = False,
-        resume_plan: list[str] | None = None,
         project_dir: str | None = None,
         command_sandbox: str | None = None,
     ):
@@ -238,7 +234,6 @@ class AgentService:
             stop_event,
             images,
             plan_only=plan_only,
-            resume_plan=resume_plan,
             project_dir=project_dir,
             command_sandbox=command_sandbox,
         ):

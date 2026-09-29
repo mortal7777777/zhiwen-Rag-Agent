@@ -168,7 +168,6 @@ def test_finalize_empty_answer_marks_error():
     bus = EventBus(queue.Queue())
     service = SimpleNamespace(
         settings=SimpleNamespace(
-            checkpoint_enabled=False,
             trajectory_compress_enabled=False,
         )
     )

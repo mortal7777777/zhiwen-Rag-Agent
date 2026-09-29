@@ -107,8 +107,11 @@
   等价 Claude Code 的 `--dangerously-skip-permissions`，谨慎使用）；
 - 等待确认超时默认 0 = 无限等待（类 Claude Code；`PERMISSION_TIMEOUT>0` 时由后端
   watchdog 到点以“全部拒绝（超时）”自动续跑收尾）；挂起期间点停止 = 全拒 + 立即收尾；
-  关闭原生检查点（`CHECKPOINT_NATIVE_ENABLED=0`）时回落为旧的阻塞式审批
-  （`permission_request` 事件 + `POST /api/agent/permission/{id}/resolve`）；
+- **崩溃续跑**：进程被杀/异常退出的半成品一轮会留在原生检查点里——重开会话时前端提示
+  「继续执行 / 丢弃这一轮」，后端 `POST /api/agent/continue/{conversation_id}` 以
+  `invoke(None)` 让框架把没跑完的节点重跑完（只重跑未完成节点，前缀缓存不断）；
+  被中断节点会从头重跑，副作用可能重复一次（窗口=进程恰好死在节点执行中）；
+  挂起中的确认跨重启同样存活（sqlite 检查点），回来继续批即可；
 - 安全边界：文件操作限制在 `tool_workspace`（默认项目根）内、拒绝路径穿越；
   命令带超时（默认 60s）与输出截断；删除不物理销毁，移入 `.agent_trash/` 可恢复；
   写文件使用原子写入（临时文件 + 替换），避免半截文件；
@@ -526,7 +529,7 @@ hooks 门禁、用户工具加载、run_verify 写后验证等。测试不依赖
 | `VERIFY_COMMAND` | 空 | 写/改文件后自动运行的验证命令（显式配置优先，空=按类型自动检测） |
 | `VERIFY_AUTO_DETECT` | `1` | 未配置 VERIFY_COMMAND 时按扩展名自动验证（.py→py_compile / .js→node --check / .json/.yaml 语法） |
 | `VERIFY_MAX_RETRIES` | `1` | 验证失败后允许模型继续修复并复验的次数，超过则要求如实说明 |
-| `CHECKPOINT_NATIVE_ENABLED` | `1` | LangGraph 原生 checkpointer（快照时间线） |
+| `PERMISSION_TIMEOUT` | `0` | 等待人工确认超时（秒），0=无限等待；>0 由 watchdog 到点全拒续跑 |
 | `AGENT_MAX_FAILURES` | `3` | 工具失败重试上限（失败不占迭代预算） |
 | `AGENT_RECURSION_LIMIT` | `110` | LangGraph 图执行最大步数（超限友好收尾） |
 | `CHAT_TEMPERATURE` | `0.5` | 回答温度 |
@@ -558,7 +561,6 @@ hooks 门禁、用户工具加载、run_verify 写后验证等。测试不依赖
 | `COMMAND_SANDBOX` | `subprocess` | 命令执行环境：`subprocess`（本机）/ `docker`（容器沙箱） |
 | `SANDBOX_IMAGE` | `python:3.11-slim` | Docker 沙箱镜像 |
 | `TOOL_PERMISSION_MODE` | `ask` | 敏感操作确认：`ask`（每次确认）/ `allow`（自动批准） |
-| `PERMISSION_TIMEOUT` | `0` | 等待人工确认超时（秒），0=无限等待（类 Claude Code），>0 超时自动取消 |
 | `OPENSEARCH_URL` / `OPENSEARCH_INDEX` | `http://localhost:9200` / `zhiwen_kb_current` | OpenSearch 地址 / 索引逻辑名（别名；物理索引由服务自动管理，见 docs/INDEX_REDESIGN_PLAN.md） |
 | `DATA_DIR` / `META_DIR` | `rag_knowledge_base/data` / `opensearch_meta` | 文档目录 / 账本目录 |
 | `EMBEDDING_MODEL_DIR` / `RERANKER_CACHE_DIR` | `../local_models/...` | 本地模型目录 |
@@ -572,6 +574,8 @@ hooks 门禁、用户工具加载、run_verify 写后验证等。测试不依赖
 | POST | `/api/agent/chat` | Agent 问答（JSON：question / conversation_id / tool_mode / template_id / images） |
 | POST | `/api/agent/stream` | Agent 流式问答（SSE：session / plan / plan_progress / plan_approval / vision / tool_start / tool_result / run_suspended / token / title / done / error；空闲 15s 发 `: keepalive`） |
 | POST | `/api/agent/resume` | 恢复挂起的运行（提交审批决定），返回新 SSE 流续跑同一条回答 |
+| POST | `/api/agent/continue/{conversation_id}` | 续跑被中断的运行（进程被杀/异常退出留下的未完成任务） |
+| POST | `/api/agent/abandon/{conversation_id}` | 丢弃未完成的运行（删除该会话的原生检查点线程） |
 | GET | `/api/agent/pending/{conversation_id}` | 该会话挂起中的审批载荷（刷新/切换会话后恢复审批卡） |
 | POST | `/api/agent/permission/{id}/resolve` | 人工确认：批准/拒绝敏感操作（写文件/编辑/删除/执行命令） |
 | GET | `/api/agent/permissions` | 当前待人工确认的审批请求列表 |

@@ -61,8 +61,6 @@ class Deps:
     title_thread: threading.Thread | None = None
     # tools 节点预生成"思考摘要"的完成信号（agent 节点最多等 1s）
     reasoning: dict | None = None
-    # 审批决定收集方式：interrupt=原生挂起（有 checkpointer 时），blocking=旧阻塞式回退
-    approval_mode: str = "blocking"
 
 
 def runtime_of(deps: "Deps") -> SimpleNamespace:
@@ -87,7 +85,6 @@ class AgentState(TypedDict, total=False):
     system_prompt: str | None
     tool_mode: str
     plan_only: bool
-    resume_plan: list[str] | None
 
     messages: list
     pending_tool_calls: list

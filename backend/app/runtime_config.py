@@ -72,8 +72,6 @@ EDITABLE_KEYS = {
     "reasoning_summary_enabled",
     "project_memory_file",
     "mcp_enabled",
-    "checkpoint_enabled",
-    "checkpoint_native_enabled",
     "trajectory_compress_enabled",
     # 嵌入/重排序模型提供方式（local=本地 BGE / api=OpenAI 兼容接口）
     "embedding_provider",

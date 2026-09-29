@@ -92,7 +92,6 @@ def agent_chat(
             tool_mode=request.tool_mode,
             images=request.images,
             plan_only=request.plan_only,
-            resume_plan=request.resume_plan,
             project_dir=request.project_dir,
             command_sandbox=request.command_sandbox,
         )
@@ -102,13 +101,27 @@ def agent_chat(
 
 
 def _reject_if_busy(conversation_id: int | None, service: AgentService) -> None:
-    """挂起中或已有运行中的会话：拒绝新消息（防检查点状态被覆盖）。"""
-    has_pending = getattr(service, "has_pending_approval", None)
-    if callable(has_pending) and has_pending(conversation_id):
-        raise HTTPException(
-            status_code=409,
-            detail="该会话有待确认的操作，请先批准或拒绝后再发送新消息",
-        )
+    """挂起中/中断未跑完/已有运行中的会话：拒绝新消息（防检查点状态被覆盖）。"""
+    state_fn = getattr(service, "pending_state", None)
+    if callable(state_fn):
+        st = state_fn(conversation_id) or {}
+        if st.get("pending"):
+            raise HTTPException(
+                status_code=409,
+                detail="该会话有待确认的操作，请先批准或拒绝后再发送新消息",
+            )
+        if st.get("interrupted"):
+            raise HTTPException(
+                status_code=409,
+                detail="该会话上一轮执行被中断，请先点「继续执行」或丢弃该轮后再发送新消息",
+            )
+    else:
+        has_pending = getattr(service, "has_pending_approval", None)
+        if callable(has_pending) and has_pending(conversation_id):
+            raise HTTPException(
+                status_code=409,
+                detail="该会话有待确认的操作，请先批准或拒绝后再发送新消息",
+            )
     if is_conversation_active(conversation_id):
         raise HTTPException(status_code=409, detail="该会话已有正在进行的回复")
 
@@ -203,7 +216,6 @@ async def agent_stream(
             stop_event=stop,
             images=request.images,
             plan_only=request.plan_only,
-            resume_plan=request.resume_plan,
             project_dir=request.project_dir,
             command_sandbox=request.command_sandbox,
         ),
@@ -284,22 +296,68 @@ def agent_pending_approval(
     conversation_id: int,
     service: AgentService = Depends(get_agent_service),
 ) -> dict:
-    """该会话挂起中的审批载荷（刷新/切换会话后前端据此恢复审批卡）。"""
+    """该会话的未完成状态（刷新/切换会话后前端据此恢复审批卡或提示续跑）。"""
+    state_fn = getattr(service, "pending_state", None)
+    if callable(state_fn):
+        st = state_fn(conversation_id) or {}
+        return {
+            "pending": bool(st.get("pending")),
+            "interrupted": bool(st.get("interrupted")),
+            "conversation_id": conversation_id,
+            "ops": st.get("ops") or [],
+            "plan": st.get("plan"),
+        }
     payload_fn = getattr(service, "pending_approval_payload", None)
     payload = payload_fn(conversation_id) if callable(payload_fn) else None
-    if not payload:
-        return {
-            "pending": False,
-            "conversation_id": conversation_id,
-            "ops": [],
-            "plan": None,
-        }
     return {
-        "pending": True,
+        "pending": bool(payload),
+        "interrupted": False,
         "conversation_id": conversation_id,
-        "ops": payload.get("ops") or [],
-        "plan": payload.get("plan") or None,
+        "ops": (payload or {}).get("ops") or [],
+        "plan": (payload or {}).get("plan") or None,
     }
+
+
+@router.post("/agent/continue/{conversation_id}")
+async def agent_continue(
+    conversation_id: int,
+    service: AgentService = Depends(get_agent_service),
+) -> StreamingResponse:
+    """续跑被中断的运行（进程被杀/异常退出留下的未完成任务）。"""
+    continue_fn = getattr(service, "continue_run", None)
+    state_fn = getattr(service, "pending_state", None)
+    if continue_fn is None or state_fn is None:
+        raise HTTPException(status_code=400, detail="当前服务不支持续跑中断的运行")
+    st = state_fn(conversation_id) or {}
+    if st.get("pending"):
+        raise HTTPException(
+            status_code=409,
+            detail="该会话有挂起中的确认，请先批准/拒绝（走 /agent/resume）",
+        )
+    if not st.get("interrupted"):
+        raise HTTPException(status_code=409, detail="该会话没有未完成的运行")
+    if is_conversation_active(conversation_id):
+        raise HTTPException(status_code=409, detail="该会话已有正在进行的回复")
+    return _sse_response(
+        lambda stop: continue_fn(
+            conversation_id=conversation_id, db=None, stop_event=stop
+        ),
+        conversation_id,
+    )
+
+
+@router.post("/agent/abandon/{conversation_id}")
+def agent_abandon(
+    conversation_id: int,
+    service: AgentService = Depends(get_agent_service),
+) -> dict:
+    """丢弃未完成的运行（删除该会话的原生检查点线程），解除新消息闸门。"""
+    abandon_fn = getattr(service, "abandon_run", None)
+    if abandon_fn is None:
+        raise HTTPException(status_code=400, detail="当前服务不支持丢弃运行")
+    if is_conversation_active(conversation_id):
+        raise HTTPException(status_code=409, detail="该会话已有正在进行的回复")
+    return {"ok": bool(abandon_fn(conversation_id)), "conversation_id": conversation_id}
 
 
 @router.post("/agent/cancel/{run_id}")

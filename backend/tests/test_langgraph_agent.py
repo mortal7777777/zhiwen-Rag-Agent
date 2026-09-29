@@ -12,8 +12,8 @@ from app.agent.nodes.subagent import (
     DISPATCH_TOOL_NAME,
     _parse_declared_subtasks,
     _renumber_subagent_sources,
-    _run_sensitive_subagent_tool,
     _split_declaration,
+    _subagent_sensitive_gate,
     _subagent_tools,
 )
 from app.agent.utils import _pick_verify_command, _run_verify
@@ -221,18 +221,55 @@ def test_sensitive_subagent_tool_allow_mode():
         def invoke(self, args):
             return {"summary": "ok"}
 
-    res = _run_sensitive_subagent_tool(
+    res = _subagent_sensitive_gate(
         Service(),
-        None,
         "write_file",
         {"path": "x.txt"},
         lambda t, a: t.invoke(a),
         FakeTool(),
         None,
         {"conv_id": 1},
-        None,
     )
     assert res["summary"] == "ok"
+
+
+def test_sensitive_subagent_tool_ask_mode_defers_to_main_agent():
+    """ask 模式下子代理不开放敏感操作：拒绝并交回主代理（并行分支无法 interrupt）。"""
+
+    class Settings:
+        tool_permission_mode = "ask"
+        command_allowlist = "git status"
+
+    class Service:
+        settings = Settings()
+
+    class FakeTool:
+        def invoke(self, args):
+            raise AssertionError("ask 模式下不得执行敏感操作")
+
+    res = _subagent_sensitive_gate(
+        Service(),
+        "write_file",
+        {"path": "x.txt"},
+        lambda t, a: t.invoke(a),
+        FakeTool(),
+        None,
+        {"conv_id": 1},
+    )
+    assert res["permission"] == "subagent_denied"
+    assert "主代理" in res["error"]
+
+    # 白名单命令仍直接放行
+    res2 = _subagent_sensitive_gate(
+        Service(),
+        "bash",
+        {"command": "git status"},
+        lambda t, a: {"summary": "ok"},
+        FakeTool(),
+        None,
+        {"conv_id": 1},
+    )
+    assert res2["summary"] == "ok"
 
 
 # ---------------- 写后验证：类型自适应 + 重试上限 ----------------

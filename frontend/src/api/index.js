@@ -43,19 +43,12 @@ async function consumeAgentStream(response, handlers = {}) {
         handlers.onReasoning(data)
       } else if (event === 'plan_progress' && handlers.onPlanProgress) {
         handlers.onPlanProgress(data)
-      } else if (event === 'plan_approval' && handlers.onPlanApproval) {
-        // 计划模式：模型提交了结构化计划，等用户确认后以 resume_plan 执行
-        handlers.onPlanApproval(data)
       } else if (event === 'vision' && handlers.onVision) {
         handlers.onVision(data)
       } else if (event === 'tool_start' && handlers.onToolStart) {
         handlers.onToolStart(data)
       } else if (event === 'tool_result' && handlers.onToolResult) {
         handlers.onToolResult(data)
-      } else if (event === 'permission_request' && handlers.onPermission) {
-        handlers.onPermission(data)
-      } else if (event === 'permission_resolved' && handlers.onPermissionResolved) {
-        handlers.onPermissionResolved(data)
       } else if (event === 'run_suspended' && handlers.onSuspended) {
         // 敏感操作挂起：本条流到此结束（后端等待决定），前端收齐决定后走 resume
         handlers.onSuspended(data)
@@ -353,30 +346,29 @@ export const getSkillCommands = (name) =>
 export const runSkillCommand = (name, command) =>
   client.post(`/skills/${encodeURIComponent(name)}/run`, { command }).then((res) => res.data)
 
-/** 人工确认（HITL）：批准/拒绝一次敏感操作；remember=永久记住，rememberSession=本会话记住 */
-export const resolvePermission = (
-  requestId,
-  approve,
-  reason = '',
-  remember = false,
-  rememberSession = false,
-) =>
-  client
-    .post(`/agent/permission/${encodeURIComponent(requestId)}/resolve`, {
-      approve,
-      reason,
-      remember,
-      remember_session: rememberSession,
-    })
-    .then((res) => res.data)
-
-/** 当前待人工确认的审批列表 */
-export const listPendingPermissions = () =>
-  client.get('/agent/permissions').then((res) => res.data)
-
-/** 该会话挂起中的原生审批（刷新/切换会话后恢复审批卡） */
+/** 该会话挂起中的原生审批（刷新/切换会话后恢复审批卡/提示续跑） */
 export const getPendingApproval = (conversationId) =>
   client.get(`/agent/pending/${conversationId}`).then((res) => res.data)
+
+/**
+ * 续跑被中断的运行（进程被杀/异常退出留下的未完成一轮）：新 SSE 流续跑。
+ * 事件协议与 streamAgentChat 相同。
+ */
+export async function continueAgentRun(conversationId, handlers = {}, options = {}) {
+  const response = await fetch(`/api/agent/continue/${conversationId}`, {
+    method: 'POST',
+    signal: options.signal,
+  })
+  if (!response.ok || !response.body) {
+    const detail = await response.json().catch(() => null)
+    throw new Error(detail?.detail || `HTTP ${response.status}，请确认后端已启动`)
+  }
+  return consumeAgentStream(response, handlers)
+}
+
+/** 丢弃未完成的运行（删除该会话的原生检查点线程），解除新消息闸门 */
+export const abandonRun = (conversationId) =>
+  client.post(`/agent/abandon/${conversationId}`).then((res) => res.data)
 
 /** 上下文占用统计：消息条数 / token 预算 / 滚动摘要进度 / 缓存命中率 */
 export const getAgentContext = (conversationId) =>

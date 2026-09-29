@@ -197,12 +197,8 @@ class AgentChatRequest(BaseModel):
         default=False,
         description=(
             "计划模式：只读探索并输出执行计划，敏感操作（写文件/编辑/删除/命令）"
-            "会被拦截；用户确认计划后以 resume_plan 复用同一计划执行。"
+            "会被拦截；用户确认计划后在同一 run 内继续执行（原生挂起/恢复）。"
         ),
-    )
-    resume_plan: list[str] | None = Field(
-        default=None,
-        description="计划模式确认后复用已确认的计划步骤（不再重新规划）",
     )
     command_sandbox: str | None = Field(
         default=None,

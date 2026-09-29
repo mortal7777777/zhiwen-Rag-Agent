@@ -638,6 +638,7 @@ COMMANDS = [
     "/exit",
     "/quit",
     "/new",
+    "/continue",
     "/tools",
     "/todos",
     "/status",
@@ -1476,43 +1477,23 @@ def show_project_memory(cwd: str) -> None:
 # ------------------------------------------------------------------ 权限审批
 
 
-def resolve_permission(
-    base_url: str,
-    request_id: str,
-    approve: bool,
-    reason: str = "",
-    remember_forever: bool = False,
-    remember_session: bool = False,
-) -> bool:
-    body = json.dumps(
-        {
-            "approve": approve,
-            "reason": reason,
-            "remember": remember_forever,
-            "remember_session": remember_session,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url}/api/agent/permission/{request_id}/resolve",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
-
-
 def _boxed(rows: list[str], title: str, color: str) -> None:
+    """圆角面板：边框弱化（dim）、标题高亮、内容保持自身着色。
+
+    欢迎横幅 / 审批卡 / 计划确认卡共用，保证三处视觉一致。
+    """
     inner = max([strwidth(r) for r in rows] + [strwidth(title) + 4] + [0])
     width = min(term_width() - 2, inner + 2)
-    print(paint("┌─ " + title + " " + "─" * max(0, width - strwidth(title) - 4) + "┐", color, bold=True))
+    head_pad = max(0, width - strwidth(title) - 4)
+    print(
+        paint("╭─ ", "dim")
+        + paint(title, color, bold=True)
+        + paint(" " + "─" * head_pad + "╮", "dim")
+    )
     for row in rows:
-        print(paint("│ " + row + " " * max(0, width - strwidth(row) - 1) + "│", color))
-    print(paint("└" + "─" * max(0, width - 1) + "┘", color, bold=True))
+        pad = " " * max(0, width - strwidth(row) - 1)
+        print(paint("│", "dim") + " " + row + pad + paint("│", "dim"))
+    print(paint("╰" + "─" * max(0, width - 1) + "╯", "dim"))
 
 
 def _permission_rows(data: dict) -> list[str]:
@@ -1604,6 +1585,7 @@ def ask_plan_decision(reader: KeyReader, plan: dict) -> dict:
         for i, s in enumerate(plan.get("steps") or [], 1)
     ]
     rows += [paint("  1) 确认执行    2) 拒绝", "cyan")]
+    rows += [paint("  确认后同一轮直接开始执行；拒绝则模型可调整后重新提交", "dim")]
     _boxed(rows, safe_text(plan.get("summary") or "执行计划待确认"), "cyan")
     print(paint("选择 [1-2] / 回车=确认 / Esc=拒绝：", "cyan"), end="", flush=True)
     while True:
@@ -1623,27 +1605,6 @@ def ask_plan_decision(reader: KeyReader, plan: dict) -> dict:
         "steps": list(plan.get("steps") or []),
         "reason": "" if answer == "1" else "用户拒绝了该计划",
     }
-
-
-def prompt_permission(reader: KeyReader, data: dict, base_url: str) -> None:
-    """旧阻塞式审批路径（permission_request 事件）：询问并直接提交决定。
-
-    原生检查点关闭（approval_mode=blocking）或服务不支持挂起时才会走到这里；
-    挂起路径由 stream_question 收齐决定后统一走 /agent/resume。
-    """
-    decision = ask_permission_decision(reader, data)
-    ok = resolve_permission(
-        base_url,
-        str(data.get("id", "")),
-        decision["approve"],
-        decision["reason"],
-        remember_forever=decision["remember_forever"],
-        remember_session=decision["remember_session"],
-    )
-    if decision["approve"]:
-        print(paint("✔ 已批准，继续执行…", "green") if ok else paint("✘ 提交失败，请检查后端", "red"))
-    else:
-        print(paint("✘ 已拒绝", "red") if ok else paint("✘ 提交失败，请检查后端", "red"))
 
 
 # ------------------------------------------------------------------ 流式问答
@@ -1690,28 +1651,40 @@ def stream_question(
     reader: KeyReader,
     screen: Screen,
     sandbox: str | None = None,
+    continue_run: bool = False,
 ) -> int:
-    """发送问题并渲染 SSE 事件；Ctrl+C/Esc 即时打断并通知后端取消。"""
-    body = json.dumps(
-        {
-            "question": question,
-            "conversation_id": conversation_id,
-            "tool_mode": tool_mode,
-            "template_id": None,
-            "project_dir": os.getcwd(),
-            "command_sandbox": sandbox,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
+    """发送问题并渲染 SSE 事件；Ctrl+C/Esc 即时打断并通知后端取消。
+
+    continue_run=True：不发问题，改为续跑该会话被中断的一轮（/agent/continue）。
+    """
+    if continue_run and conversation_id:
+        first_url = f"{base_url}/api/agent/continue/{conversation_id}"
+        body = None
+    else:
+        first_url = f"{base_url}/api/agent/stream"
+        body = json.dumps(
+            {
+                "question": question,
+                "conversation_id": conversation_id,
+                "tool_mode": tool_mode,
+                "template_id": None,
+                "project_dir": os.getcwd(),
+                "command_sandbox": sandbox,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
     lines_q: collections.deque = collections.deque()
     lines_cond = threading.Condition()
     resp_holder: list = []
     done_flag = threading.Event()
 
-    def _start_reader(url: str, payload: bytes) -> None:
-        """开一条 SSE 连接，把逐行数据泵进 lines_q（挂起恢复需要开第二条流）。"""
+    def _start_reader(url: str, payload: bytes | None) -> None:
+        """开一条 SSE 连接，把逐行数据泵进 lines_q（挂起恢复/续跑要开第二条流）。"""
         req = urllib.request.Request(
-            url, data=payload, headers={"Content-Type": "application/json"}
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
 
         def reader_thread() -> None:
@@ -1735,7 +1708,7 @@ def stream_question(
 
         threading.Thread(target=reader_thread, daemon=True).start()
 
-    _start_reader(f"{base_url}/api/agent/stream", body)
+    _start_reader(first_url, body)
 
     md = MarkdownStream(term_width())
     round_printed = ""  # 本轮已打印到终端的文本（含 ANSI），供整轮撤回
@@ -1877,8 +1850,6 @@ def stream_question(
                 screen.write(paint(f"⎿ {summary}{suffix}", color))
                 if not active_tools:
                     busy_text = None
-            elif name == "permission_request":
-                prompt_permission(reader, data, base_url)
             elif name == "permission_resolved":
                 if data.get("approved"):
                     screen.write(paint("   ▶ 已批准", "green"))
@@ -2126,26 +2097,34 @@ def run_headless(
 
 
 def print_banner(model: str | None, tool_mode: str, has_agents: bool) -> None:
-    """盒式欢迎横幅 + 命令/快捷键总览（类 Claude Code 启动页）。"""
-    _boxed(
-        [
-            f"模型 {model or '未知'} · 工具模式 {tool_mode}"
-            + (" · 已加载 AGENTS.md" if has_agents else "")
-        ],
-        "知问 ZhiWen · 终端版",
-        "cyan",
-    )
+    """圆角欢迎横幅（模型/目录/记忆）+ 分栏命令与快捷键总览（类 Claude Code 启动页）。"""
+    rows = [
+        paint("模型 ", "dim")
+        + paint(model or "未知", "cyan")
+        + paint("   工具模式 ", "dim")
+        + paint(tool_mode, "cyan"),
+        paint("目录 ", "dim") + clip(safe_text(os.getcwd()), max(20, term_width() - 10)),
+        paint("记忆 ", "dim")
+        + ("已加载 AGENTS.md" if has_agents else paint("未创建（/init 可建）", "dim")),
+    ]
+    _boxed(rows, "知问 ZhiWen · 终端版", "cyan")
+    groups = [
+        ("会话", "/new 新会话 · /resume 恢复 · /continue 续跑中断轮 · /clear 清屏 · /exit 退出"),
+        ("上下文", "/context 占用 · /compact 压缩 · /rewind 回退 · /todos 任务"),
+        ("查看", "/output [n] 展开输出 · /cost 用量 · /status 状态 · /tools 模式"),
+        ("记忆", "/init 创建 AGENTS.md · /memory 项目记忆"),
+    ]
+    wname = max(strwidth(name) for name, _ in groups)
+    for name, cmds in groups:
+        pad = " " * (wname - strwidth(name) + 1)
+        print(paint("  " + name + pad, "cyan") + paint(cmds, "dim"))
     print(
-        paint(
-            "命令：/context 上下文 · /compact 压缩 · /rewind 回退 · /output [n] 展开输出\n"
-            "      /todos 任务 · /cost 用量 · /status 状态 · /tools 切换 · /new 新会话 · /resume 恢复\n"
-            "      /init 创建 AGENTS.md · /memory 项目记忆 · /clear 清屏 · /exit 退出\n"
-            "快捷：? 帮助面板 · Ctrl+O 展开输出 · Ctrl+R 重发 · Ctrl+L 清屏 · ↑/↓ 历史 · Ctrl+C 打断",
+        paint("  快捷 ", "cyan")
+        + paint(
+            "? 帮助 · Ctrl+O 展开输出 · Ctrl+R 重发 · Ctrl+L 清屏 · ↑/↓ 历史 · Ctrl+C 打断",
             "dim",
         )
     )
-    if not has_agents:
-        print(paint("提示：/init 创建 AGENTS.md（项目记忆）", "dim"))
 
 
 def main() -> None:
@@ -2341,6 +2320,32 @@ def main() -> None:
                     else:
                         print(paint("用法：/tools auto|knowledge|web|none", "yellow"))
                     continue
+                if cmd == "/continue":
+                    if not conversation_id:
+                        print(paint("当前没有会话（先提问，或 /resume 恢复）。", "yellow"))
+                        continue
+                    st = http_json(
+                        base, "GET", f"/agent/pending/{conversation_id}", timeout=8
+                    ) or {}
+                    if not st.get("interrupted"):
+                        hint = (
+                            "有挂起确认（在对话里直接批准/拒绝即可）"
+                            if st.get("pending")
+                            else "没有未完成的一轮"
+                        )
+                        print(paint(f"/continue 只用于续跑被中断的一轮：{hint}。", "yellow"))
+                        continue
+                    conversation_id = stream_question(
+                        base,
+                        "",
+                        tool_mode,
+                        conversation_id,
+                        reader,
+                        screen,
+                        sandbox_mode,
+                        continue_run=True,
+                    )
+                    continue
                 if cmd == "/todos":
                     fetch_todos(base, conversation_id)
                     continue
@@ -2394,6 +2399,7 @@ def main() -> None:
                             "/context 上下文占用 · /compact 手动压缩 · /rewind 消息回退\n"
                             "/output [n] 展开工具输出 · /sandbox docker|subprocess|off 命令沙箱\n"
                             "/init 创建 AGENTS.md · /memory 项目记忆 · /resume 恢复会话\n"
+                            "/continue 续跑被中断的一轮（进程被杀/异常退出后）\n"
                             "Ctrl+C/Esc 打断 · Ctrl+L 清屏 · Ctrl+R 重发 · Ctrl+O 展开输出 · ↑/↓ 历史",
                             "dim",
                         )
