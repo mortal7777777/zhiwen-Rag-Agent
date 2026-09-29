@@ -13,13 +13,19 @@ import time
 import uuid
 from queue import Queue
 
+from langgraph.types import Command
 from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..db import repository as repo
 from ..rag.service import RAGService
 from ..runtime_config import effective
-from ..tracing import reset_usage
+from ..tracing import (
+    get_aux_usage_collector,
+    reset_usage,
+    seed_usage,
+    usage_summary,
+)
 from .agent import AgentService
 from .graph import build_agent_graph
 from .nodes.finalize import _finalize_node
@@ -37,6 +43,8 @@ class LangGraphAgentService(AgentService):
         self._checkpoint_saver = None
         self._checkpoint_conn = None
         self.recursion_limit = getattr(settings, "agent_recursion_limit", 30)
+        # conv_id -> (main, aux)：挂起前一段的用量快照，恢复线程 seed 后合并
+        self._suspended_usage: dict = {}
 
     @property
     def graph(self):
@@ -185,7 +193,14 @@ class LangGraphAgentService(AgentService):
         queue: Queue = Queue()
         bus = EventBus(queue)
         # 请求级活对象走 Runtime context（不进检查点）；state 只留可序列化数据
-        deps = Deps(service=self, bus=bus, db=db, stop_event=stop_event)
+        # approval_mode：有原生检查点走 interrupt 挂起，否则回落旧的阻塞式收集
+        deps = Deps(
+            service=self,
+            bus=bus,
+            db=db,
+            stop_event=stop_event,
+            approval_mode="interrupt" if self.checkpoint_saver is not None else "blocking",
+        )
         runtime: dict = {
             "conv_id": conversation_id,
             "started": time.perf_counter(),
@@ -249,7 +264,7 @@ class LangGraphAgentService(AgentService):
             # 本轮所有 LLM 调用的 token 用量聚合（线程级 callback）
             reset_usage()
             try:
-                self.graph.invoke(
+                result = self.graph.invoke(
                     state,
                     config={
                         "recursion_limit": self.recursion_limit,
@@ -259,6 +274,11 @@ class LangGraphAgentService(AgentService):
                     },
                     context=deps,
                 )
+                if isinstance(result, dict) and result.get("__interrupt__"):
+                    # 敏感操作挂起：本轮流到此为止（客户端收 run_suspended 后走 /agent/resume）
+                    self._emit_suspended(bus, result, conversation_id)
+                    queue.put(None)
+                    return
                 queue.put(None)
             except Exception as exc:
                 logger.exception("LangGraph Agent 执行失败")
@@ -333,3 +353,314 @@ class LangGraphAgentService(AgentService):
                             logger.warning("长期记忆自动整合失败：%s", exc)
             except Exception as exc:
                 logger.warning("长期记忆提取失败：%s", exc)
+
+    # ---------------- 工具面构建（prepare / 挂起恢复共用）----------------
+
+    def build_tool_list(
+        self,
+        db: Session | None,
+        *,
+        use_web_search: bool,
+        use_knowledge_base: bool,
+        conv_id: int | None,
+        project_dir: str | None,
+        command_sandbox: str | None,
+    ) -> list:
+        """按开关组装本轮工具集。
+
+        挂起恢复不重跑 prepare，必须用同一套构建逻辑重建 Deps.tools，
+        否则 tools 节点里所有工具都会查不到（"未知工具"）。
+        顺序即 bind_tools 的 tools 数组顺序，参与前缀缓存键，勿随意调整。
+        """
+        settings = self.settings
+        from .tools import (
+            build_tools,
+            make_enter_plan_mode_tool,
+            make_exit_plan_mode_tool,
+        )
+
+        skills_on = effective(settings, "skills_enabled", True)
+        skill_enabled_ids = None
+        if db is not None:
+            try:
+                from ..skills import load_prefs
+
+                skill_enabled_ids = set((load_prefs(db) or {}).get("enabled") or [])
+            except Exception as exc:
+                logger.warning("技能偏好加载失败：%s", exc)
+                skill_enabled_ids = None
+        tools = build_tools(
+            self.rag,
+            use_web_search,
+            use_knowledge_base,
+            effective(settings, "web_search_provider"),
+            settings.tavily_api_key,
+            effective(settings, "web_search_max_results"),
+            crag_enabled=settings.crag_fallback_enabled,
+            crag_min_score=settings.crag_min_score,
+            vision=self.vision,
+            skills_enabled=skills_on,
+            skill_enabled_ids=skill_enabled_ids,
+            searxng_base_url=effective(settings, "searxng_base_url") or "",
+            searxng_engines=effective(settings, "searxng_engines") or "",
+        )
+        # 扩展工具：MCP + 受控执行（文件/命令，敏感操作走人工确认）
+        tools.extend(self.mcp_tools(db))
+        tools.extend(
+            self.extra_tools(project_dir=project_dir, sandbox=command_sandbox)
+        )
+        # 用户自写工具（动态目录）：每次重建自动加载（新工具下一个请求即生效）
+        try:
+            from ..user_tool_loader import load_user_tools
+
+            tools.extend(load_user_tools())
+        except Exception as exc:
+            logger.warning("用户自写工具加载失败：%s", exc)
+        if db is not None and conv_id is not None:
+            try:
+                from ..todos import make_todo_tool
+
+                tools.append(make_todo_tool(db, conv_id))
+            except Exception as exc:
+                logger.warning("任务清单工具加载失败：%s", exc)
+        # 声明式派发工具：让主代理（而非 planner + 规则层）决定派什么子任务。
+        # 必须**无条件**注册——bind_tools 的 tools 数组是 DeepSeek 前缀缓存键的
+        # 一部分，会话内变化会整链断缓存（CLAUDE.md 不变量）。
+        if effective(settings, "agent_subagents_enabled") is not False:
+            try:
+                from .nodes.subagent import make_dispatch_tool
+
+                tools.append(make_dispatch_tool(settings))
+            except Exception as exc:
+                logger.warning("派发工具加载失败：%s", exc)
+        # 计划模式控制工具：设置页开关（runtime_config）关闭时不注册——模型物理上
+        # 无法进入，是硬否决而不是靠提示词自觉。
+        if effective(settings, "plan_mode_allowed", True) is not False:
+            try:
+                tools.append(make_enter_plan_mode_tool())
+                tools.append(make_exit_plan_mode_tool())
+            except Exception as exc:
+                logger.warning("计划模式工具加载失败：%s", exc)
+        return tools
+
+    # ---------------- 挂起 / 恢复（原生 interrupt）----------------
+
+    def _thread_config(self, conversation_id: int) -> dict:
+        return {
+            "recursion_limit": self.recursion_limit,
+            "configurable": {"thread_id": f"conv:{conversation_id}"},
+        }
+
+    def _emit_suspended(
+        self, bus: EventBus, result: dict, conversation_id: int | None
+    ) -> None:
+        """图在 interrupt() 处挂起：发 run_suspended，并快照本段用量。
+
+        用量快照只放内存注册表（不写检查点）：恢复线程是新的 thread-local，
+        由 resume 端 seed 后与恢复段自然合并；后端重启则丢快照（少计一段）。
+        """
+        interrupts = (result or {}).get("__interrupt__") or []
+        payload = getattr(interrupts[0], "value", None) if interrupts else None
+        payload = payload if isinstance(payload, dict) else {}
+        ops = payload.get("ops") or []
+        plan = payload.get("plan") or None
+        if conversation_id is not None:
+            self._suspended_usage[conversation_id] = (
+                usage_summary(),
+                get_aux_usage_collector().summary(),
+            )
+        if ops:
+            text = (
+                f"等待确认：{ops[0].get('summary')}"
+                if len(ops) == 1
+                else f"等待确认：{len(ops)} 项操作"
+            )
+            bus.emit("status", {"phase": "permission", "text": text})
+            timeout = int(effective(self.settings, "permission_timeout", 0) or 0)
+            if timeout > 0 and conversation_id is not None:
+                self._arm_permission_watchdog(
+                    conversation_id, timeout, payload.get("created_at")
+                )
+        elif plan:
+            # 计划确认：无超时（与旧 awaiting_approval 行为一致），等用户决定
+            bus.emit("status", {"phase": "plan", "text": "等待确认：执行计划"})
+        bus.emit(
+            "run_suspended",
+            {"conversation_id": conversation_id, "ops": ops, "plan": plan},
+        )
+
+    def _arm_permission_watchdog(
+        self, conversation_id: int, timeout: int, expected_created_at
+    ) -> None:
+        """permission_timeout>0：到点仍挂起则以「全部拒绝」自动续跑。
+
+        定时器绑定挂起批次（created_at 戳）：过期定时器发现当前挂起不是自己
+        那一批时直接放弃，避免误伤后续轮次的审批。
+        """
+
+        def _fire():
+            payload = self.pending_approval_payload(conversation_id)
+            if not payload or payload.get("created_at") != expected_created_at:
+                return
+            decisions = {
+                str(op.get("call_id")): {
+                    "approve": False,
+                    "reason": "等待确认超时，已自动取消",
+                }
+                for op in (payload.get("ops") or [])
+                if op.get("call_id")
+            }
+            db = None
+            try:
+                from ..db.database import SessionLocal, db_ready
+
+                if db_ready and SessionLocal is not None:
+                    db = SessionLocal()
+                for _ in self.resume(conversation_id, decisions, db=db):
+                    pass
+            except Exception as exc:
+                logger.warning("审批超时兜底续跑失败：%s", exc)
+            finally:
+                if db is not None:
+                    db.close()
+
+        timer = threading.Timer(int(timeout), _fire)
+        timer.daemon = True
+        timer.start()
+
+    def pending_approval_payload(self, conversation_id: int) -> dict | None:
+        """读取挂起中的 interrupt 载荷（无挂起/读取失败时返回 None）。
+
+        判据用 `tasks[].interrupts`，不要用 `get_state().next`——实测多
+        interrupt 场景下恢复一段后 next 会是空元组，但任务仍挂起。
+        """
+        if self.checkpoint_saver is None:
+            return None
+        try:
+            st = self.graph.get_state(self._thread_config(conversation_id))
+            for task in st.tasks or ():
+                for item in getattr(task, "interrupts", None) or ():
+                    value = getattr(item, "value", None)
+                    if isinstance(value, dict):
+                        return value
+        except Exception as exc:
+            logger.warning("读取挂起审批失败：%s", exc)
+        return None
+
+    def has_pending_approval(self, conversation_id: int | None) -> bool:
+        """该会话是否有挂起中的审批（挂起期间拒绝新消息，防状态被覆盖）。"""
+        if conversation_id is None or self.checkpoint_saver is None:
+            return False
+        try:
+            st = self.graph.get_state(self._thread_config(conversation_id))
+            return any(
+                getattr(task, "interrupts", None) for task in (st.tasks or ())
+            )
+        except Exception:
+            return False
+
+    def resume(
+        self,
+        conversation_id: int,
+        decisions: dict,
+        stopped: bool = False,
+        plan: dict | None = None,
+        db: Session | None = None,
+        stop_event: threading.Event | None = None,
+    ):
+        """恢复挂起的运行：Command(resume=...) 续跑同一 thread，事件协议同 _run。
+
+        stopped=True 表示用户在挂起期间点了停止：预置 stop_event 并以全拒决定
+        续跑，收尾语义与旧阻塞式的"停止"路径一致。
+        plan：计划确认决定（{approved, steps?, reason?}），随同一次 resume 提交。
+        """
+        queue: Queue = Queue()
+        bus = EventBus(queue)
+        if stop_event is None:
+            stop_event = threading.Event()
+        if stopped:
+            stop_event.set()
+        # db 缺省（SSE 端点走这里）：自建会话，语义与 AgentService.run 一致
+        db_owned = None
+        if db is None:
+            try:
+                from ..db.database import SessionLocal, db_ready
+
+                if db_ready and SessionLocal is not None:
+                    db_owned = SessionLocal()
+                    db = db_owned
+            except Exception as exc:
+                logger.warning("恢复运行：数据库不可用，降级为无记忆模式：%s", exc)
+        deps = Deps(
+            service=self,
+            bus=bus,
+            db=db,
+            stop_event=stop_event,
+            approval_mode="interrupt" if self.checkpoint_saver is not None else "blocking",
+        )
+        config = self._thread_config(conversation_id)
+        try:
+            values = self.graph.get_state(config).values or {}
+        except Exception:
+            values = {}
+        rt = values.get("runtime") or {}
+        try:
+            deps.tools = self.build_tool_list(
+                db,
+                use_web_search=bool(values.get("use_web_search")),
+                use_knowledge_base=bool(values.get("use_knowledge_base")),
+                conv_id=conversation_id,
+                project_dir=values.get("project_dir"),
+                command_sandbox=(rt or {}).get("command_sandbox"),
+            )
+        except Exception as exc:
+            logger.warning("恢复时重建工具列表失败：%s", exc)
+
+        bus.emit("session", {"conversation_id": conversation_id})
+
+        def worker():
+            seed = self._suspended_usage.pop(conversation_id, None)
+            reset_usage()
+            if seed:
+                seed_usage(seed[0], seed[1])
+            try:
+                result = self.graph.invoke(
+                    Command(
+                        resume={
+                            "stopped": bool(stopped),
+                            "decisions": decisions or {},
+                            "plan": plan,
+                        }
+                    ),
+                    config=config,
+                    context=deps,
+                )
+                if isinstance(result, dict) and result.get("__interrupt__"):
+                    # 恢复后新一轮敏感操作再次挂起：同样发 run_suspended
+                    self._emit_suspended(bus, result, conversation_id)
+                    queue.put(None)
+                    return
+                queue.put(None)
+            except Exception as exc:
+                logger.exception("恢复运行失败")
+                if isinstance(rt, dict):
+                    rt["status"] = "error"
+                    rt["error"] = str(exc)
+                queue.put({"event": "error", "data": {"message": str(exc)}})
+                try:
+                    _finalize_node(values, runtime_of(deps))
+                except Exception as inner:
+                    logger.warning("兜底收尾失败：%s", inner)
+                queue.put(None)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        try:
+            while True:
+                event = queue.get()
+                if event is None:
+                    break
+                yield event
+        finally:
+            if db_owned is not None:
+                db_owned.close()

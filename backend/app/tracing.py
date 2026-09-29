@@ -54,6 +54,16 @@ def reset_usage() -> None:
     get_aux_usage_collector().reset()
 
 
+def seed_usage(main: dict | None, aux: dict | None = None) -> None:
+    """把上一段的用量快照注入当前线程，使本线程继续累计。
+
+    用于挂起 → 恢复跨线程续跑：统计是 thread-local 的，恢复线程是新的，
+    不注入的话 finalize 汇总只剩恢复段，缓存命中率/成本会腰斩。
+    """
+    get_usage_collector().load(main)
+    get_aux_usage_collector().load(aux)
+
+
 def usage_summary() -> dict:
     """返回当前线程累计的 token 用量。"""
     return get_usage_collector().summary()
@@ -79,6 +89,18 @@ class UsageCollector(BaseCallbackHandler):
             self._total_tokens = 0
             self._cache_hit_tokens = 0
             self._cache_miss_tokens = 0
+
+    def load(self, summary: dict | None) -> None:
+        """从快照（summary() 结构）继续累计，不覆盖已有计数。"""
+        if not summary:
+            return
+        with self._lock:
+            self._calls += int(summary.get("llm_calls") or 0)
+            self._prompt_tokens += int(summary.get("prompt_tokens") or 0)
+            self._completion_tokens += int(summary.get("completion_tokens") or 0)
+            self._total_tokens += int(summary.get("total_tokens") or 0)
+            self._cache_hit_tokens += int(summary.get("cache_hit_tokens") or 0)
+            self._cache_miss_tokens += int(summary.get("cache_miss_tokens") or 0)
 
     def on_llm_end(self, response, **kwargs) -> None:
         """LLM 调用结束时累计 token（OpenAI 兼容接口的 llm_output.token_usage）。"""

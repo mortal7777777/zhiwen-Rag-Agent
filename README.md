@@ -68,11 +68,17 @@
   `COMMAND_SANDBOX` / `SANDBOX_IMAGE` / `SANDBOX_WORKSPACE_READONLY` 可配置；
 - **浏览器工具**：已接入 Playwright MCP（`browser_navigate` / `browser_type` /
   `browser_screenshot` 等），设置页可启停；
-- **HITL 流程**：Agent 请求敏感操作时，SSE 推送 `permission_request`，
-  前端消息卡片内渲染审批框（展示命令/路径/内容预览），用户**批准**或**拒绝**
-  （可附备注），提交到 `POST /api/agent/permission/{id}/resolve`；
-  Agent 阻塞等待期间流式连接保持，决定后继续执行（拒绝原因会回传给模型，
-  模型向用户解释影响并给出替代方案）；
+- **HITL 流程（原生 interrupt 挂起）**：Agent 请求敏感操作时，本轮在工具节点
+  以 `interrupt()` 挂起——SSE 以 `run_suspended{ops}` 收尾（一次收齐本轮全部敏感操作，
+  同轮同命令只问一次）；前端消息卡片内渲染审批框（展示命令/路径/内容预览，
+  可逐个批准/拒绝并附备注），全部决定后自动经 `POST /api/agent/resume` 提交，
+  以**新 SSE 流**续跑同一条回答（内部 `Command(resume=...)`，回复仍渲染在同一气泡）。
+  计划确认（模型 `exit_plan_mode` 提交的步骤）走同一套挂起/恢复：载荷里带 `plan`，
+  确认（可编辑）后**同一轮直接开始执行**；拒绝则留在计划模式，模型可调整后重新提交。
+  挂起期间该会话的新消息会被闸门拒绝（前端输入框同步禁用）；
+  刷新页面或切回会话时经 `GET /api/agent/pending/{conversation_id}` 恢复审批卡/计划卡；
+  浏览器断开/关闭页面不结束挂起，回来再批即可；
+  拒绝原因会回传给模型，模型向用户解释影响并给出替代方案；
 - **快捷审批交互**：审批卡片即选项卡——数字键 `1/2/3` 直接选择（批准 / 拒绝 /
   批准并永久记住）、`↑↓` 移动高亮、`Enter` 确认、`Esc` 返回输入框；
   出现审批时焦点自动跳到卡片，处理完回到输入框继续打字机输出；
@@ -91,15 +97,18 @@
   （任务清单与计划进度联动），每完成一个小阶段先汇报进度再继续，全部完成后再给最终总结。
 - **计划模式（模型自主 + 用户可关）**：涉及写文件/命令、影响面大的任务，
   模型可自行 `enter_plan_mode` 只读探索，再用 `exit_plan_mode` 提交结构化步骤；
-  前端渲染成**可编辑的确认卡**，确认（或改完步骤）后按同一份清单执行，
-  清单同时成为任务列表。**键盘可达**：卡片出现即自动聚焦，Enter / Ctrl+Enter 确认、Esc 取消；
+  前端渲染成**可编辑的确认卡**，确认（或改完步骤）后**同一轮直接继续执行**
+  （原生挂起 + 恢复，不再重发新 run），清单同时成为任务列表；拒绝则留在计划模式，
+  模型可调整后重新提交。**键盘可达**：卡片出现即自动聚焦，Enter / Ctrl+Enter 确认、Esc 取消；
   审批卡同样支持键盘（数字键 1/2/3 批准/拒绝/记住，无需先把焦点点进卡片）。
   设置页的"计划模式"开关是**硬否决**：关掉后对应工具根本不注册，模型物理上无法进入。
 - 命令白名单（如 `python, git status`）= **自动放行前缀**，命中无需确认；
   未命中命令在 `ask` 模式下仍弹窗批准。模式可切换为 `allow`（全自动批准，
   等价 Claude Code 的 `--dangerously-skip-permissions`，谨慎使用）；
-- 等待确认超时默认 0 = 无限等待（类 Claude Code；`PERMISSION_TIMEOUT` 可配），
-  用户停止回答也会自动拒绝并收尾；
+- 等待确认超时默认 0 = 无限等待（类 Claude Code；`PERMISSION_TIMEOUT>0` 时由后端
+  watchdog 到点以“全部拒绝（超时）”自动续跑收尾）；挂起期间点停止 = 全拒 + 立即收尾；
+  关闭原生检查点（`CHECKPOINT_NATIVE_ENABLED=0`）时回落为旧的阻塞式审批
+  （`permission_request` 事件 + `POST /api/agent/permission/{id}/resolve`）；
 - 安全边界：文件操作限制在 `tool_workspace`（默认项目根）内、拒绝路径穿越；
   命令带超时（默认 60s）与输出截断；删除不物理销毁，移入 `.agent_trash/` 可恢复；
   写文件使用原子写入（临时文件 + 替换），避免半截文件；
@@ -561,7 +570,9 @@ hooks 门禁、用户工具加载、run_verify 写后验证等。测试不依赖
 |---|---|---|
 | GET | `/api/health` | 健康检查 |
 | POST | `/api/agent/chat` | Agent 问答（JSON：question / conversation_id / tool_mode / template_id / images） |
-| POST | `/api/agent/stream` | Agent 流式问答（SSE：session / plan / plan_progress / plan_approval / vision / tool_start / tool_result / token / title / done / error；空闲 15s 发 `: keepalive`） |
+| POST | `/api/agent/stream` | Agent 流式问答（SSE：session / plan / plan_progress / plan_approval / vision / tool_start / tool_result / run_suspended / token / title / done / error；空闲 15s 发 `: keepalive`） |
+| POST | `/api/agent/resume` | 恢复挂起的运行（提交审批决定），返回新 SSE 流续跑同一条回答 |
+| GET | `/api/agent/pending/{conversation_id}` | 该会话挂起中的审批载荷（刷新/切换会话后恢复审批卡） |
 | POST | `/api/agent/permission/{id}/resolve` | 人工确认：批准/拒绝敏感操作（写文件/编辑/删除/执行命令） |
 | GET | `/api/agent/permissions` | 当前待人工确认的审批请求列表 |
 | GET/PUT | `/api/todos/{conversation_id}` | 读取 / 保存某会话的 TodoWrite 任务清单 |

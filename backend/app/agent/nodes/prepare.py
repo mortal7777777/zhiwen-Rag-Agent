@@ -32,7 +32,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..langgraph_agent import LangGraphAgentService  # 仅类型注解
-from ..tools import build_tools
 
 # ==== 函数体（原文）====
 def _prepare_node(state: AgentState, runtime) -> dict:
@@ -482,64 +481,15 @@ def _prepare_node(state: AgentState, runtime) -> dict:
         messages.append(HumanMessage(content=question))
 
     # ---- 按开关组装工具 ----
-    tools = build_tools(
-        rag,
-        use_web_search,
-        use_knowledge_base,
-        effective(settings, "web_search_provider"),
-        settings.tavily_api_key,
-        effective(settings, "web_search_max_results"),
-        crag_enabled=settings.crag_fallback_enabled,
-        crag_min_score=settings.crag_min_score,
-        vision=service.vision,
-        skills_enabled=skills_on,
-        skill_enabled_ids=skill_enabled_ids,
-        searxng_base_url=effective(settings, "searxng_base_url") or "",
-        searxng_engines=effective(settings, "searxng_engines") or "",
+    # 走服务层共用构建器：挂起恢复不重跑 prepare，需用同一套工具面重建 Deps.tools
+    tools = service.build_tool_list(
+        db,
+        use_web_search=use_web_search,
+        use_knowledge_base=use_knowledge_base,
+        conv_id=conv_id,
+        project_dir=state.get("project_dir"),
+        command_sandbox=rt.get("command_sandbox"),
     )
-    # 扩展工具：MCP + 受控执行（文件/命令，敏感操作走人工确认）
-    tools.extend(service.mcp_tools(db))
-    tools.extend(
-        service.extra_tools(
-            project_dir=state.get("project_dir"),
-            sandbox=rt.get("command_sandbox"),
-        )
-    )
-    # 用户自写工具（动态目录）：agent 按 tool-authoring 技能规范生成的工具，
-    # 每次请求重建工具列表时自动加载（新工具下一个请求即生效，无需重启）
-    try:
-        from ...user_tool_loader import load_user_tools
-
-        tools.extend(load_user_tools())
-    except Exception as exc:
-        logger.warning("用户自写工具加载失败：%s", exc)
-    if db is not None and conv_id is not None:
-        try:
-            from ...todos import make_todo_tool
-
-            tools.append(make_todo_tool(db, conv_id))
-        except Exception as exc:
-            logger.warning("任务清单工具加载失败：%s", exc)
-    # 声明式派发工具：让主代理（而非 planner + 规则层）决定派什么子任务。
-    # 必须**无条件**注册——bind_tools 的 tools 数组是 DeepSeek 前缀缓存键的
-    # 一部分，会话内变化会整链断缓存（CLAUDE.md 不变量）。
-    if effective(settings, "agent_subagents_enabled") is not False:
-        try:
-            from .subagent import make_dispatch_tool
-
-            tools.append(make_dispatch_tool(settings))
-        except Exception as exc:
-            logger.warning("派发工具加载失败：%s", exc)
-    # 计划模式控制工具：设置页开关（runtime_config）关闭时不注册——模型物理上
-    # 无法进入，是硬否决而不是靠提示词自觉。
-    if effective(settings, "plan_mode_allowed", True) is not False:
-        try:
-            from ..tools import make_enter_plan_mode_tool, make_exit_plan_mode_tool
-
-            tools.append(make_enter_plan_mode_tool())
-            tools.append(make_exit_plan_mode_tool())
-        except Exception as exc:
-            logger.warning("计划模式工具加载失败：%s", exc)
 
     # ---- 工具定义哈希（缓存前缀监测）----
     # bind_tools 的工具定义是缓存前缀的一部分，会话内变化会断缓存。

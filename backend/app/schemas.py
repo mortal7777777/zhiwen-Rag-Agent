@@ -224,6 +224,41 @@ class AgentChatResponse(BaseModel):
     tool_trace: list[dict] = Field(default_factory=list)
 
 
+class AgentApprovalDecision(BaseModel):
+    """一条审批决定（对应 run_suspended 事件里的一个待审批项）。"""
+
+    call_id: str = Field(..., description="待审批项的 call_id")
+    approve: bool = True
+    reason: str = Field(default="", max_length=200)
+    remember_session: bool = Field(default=False, description="本会话内同命令不再询问")
+    remember_forever: bool = Field(default=False, description="写入命令白名单，永久放行")
+
+
+class AgentPlanDecision(BaseModel):
+    """计划确认决定（exit_plan_mode 挂起）。"""
+
+    approved: bool = True
+    steps: list[str] = Field(
+        default_factory=list, description="确认/编辑后的步骤（不传则用挂起时的原计划）"
+    )
+    reason: str = Field(default="", max_length=200)
+
+
+class AgentResumeRequest(BaseModel):
+    """恢复挂起的运行（敏感操作审批 / 计划确认）：决定后由新 SSE 流续跑。"""
+
+    conversation_id: int = Field(..., description="挂起所在的会话 ID")
+    decisions: list[AgentApprovalDecision] = Field(
+        default_factory=list, description="审批决定；缺省项按拒绝处理"
+    )
+    plan: AgentPlanDecision | None = Field(
+        default=None, description="计划确认决定（挂起载荷含 plan 时提交）"
+    )
+    stopped: bool = Field(
+        default=False, description="用户在挂起期间点了停止：全拒收尾，不再执行"
+    )
+
+
 # ---------------- 视觉（SenseNova 识图）----------------
 
 

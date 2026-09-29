@@ -38,10 +38,20 @@ def _sanitize(obj):
 
 
 class SafeJsonPlusSerializer(JsonPlusSerializer):
-    """jsonplus 序列化前先替换不可序列化对象，避免整个 checkpoint 保存失败。"""
+    """jsonplus 序列化前先替换不可序列化对象，避免整个 checkpoint 保存失败。
+
+    注意顺序：**先走原生 jsonplus**（它认识 LangChain 消息、langgraph 的
+    Interrupt/Send 等类型），只有原生失败才做占位替换。早期实现无条件先
+    _sanitize，把 Interrupt 也换成了 {"__unserializable__": "Interrupt"}——
+    挂起后恢复时框架读 pending 写的 Interrupt.id 直接 AttributeError
+    （2026-09-29 实测）。
+    """
 
     def dumps_typed(self, obj):
-        return super().dumps_typed(_sanitize(obj))
+        try:
+            return super().dumps_typed(obj)
+        except Exception:
+            return super().dumps_typed(_sanitize(obj))
 
     def loads_typed(self, data):
         return super().loads_typed(data)

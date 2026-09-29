@@ -429,6 +429,15 @@ wo<template>
                   <span v-if="p.reason" class="prc-reason">（{{ p.reason }}）</span>
                 </div>
               </div>
+              <div
+                v-if="msg.permissions.some((p) => p._suspended && !p._decision)"
+                class="suspension-bar"
+              >
+                <span class="suspension-text">等待你的决定：全部处理后将自动继续执行</span>
+                <el-button size="small" :disabled="loading" @click="stopSuspended">
+                  全部拒绝并停止
+                </el-button>
+              </div>
             </div>
 
             <!-- 引用来源 -->
@@ -548,6 +557,7 @@ wo<template>
             type="textarea"
             :rows="2"
             resize="none"
+            :disabled="hasSuspendedPending"
             placeholder="输入你的问题，Enter 发送，Shift+Enter 换行 · 支持粘贴/上传图片"
             @keydown.enter.exact.prevent="send"
             @paste="onPaste"
@@ -573,7 +583,7 @@ wo<template>
             type="primary"
             circle
             class="send-btn"
-            :disabled="!question.trim() && !attachedImages.length"
+            :disabled="hasSuspendedPending || (!question.trim() && !attachedImages.length)"
             @click="send"
           >
             <el-icon :size="17"><Promotion /></el-icon>
@@ -901,6 +911,7 @@ import {
   deleteTemplate,
   getAgentContext,
   getConversationMessages,
+  getPendingApproval,
   getSuggestions,
   getTodos,
   listConversations,
@@ -909,6 +920,7 @@ import {
   listTemplates,
   renameConversation,
   resolvePermission,
+  resumeAgentChat,
   rewindConversation,
   streamAgentChat,
   updateMemory,
@@ -962,6 +974,8 @@ let restoringTemplate = false // 切换会话时回填模板，不触发持久�
 const pendingText = ref('')
 let typewriterTimer = null
 let streamMsg = null
+// 原生挂起（interrupt）的审批批次：{ conversationId, msg, submitted }
+let suspended = null
 // 增量流式状态：本轮 stream_delta 已推送字符数（工具轮撤回用）与
 // 「跳过随后全文 token」标记（正文轮已增量显示，token 是同一段全文）
 let streamedLen = 0
@@ -1239,10 +1253,26 @@ function formatArgs(args) {
 /** 用户批准/拒绝敏感操作（选项卡：0=批准，1=拒绝，2=批准并永久记住） */
 async function decidePermission(p, optionIndex) {
   if (!p || p.status !== 'pending' || p._deciding) return
-  p._deciding = true
-  const prevReason = p.reason
   const approve = optionIndex !== 1
   const remember = optionIndex === 2
+  if (p._suspended) {
+    // 原生挂起：先在本地记录决定，整批决定齐了再一次性提交（/agent/resume）
+    p._decision = {
+      call_id: p.id,
+      approve,
+      reason: p.reason || '',
+      remember_session: false,
+      remember_forever: !!remember && approve,
+    }
+    p.status = approve ? 'approved' : 'denied'
+    if (remember && approve) {
+      p.reason = (p.reason ? `${p.reason}；` : '') + '已记住，下次不再询问'
+    }
+    await maybeSubmitSuspension()
+    return
+  }
+  p._deciding = true
+  const prevReason = p.reason
   try {
     await resolvePermission(p.id, approve, prevReason || '', remember)
     // 后端会通过 permission_resolved 事件同步状态，这里先乐观更新
@@ -1392,6 +1422,8 @@ async function switchSession(session) {
         // 任务清单读取失败不阻塞会话加载
       }
       scrollToBottom(true)
+      // 挂起中的审批不在 MySQL 里（finalize 才落库）：刷新/切换后按后端状态恢复审批卡
+      restorePendingApproval(session.id)
     } catch (error) {
       ElMessage.error(error.response?.data?.detail || '加载历史消息失败')
     }
@@ -1800,7 +1832,7 @@ function ask(suggestion) {
   send()
 }
 
-/** 计划确认：把（可编辑过的）步骤作为 resume_plan 发回，后端按同一份清单执行 */
+/** 计划确认：挂起态经 /agent/resume 提交（同一 run 继续执行）；回退态按旧 resume_plan 重发 */
 function confirmPlan(msg) {
   const approval = msg.planApproval
   if (!approval || loading.value) return
@@ -1814,12 +1846,44 @@ function confirmPlan(msg) {
   }
   approval.steps = steps
   approval.state = 'confirmed'
+  if (approval._suspended && suspended && !suspended.submitted) {
+    // 原生挂起：把（可编辑的）计划作为决定提交，同一 run 继续执行（不再重发新 run）
+    suspended.planPending = false
+    suspended.submitted = true
+    runResumeStream(
+      suspended.conversationId,
+      suspendedCards()
+        .map((c) => c._decision)
+        .filter(Boolean),
+      false,
+      { approved: true, steps, reason: '' },
+    )
+    return
+  }
+  // 回退路径（无原生检查点）：旧的 resume_plan 重发
   question.value = '按计划开始执行'
   send({ resumePlan: steps })
 }
 
 function cancelPlan(msg) {
-  if (msg.planApproval) msg.planApproval.state = 'cancelled'
+  const approval = msg.planApproval
+  if (!approval) return
+  if (approval._suspended && suspended && !suspended.submitted) {
+    // 原生挂起：拒绝计划 → 同一 run 继续（模型可调整后重新提交）
+    approval.state = 'cancelled'
+    suspended.planPending = false
+    suspended.submitted = true
+    runResumeStream(
+      suspended.conversationId,
+      suspendedCards()
+        .map((c) => c._decision)
+        .filter(Boolean),
+      false,
+      { approved: false, steps: [], reason: '用户取消了该计划' },
+    )
+    return
+  }
+  approval.state = 'cancelled'
 }
 
 /** 计划卡键盘：Enter / Ctrl+Enter 确认，Esc 取消（输入框内 Enter 保留换行语义） */
@@ -1852,11 +1916,371 @@ function focusPlanCard() {
   })
 }
 
+/**
+ * 一轮问答/恢复流的事件处理器（send 与挂起恢复共用同一套渲染逻辑）。
+ * 处理器通过模块级 streamMsg 写入目标助手消息：调用前先把它指到正确的气泡。
+ */
+function buildStreamHandlers() {
+  return {
+    onSession: (data) => {
+      activeId.value = data.conversation_id
+      if (data.title) currentTitle.value = data.title
+      upsertSession(data)
+    },
+    onPlanApproval: (data) => {
+      // 计划模式：模型提交结构化计划 → 渲染可编辑的确认卡
+      streamMsg.planApproval = {
+        text: (data.steps || []).map((s) => String(s)).join('\n'),
+        steps: (data.steps || []).map((s) => String(s)),
+        summary: data.summary || '',
+        state: 'pending',
+      }
+      scrollToBottom()
+      // 焦点移入卡片：Enter 即可确认，不用鼠标（回车在卡内不是换行）
+      focusPlanCard()
+    },
+    onTitle: (data) => {
+      // 新会话标题是后台生成的，生成完成后推送到前端更新
+      if (data.title) {
+        currentTitle.value = data.title
+        upsertSession({ conversation_id: activeId.value, title: data.title })
+      }
+    },
+    onReasoning: (data) => {
+      // DeepSeek 网页端式"已深度思考"折叠区（摘要文本，非原始 CoT）
+      if (data.summary) {
+        streamMsg.reasoning = data.summary
+        streamMsg._reasoningOpen = false
+        scrollToBottom()
+      }
+    },
+    onStatus: (data) => {
+      // 动态运行状态：准备中…/思考中…（tool_start 会覆盖为具体工具名）
+      if (data.text) {
+        currentTool.value = data.text
+        scrollToBottom()
+      }
+    },
+    onHook: (data) => {
+      // PreToolUse/PostToolUse 生命周期事件：拦截时给出明显提示
+      currentTool.value =
+        data.decision === 'deny'
+          ? `Hook 拦截：${data.name}`
+          : `Hook 触发：${data.name}`
+      scrollToBottom()
+    },
+    onPlanProgress: (data) => {
+      // 计划按当前进度展示：已完成/进行中/未开始
+      streamMsg.planDone = data.done || 0
+      streamMsg.planTotal =
+        data.total != null ? data.total : streamMsg.plan.length
+      streamMsg.planCurrent = data.current || null
+      scrollToBottom()
+    },
+    onToolStart: (data) => {
+      currentTool.value = `${toolName(data.name)}…`
+      streamMsg.tool_trace.push({
+        name: data.name,
+        arguments: data.arguments,
+        summary: '',
+      })
+      scrollToBottom()
+    },
+    onPlan: (data) => {
+      streamMsg.plan = data.steps || []
+      streamMsg.planTotal = streamMsg.plan.length
+      scrollToBottom()
+    },
+    onTodos: (data) => {
+      // TodoWrite 任务清单：规划后随 SSE 推送，可勾选跟踪
+      streamMsg.todos = data.todos || []
+      scrollToBottom()
+    },
+    onVision: () => {
+      currentTool.value = '识别图片中…'
+    },
+    onToolResult: (data) => {
+      currentTool.value = ''
+      const trace = streamMsg.tool_trace.find((t) => t.name === data.name && !t.summary)
+      if (trace) {
+        trace.summary = data.summary
+        // 完整输出（截断版）：工具卡可展开查看
+        if (data.detail) trace.detail = data.detail
+      }
+      if (data.sources && data.sources.length) {
+        streamMsg.sources.push(...data.sources)
+      }
+      scrollToBottom()
+    },
+    onPermission: (data) => {
+      // 旧阻塞式审批（无原生检查点的回退路径）：逐条渲染，点击即提交
+      currentTool.value = '等待人工确认…'
+      streamMsg.permissions.push({
+        id: data.id,
+        tool: data.name,
+        summary: data.summary || `${toolName(data.name)} 需要确认`,
+        args_text: formatArgs(data.arguments),
+        args: data.arguments || {},
+        status: 'pending',
+        reason: '',
+        rememberable: data.name === 'bash' || data.name === 'command_tool',
+        _focusIndex: 0,
+      })
+      scrollToBottom()
+      // 跳到选项卡：未在输入框打字时自动把焦点移入审批卡片
+      focusPermissionCard()
+    },
+    onSuspended: (data) => {
+      // 原生挂起（interrupt）：本条流即将结束；渲染整批卡片/计划卡，收齐决定后一次提交
+      currentTool.value = '等待人工确认…'
+      suspended = {
+        conversationId: data.conversation_id || activeId.value,
+        msg: streamMsg,
+        submitted: false,
+        planPending: false,
+      }
+      pushSuspendedCards(streamMsg, data.ops)
+      if (data.plan && (data.plan.steps || []).length) {
+        suspended.planPending = true
+        streamMsg.planApproval = {
+          text: (data.plan.steps || []).map((s) => String(s)).join('\n'),
+          steps: (data.plan.steps || []).map((s) => String(s)),
+          summary: data.plan.summary || '',
+          state: 'pending',
+          _suspended: true,
+        }
+        focusPlanCard()
+      } else {
+        focusPermissionCard()
+      }
+      scrollToBottom()
+    },
+    onPermissionResolved: (data) => {
+      const p = streamMsg.permissions.find((x) => x.id === data.id)
+      if (p) {
+        p.status = data.approved ? 'approved' : 'denied'
+        if (data.reason) p.reason = data.reason
+      }
+      if (data.approved) currentTool.value = ''
+      const stillPending = (streamMsg.permissions || []).some((x) => x.status === 'pending')
+      if (!stillPending) {
+        // 全部处理完：焦点回到输入框，正文继续打字机效果
+        nextTick(() => questionInput.value?.focus())
+      }
+      scrollToBottom()
+    },
+    onStreamDelta: (text) => {
+      pendingText.value += text
+      streamedLen += text.length
+      startTypewriter()
+    },
+    onStreamEnd: (data) => {
+      if (data && data.keep) {
+        // 正文：已增量显示，后端随后还会发同一段全文 token（供 CLI/评测），
+        // 这里标记跳过，避免同一段文字被追加两次
+        skipNextToken = true
+      } else {
+        // 工具轮过渡文本：整轮撤回
+        dropStreamedRound()
+      }
+    },
+    onToken: (token) => {
+      if (skipNextToken) {
+        skipNextToken = false
+        return
+      }
+      pendingText.value += token
+      startTypewriter()
+    },
+    onDone: () => {
+      currentTool.value = ''
+      flushTypewriter()
+      streamMsg._streaming = false // 流式结束：切换到完整 Markdown 渲染
+      nextTick(() => scrollToBottom(true)) // 渲染切换后重新对齐底部，避免跳动
+      if (!streamMsg.content) {
+        streamMsg.content = '（未生成回答内容）'
+      }
+    },
+  }
+}
+
+/** 把挂起的待审批项渲染成卡片（挂起事件与刷新恢复共用同一形态） */
+function pushSuspendedCards(msg, ops) {
+  for (const op of ops || []) {
+    msg.permissions.push({
+      id: op.call_id,
+      tool: op.name,
+      summary: op.summary || `${toolName(op.name)} 需要确认`,
+      args_text: formatArgs(op.arguments),
+      args: op.arguments || {},
+      status: 'pending',
+      reason: '',
+      rememberable: op.name === 'bash' || op.name === 'command_tool',
+      _focusIndex: 0,
+      _suspended: true,
+      _decision: null,
+    })
+  }
+}
+
+/** 挂起批次是否还有未决定的操作/计划（用于禁用输入框/发送键） */
+const hasSuspendedPending = computed(() =>
+  messages.value.some(
+    (m) =>
+      (m.permissions || []).some((p) => p._suspended && !p._decision) ||
+      (m.planApproval &&
+        m.planApproval._suspended &&
+        m.planApproval.state === 'pending'),
+  ),
+)
+
+/** 当前挂起批次的全部卡片（跨消息收集，按 _suspended 标记） */
+function suspendedCards() {
+  const out = []
+  for (const msg of messages.value) {
+    for (const p of msg.permissions || []) {
+      if (p._suspended) out.push(p)
+    }
+  }
+  return out
+}
+
+/** 全部卡片都已决定 → 一次性提交，开恢复流续跑同一条回答 */
+async function maybeSubmitSuspension() {
+  if (!suspended || suspended.submitted) return
+  if (suspended.planPending) return // 等计划卡确认/拒绝：由 confirmPlan/cancelPlan 提交
+  const cards = suspendedCards()
+  if (!cards.length || cards.some((c) => !c._decision)) return
+  suspended.submitted = true
+  await runResumeStream(
+    suspended.conversationId,
+    cards.map((c) => c._decision),
+    false,
+  )
+}
+
+/** 挂起期间点「全部拒绝并停止」：全拒 + stopped，收尾语义与停止生成一致 */
+async function stopSuspended() {
+  if (!suspended || suspended.submitted) return
+  const cards = suspendedCards()
+  for (const c of cards) {
+    if (!c._decision) {
+      c._decision = { call_id: c.id, approve: false, reason: '用户停止了回答' }
+      c.status = 'denied'
+    }
+  }
+  const plan = suspended.planPending
+    ? { approved: false, steps: [], reason: '用户停止了回答' }
+    : null
+  suspended.submitted = true
+  await runResumeStream(
+    suspended.conversationId,
+    cards.map((c) => c._decision),
+    true,
+    plan,
+  )
+}
+
+/** 提交决定后恢复挂起运行：新 SSE 流继续写回同一条助手消息 */
+async function runResumeStream(conversationId, decisions, stopped, plan = null) {
+  if (!conversationId || loading.value) return
+  flushTypewriter()
+  if (suspended && suspended.msg) streamMsg = suspended.msg
+  loading.value = true
+  currentTool.value = ''
+  abortController = new AbortController()
+  const body = {
+    conversation_id: conversationId,
+    decisions,
+    stopped: !!stopped,
+  }
+  if (plan) body.plan = plan
+  try {
+    await resumeAgentChat(
+      body,
+      buildStreamHandlers(),
+      { signal: abortController.signal },
+    )
+  } catch (error) {
+    flushTypewriter()
+    if (error.name === 'AbortError' || error.message === 'aborted') {
+      dropStreamedRound()
+      if (streamMsg) streamMsg.content = streamMsg.content || '（已停止生成）'
+    } else {
+      const detail = error.message || '恢复执行失败，请确认后端服务已启动'
+      ElMessage.error(detail)
+      if (streamMsg) streamMsg.content = streamMsg.content || `恢复失败：${detail}`
+    }
+  } finally {
+    abortController = null
+    loading.value = false
+    currentTool.value = ''
+    if (streamMsg) streamMsg._streaming = false
+    suspended = null
+    await loadSessions()
+    scrollToBottom()
+  }
+}
+
+/**
+ * 刷新/切换会话后按后端状态恢复挂起审批卡。
+ * 挂起的一轮还没落库（finalize 才写 MySQL），不恢复的话会话会被闸门挡住且无处可批。
+ */
+async function restorePendingApproval(conversationId) {
+  if (!conversationId || loading.value) return
+  try {
+    const res = await getPendingApproval(conversationId)
+    if (!res || !res.pending || !(res.ops || []).length) return
+    let target = [...messages.value].reverse().find((m) => m.role === 'assistant')
+    if (!target) {
+      target = {
+        role: 'assistant',
+        content: '',
+        sources: [],
+        tool_trace: [],
+        permissions: [],
+        todos: [],
+        plan: [],
+        planTotal: 0,
+        planDone: 0,
+        planCurrent: null,
+        _sourcesOpen: false,
+        _streaming: false,
+      }
+      messages.value.push(target)
+    }
+    target.permissions = target.permissions || []
+    suspended = { conversationId, msg: target, submitted: false, planPending: false }
+    pushSuspendedCards(target, res.ops)
+    if (res.plan && (res.plan.steps || []).length) {
+      suspended.planPending = true
+      target.planApproval = {
+        text: (res.plan.steps || []).map((s) => String(s)).join('\n'),
+        steps: (res.plan.steps || []).map((s) => String(s)),
+        summary: res.plan.summary || '',
+        state: 'pending',
+        _suspended: true,
+      }
+      focusPlanCard()
+    } else {
+      focusPermissionCard()
+    }
+    streamMsg = target
+    scrollToBottom()
+  } catch {
+    // 恢复失败不阻塞会话加载
+  }
+}
+
 async function send(options = {}) {
   flushTypewriter() // 清理上一轮残留（如异常中断）
   const hasImages = attachedImages.value.length > 0
   const text = question.value.trim() || (hasImages ? '请识别并描述这张图片' : '')
   if (!text || loading.value) return
+  if (hasSuspendedPending.value) {
+    ElMessage.warning('请先处理待确认的操作（批准或拒绝后自动继续）')
+    return
+  }
   const imageDataUrls = attachedImages.value.map((img) => img.dataUrl)
 
   if (!options.skipUserPush) {
@@ -1913,166 +2337,9 @@ async function send(options = {}) {
     payload.resume_plan = options.resumePlan
   }
   try {
-    await streamAgentChat(
-      payload,
-      {
-        onSession: (data) => {
-          activeId.value = data.conversation_id
-          if (data.title) currentTitle.value = data.title
-          upsertSession(data)
-        },
-        onPlanApproval: (data) => {
-          // 计划模式：模型提交结构化计划 → 渲染可编辑的确认卡
-          streamMsg.planApproval = {
-            text: (data.steps || []).map((s) => String(s)).join('\n'),
-            steps: (data.steps || []).map((s) => String(s)),
-            summary: data.summary || '',
-            state: 'pending',
-          }
-          scrollToBottom()
-          // 焦点移入卡片：Enter 即可确认，不用鼠标（回车在卡内不是换行）
-          focusPlanCard()
-        },
-        onTitle: (data) => {
-          // 新会话标题是后台生成的，生成完成后推送到前端更新
-          if (data.title) {
-            currentTitle.value = data.title
-            upsertSession({ conversation_id: activeId.value, title: data.title })
-          }
-        },
-        onReasoning: (data) => {
-          // DeepSeek 网页端式"已深度思考"折叠区（摘要文本，非原始 CoT）
-          if (data.summary) {
-            streamMsg.reasoning = data.summary
-            streamMsg._reasoningOpen = false
-            scrollToBottom()
-          }
-        },
-        onStatus: (data) => {
-          // 动态运行状态：准备中…/思考中…（tool_start 会覆盖为具体工具名）
-          if (data.text) {
-            currentTool.value = data.text
-            scrollToBottom()
-          }
-        },
-        onHook: (data) => {
-          // PreToolUse/PostToolUse 生命周期事件：拦截时给出明显提示
-          currentTool.value =
-            data.decision === 'deny'
-              ? `Hook 拦截：${data.name}`
-              : `Hook 触发：${data.name}`
-          scrollToBottom()
-        },
-        onPlanProgress: (data) => {
-          // 计划按当前进度展示：已完成/进行中/未开始
-          streamMsg.planDone = data.done || 0
-          streamMsg.planTotal =
-            data.total != null ? data.total : streamMsg.plan.length
-          streamMsg.planCurrent = data.current || null
-          scrollToBottom()
-        },
-        onToolStart: (data) => {
-          currentTool.value = `${toolName(data.name)}…`
-          streamMsg.tool_trace.push({
-            name: data.name,
-            arguments: data.arguments,
-            summary: '',
-          })
-          scrollToBottom()
-        },
-        onPlan: (data) => {
-          streamMsg.plan = data.steps || []
-          streamMsg.planTotal = streamMsg.plan.length
-          scrollToBottom()
-        },
-        onTodos: (data) => {
-          // TodoWrite 任务清单：规划后随 SSE 推送，可勾选跟踪
-          streamMsg.todos = data.todos || []
-          scrollToBottom()
-        },
-        onVision: () => {
-          currentTool.value = '识别图片中…'
-        },
-        onToolResult: (data) => {
-          currentTool.value = ''
-          const trace = streamMsg.tool_trace.find((t) => t.name === data.name && !t.summary)
-          if (trace) {
-            trace.summary = data.summary
-            // 完整输出（截断版）：工具卡可展开查看
-            if (data.detail) trace.detail = data.detail
-          }
-          if (data.sources && data.sources.length) {
-            streamMsg.sources.push(...data.sources)
-          }
-          scrollToBottom()
-        },
-        onPermission: (data) => {
-          // 敏感操作等待确认：渲染审批卡片，用户批准后后端继续执行
-          currentTool.value = '等待人工确认…'
-          streamMsg.permissions.push({
-            id: data.id,
-            tool: data.name,
-            summary: data.summary || `${toolName(data.name)} 需要确认`,
-            args_text: formatArgs(data.arguments),
-            args: data.arguments || {},
-            status: 'pending',
-            reason: '',
-            rememberable: data.name === 'bash' || data.name === 'command_tool',
-            _focusIndex: 0,
-          })
-          scrollToBottom()
-          // 跳到选项卡：未在输入框打字时自动把焦点移入审批卡片
-          focusPermissionCard()
-        },
-        onPermissionResolved: (data) => {
-          const p = streamMsg.permissions.find((x) => x.id === data.id)
-          if (p) {
-            p.status = data.approved ? 'approved' : 'denied'
-            if (data.reason) p.reason = data.reason
-          }
-          if (data.approved) currentTool.value = ''
-          const stillPending = (streamMsg.permissions || []).some((x) => x.status === 'pending')
-          if (!stillPending) {
-            // 全部处理完：焦点回到输入框，正文继续打字机效果
-            nextTick(() => questionInput.value?.focus())
-          }
-          scrollToBottom()
-        },
-        onStreamDelta: (text) => {
-          pendingText.value += text
-          streamedLen += text.length
-          startTypewriter()
-        },
-        onStreamEnd: (data) => {
-          if (data && data.keep) {
-            // 正文：已增量显示，后端随后还会发同一段全文 token（供 CLI/评测），
-            // 这里标记跳过，避免同一段文字被追加两次
-            skipNextToken = true
-          } else {
-            // 工具轮过渡文本：整轮撤回
-            dropStreamedRound()
-          }
-        },
-        onToken: (token) => {
-          if (skipNextToken) {
-            skipNextToken = false
-            return
-          }
-          pendingText.value += token
-          startTypewriter()
-        },
-        onDone: () => {
-          currentTool.value = ''
-          flushTypewriter()
-          streamMsg._streaming = false // 流式结束：切换到完整 Markdown 渲染
-          nextTick(() => scrollToBottom(true)) // 渲染切换后重新对齐底部，避免跳动
-          if (!streamMsg.content) {
-            streamMsg.content = '（未生成回答内容）'
-          }
-        },
-      },
-      { signal: abortController.signal },
-    )
+    await streamAgentChat(payload, buildStreamHandlers(), {
+      signal: abortController.signal,
+    })
   } catch (error) {
     flushTypewriter()
     if (error.name === 'AbortError' || error.message === 'aborted') {
@@ -2084,6 +2351,10 @@ async function send(options = {}) {
       const detail = error.message || '请求失败，请确认后端服务已启动'
       ElMessage.error(detail)
       streamMsg.content = streamMsg.content || `请求失败：${detail}`
+      if (detail.includes('待确认')) {
+        // 后端闸门：该会话还有挂起审批未处理 → 恢复审批卡，让用户先决定
+        await restorePendingApproval(activeId.value)
+      }
     }
   } finally {
     abortController = null
@@ -3019,6 +3290,20 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 8px;
   margin-top: 8px;
+}
+
+/* 原生挂起：等全部卡片决定后自动继续；也可一键全拒收尾 */
+.suspension-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px dashed var(--border);
+  background: var(--bg-soft, transparent);
+  font-size: 12px;
+  color: var(--text-2, #666);
 }
 
 .permission-card {

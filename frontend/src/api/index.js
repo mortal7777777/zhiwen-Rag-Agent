@@ -10,24 +10,8 @@ const client = axios.create({
 export const chat = (question, history = []) =>
   client.post('/chat', { question, history }).then((res) => res.data)
 
-/**
- * Agent SSE 流式对话。
- * payload: { question, conversation_id, use_web_search, use_knowledge_base, template_id }
- * handlers: { onSession, onToolStart, onToolResult, onStreamDelta, onStreamEnd, onToken, onDone, onError }
- * options:  { signal } 传入 AbortController.signal 可中止请求（停止生成）
- */
-export async function streamAgentChat(payload = {}, handlers = {}, options = {}) {
-  const response = await fetch('/api/agent/stream', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal: options.signal,
-  })
-  if (!response.ok || !response.body) {
-    const detail = await response.json().catch(() => null)
-    throw new Error(detail?.detail || `HTTP ${response.status}，请确认后端已启动`)
-  }
-
+/** 消费一条 Agent SSE 响应体（/agent/stream 与 /agent/resume 事件协议一致）。 */
+async function consumeAgentStream(response, handlers = {}) {
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -72,6 +56,9 @@ export async function streamAgentChat(payload = {}, handlers = {}, options = {})
         handlers.onPermission(data)
       } else if (event === 'permission_resolved' && handlers.onPermissionResolved) {
         handlers.onPermissionResolved(data)
+      } else if (event === 'run_suspended' && handlers.onSuspended) {
+        // 敏感操作挂起：本条流到此结束（后端等待决定），前端收齐决定后走 resume
+        handlers.onSuspended(data)
       } else if (event === 'hook' && handlers.onHook) {
         handlers.onHook(data)
       } else if (event === 'todos' && handlers.onTodos) {
@@ -92,6 +79,46 @@ export async function streamAgentChat(payload = {}, handlers = {}, options = {})
       }
     }
   }
+}
+
+/**
+ * Agent SSE 流式对话。
+ * payload: { question, conversation_id, use_web_search, use_knowledge_base, template_id }
+ * handlers: { onSession, onToolStart, onToolResult, onStreamDelta, onStreamEnd,
+ *             onSuspended, onToken, onDone, onError }
+ * options:  { signal } 传入 AbortController.signal 可中止请求（停止生成）
+ */
+export async function streamAgentChat(payload = {}, handlers = {}, options = {}) {
+  const response = await fetch('/api/agent/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: options.signal,
+  })
+  if (!response.ok || !response.body) {
+    const detail = await response.json().catch(() => null)
+    throw new Error(detail?.detail || `HTTP ${response.status}，请确认后端已启动`)
+  }
+  return consumeAgentStream(response, handlers)
+}
+
+/**
+ * 恢复挂起的运行（敏感操作审批）。
+ * payload: { conversation_id, decisions: [{call_id, approve, reason, remember_session, remember_forever}], stopped }
+ * 事件协议与 streamAgentChat 相同：新流续跑同一条回答。
+ */
+export async function resumeAgentChat(payload = {}, handlers = {}, options = {}) {
+  const response = await fetch('/api/agent/resume', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: options.signal,
+  })
+  if (!response.ok || !response.body) {
+    const detail = await response.json().catch(() => null)
+    throw new Error(detail?.detail || `HTTP ${response.status}，请确认后端已启动`)
+  }
+  return consumeAgentStream(response, handlers)
 }
 
 // ---------------- 会话（MySQL 记忆） ----------------
@@ -346,6 +373,10 @@ export const resolvePermission = (
 /** 当前待人工确认的审批列表 */
 export const listPendingPermissions = () =>
   client.get('/agent/permissions').then((res) => res.data)
+
+/** 该会话挂起中的原生审批（刷新/切换会话后恢复审批卡） */
+export const getPendingApproval = (conversationId) =>
+  client.get(`/agent/pending/${conversationId}`).then((res) => res.data)
 
 /** 上下文占用统计：消息条数 / token 预算 / 滚动摘要进度 / 缓存命中率 */
 export const getAgentContext = (conversationId) =>

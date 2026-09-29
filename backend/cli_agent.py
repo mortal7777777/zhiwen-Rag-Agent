@@ -1557,8 +1557,12 @@ def _permission_rows(data: dict) -> list[str]:
     return rows
 
 
-def prompt_permission(reader: KeyReader, data: dict, base_url: str) -> None:
-    """渲染审批弹窗并等待数字键决定（回车=批准，Esc=拒绝）。"""
+def ask_permission_decision(reader: KeyReader, data: dict) -> dict:
+    """渲染审批弹窗并等待数字键决定（回车=批准，Esc=拒绝）；只收集不提交。
+
+    返回 /agent/resume 的一条决定（call_id 兼容 run_suspended 的 ops 与旧
+    permission_request 的 id）。
+    """
     print()
     rows = _permission_rows(data)
     is_command = data.get("name") in ("bash", "command_tool")
@@ -1583,22 +1587,63 @@ def prompt_permission(reader: KeyReader, data: dict, base_url: str) -> None:
         break  # 数字键/回车/Esc 立即生效，不再等待 reason 输入
     print()
     approve = answer in ("1", "3", "4")
-    remember_session = answer == "3" and is_command
-    remember_forever = answer == "4" and is_command
-    if approve:
-        ok = resolve_permission(
-            base_url,
-            data.get("id", ""),
-            True,
-            "",
-            remember_forever=remember_forever,
-            remember_session=remember_session,
-        )
+    return {
+        "call_id": str(data.get("call_id") or data.get("id") or ""),
+        "approve": approve,
+        "reason": "" if approve else "用户拒绝了该操作",
+        "remember_session": answer == "3" and is_command,
+        "remember_forever": answer == "4" and is_command,
+    }
+
+
+def ask_plan_decision(reader: KeyReader, plan: dict) -> dict:
+    """渲染计划确认框并等待决定（回车/1=确认执行，Esc/2=拒绝）；只收集不提交。"""
+    print()
+    rows = [
+        clip(f"{i}. {safe_text(s)}", term_width() - 6)
+        for i, s in enumerate(plan.get("steps") or [], 1)
+    ]
+    rows += [paint("  1) 确认执行    2) 拒绝", "cyan")]
+    _boxed(rows, safe_text(plan.get("summary") or "执行计划待确认"), "cyan")
+    print(paint("选择 [1-2] / 回车=确认 / Esc=拒绝：", "cyan"), end="", flush=True)
+    while True:
+        key = reader.get(timeout=300)
+        if key is None or key.name == "esc":
+            answer = "2"
+        elif key.name == "enter":
+            answer = "1"
+        elif key.name == "char" and key.data in ("1", "2"):
+            answer = str(key.data)
+        else:
+            continue
+        break
+    print()
+    return {
+        "approved": answer == "1",
+        "steps": list(plan.get("steps") or []),
+        "reason": "" if answer == "1" else "用户拒绝了该计划",
+    }
+
+
+def prompt_permission(reader: KeyReader, data: dict, base_url: str) -> None:
+    """旧阻塞式审批路径（permission_request 事件）：询问并直接提交决定。
+
+    原生检查点关闭（approval_mode=blocking）或服务不支持挂起时才会走到这里；
+    挂起路径由 stream_question 收齐决定后统一走 /agent/resume。
+    """
+    decision = ask_permission_decision(reader, data)
+    ok = resolve_permission(
+        base_url,
+        str(data.get("id", "")),
+        decision["approve"],
+        decision["reason"],
+        remember_forever=decision["remember_forever"],
+        remember_session=decision["remember_session"],
+    )
+    if decision["approve"]:
         print(paint("✔ 已批准，继续执行…", "green") if ok else paint("✘ 提交失败，请检查后端", "red"))
-        return
-    ok = resolve_permission(base_url, data.get("id", ""), False, "")
-    print(paint("✘ 已拒绝", "red") if ok else paint("✘ 提交失败，请检查后端", "red"))
-    return
+    else:
+        print(paint("✘ 已拒绝", "red") if ok else paint("✘ 提交失败，请检查后端", "red"))
 
 
 # ------------------------------------------------------------------ 流式问答
@@ -1658,42 +1703,46 @@ def stream_question(
         },
         ensure_ascii=False,
     ).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url}/api/agent/stream",
-        data=body,
-        headers={"Content-Type": "application/json"},
-    )
     lines_q: collections.deque = collections.deque()
     lines_cond = threading.Condition()
     resp_holder: list = []
     done_flag = threading.Event()
 
-    def reader_thread() -> None:
-        try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                resp_holder.append(resp)
-                for raw in resp:
-                    if done_flag.is_set():
-                        break
-                    with lines_cond:
-                        lines_q.append(raw.decode("utf-8", errors="replace"))
-                        lines_cond.notify()
-        except Exception as exc:
-            with lines_cond:
-                lines_q.append(("__error__", str(exc)))
-                lines_cond.notify()
-        finally:
-            with lines_cond:
-                lines_q.append(("__end__", None))
-                lines_cond.notify()
+    def _start_reader(url: str, payload: bytes) -> None:
+        """开一条 SSE 连接，把逐行数据泵进 lines_q（挂起恢复需要开第二条流）。"""
+        req = urllib.request.Request(
+            url, data=payload, headers={"Content-Type": "application/json"}
+        )
 
-    threading.Thread(target=reader_thread, daemon=True).start()
+        def reader_thread() -> None:
+            try:
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    resp_holder.append(resp)
+                    for raw in resp:
+                        if done_flag.is_set():
+                            break
+                        with lines_cond:
+                            lines_q.append(raw.decode("utf-8", errors="replace"))
+                            lines_cond.notify()
+            except Exception as exc:
+                with lines_cond:
+                    lines_q.append(("__error__", str(exc)))
+                    lines_cond.notify()
+            finally:
+                with lines_cond:
+                    lines_q.append(("__end__", None))
+                    lines_cond.notify()
+
+        threading.Thread(target=reader_thread, daemon=True).start()
+
+    _start_reader(f"{base_url}/api/agent/stream", body)
 
     md = MarkdownStream(term_width())
     round_printed = ""  # 本轮已打印到终端的文本（含 ANSI），供整轮撤回
     skip_next_token = False  # 正文轮的增量已展示：随后的全文 token 跳过
     run_id: str | None = None
     conv_id: int | None = conversation_id
+    suspended: dict | None = None  # run_suspended 载荷：流尾收齐决定后走 /agent/resume
     t0 = time.time()
     active_tools: dict[str, tuple[str, float]] = {}
     busy_text: str | None = None
@@ -1735,6 +1784,34 @@ def stream_question(
                 if item[0] == "__error__":
                     screen.newline()
                     screen.write(paint(f"✖ 流式连接出错：{item[1]}", "red"))
+                    break
+                if suspended:
+                    # 挂起（敏感操作 / 计划确认）：逐项询问 → 一次提交 → 开第二条流续跑
+                    ops = suspended.get("ops") or []
+                    plan = suspended.get("plan") or None
+                    screen.newline()
+                    if plan and ops:
+                        label = f"{len(ops)} 项敏感操作 + 执行计划"
+                    elif plan:
+                        label = "执行计划"
+                    else:
+                        label = f"{len(ops)} 项敏感操作"
+                    screen.write(paint(f"⏸ 等待确认：{label}", "yellow"))
+                    decisions = [ask_permission_decision(reader, op) for op in ops]
+                    resume_body: dict = {
+                        "conversation_id": suspended.get("conversation_id")
+                        or conv_id,
+                        "decisions": decisions,
+                        "stopped": False,
+                    }
+                    if plan:
+                        resume_body["plan"] = ask_plan_decision(reader, plan)
+                    suspended = None
+                    _start_reader(
+                        f"{base_url}/api/agent/resume",
+                        json.dumps(resume_body, ensure_ascii=False).encode("utf-8"),
+                    )
+                    continue
                 break
             line = item.rstrip("\n")
             if not line.startswith("data: "):
@@ -1807,6 +1884,9 @@ def stream_question(
                     screen.write(paint("   ▶ 已批准", "green"))
                 else:
                     screen.write(paint(f"   ▶ 已拒绝：{safe_text(data.get('reason', ''))}", "red"))
+            elif name == "run_suspended":
+                # 图在敏感操作处挂起：本流即将结束，决定收集在流尾统一做
+                suspended = data
             elif name == "stream_delta":
                 # 正文增量：边生成边渲染（与 Web 端一致）。工具轮的过渡思考
                 # 文本随后会被 stream_end{keep:false} 整轮撤回。
@@ -1944,18 +2024,20 @@ def run_headless(
         },
         ensure_ascii=False,
     ).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url}/api/agent/stream",
-        data=body,
-        headers={"Content-Type": "application/json"},
-    )
     answer: list[str] = []
     sources: list[dict] = []
     tool_trace: list[dict] = []
     conv_id: int | None = conversation_id
     error: str | None = None
-    try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
+
+    def _consume(url: str, payload: bytes) -> dict | None:
+        """消费一条 SSE 流；返回 run_suspended 载荷（无挂起则 None）。"""
+        nonlocal conv_id, error
+        suspended = None
+        sreq = urllib.request.Request(
+            url, data=payload, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(sreq, timeout=600) as resp:
             for raw in resp:
                 line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if not line.startswith("data: "):
@@ -1975,8 +2057,33 @@ def run_headless(
                     )
                     if data.get("sources"):
                         sources.extend(data["sources"])
+                elif name == "run_suspended":
+                    suspended = data
                 elif name == "error":
                     error = str(data.get("message") or "未知错误")
+        return suspended
+
+    try:
+        suspended = _consume(f"{base_url}/api/agent/stream", body)
+        rounds = 0
+        # 无人值守：挂起的敏感操作全部按拒绝处理（零副作用），最多连续 5 轮
+        while suspended and rounds < 5 and not error:
+            rounds += 1
+            body: dict = {
+                "conversation_id": suspended.get("conversation_id") or conv_id,
+                "decisions": [],
+                "stopped": False,
+            }
+            if suspended.get("plan"):
+                # 计划同样不自动执行：拒绝后模型会说明或调整，不会产生副作用
+                body["plan"] = {
+                    "approved": False,
+                    "reason": "非交互模式（-p）：计划未确认",
+                }
+            suspended = _consume(
+                f"{base_url}/api/agent/resume",
+                json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            )
     except Exception as exc:
         error = str(exc)
     if error:

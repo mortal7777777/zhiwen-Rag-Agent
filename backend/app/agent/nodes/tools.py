@@ -31,12 +31,30 @@ from ..utils import (
 )
 
 from langchain_core.messages import SystemMessage, ToolMessage
+from langgraph.types import interrupt  # 模块级引用：测试可 patch nodes.tools.interrupt
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..langgraph_agent import LangGraphAgentService  # 仅类型注解
 from ..tools import extract_sources
 
 # ==== 函数体（原文）====
+def _remember_command_forever(db: Session | None, command: str, settings: Settings) -> None:
+    """「永久记住」：把命令原文写入自动放行前缀（命令白名单，设置页可见）。"""
+    if db is None or not command:
+        return
+    try:
+        from ...runtime_config import load_overrides, save_overrides
+
+        load_overrides(db)
+        current = effective(settings, "command_allowlist") or ""
+        prefixes = [p.strip() for p in current.split(",") if p.strip()]
+        if command not in prefixes:
+            prefixes.append(command)
+        save_overrides(db, {"command_allowlist": ", ".join(prefixes)})
+    except Exception as exc:
+        logger.warning("写入命令白名单失败：%s", exc)
+
+
 def _tools_node(state: AgentState, runtime) -> dict:
     """第二参数是 LangGraph 按名注入的 Runtime；请求级依赖取 `runtime.context`。"""
     deps = runtime.context
@@ -68,8 +86,228 @@ def _tools_node(state: AgentState, runtime) -> dict:
     if not tool_calls:
         return {}
 
-    # 预生成"思考摘要"（后台线程）：与工具执行并行，
-    # 工具通常耗时数秒，摘要利用这段时间完成，作答轮几乎零额外延迟
+    # ---- 计划模式（只读）：敏感操作直接拦截，不弹审批（纯计算）----
+    blocked: dict[str, str] = {}
+    if state.get("plan_only"):
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            args = tc.get("args") or {}
+            if is_sensitive_tool(name, args):
+                blocked[tc.get("id")] = (
+                    "当前为计划模式（只读）：不允许写文件/编辑/删除/执行命令。"
+                    "请用只读手段把现状摸清，然后用 exit_plan_mode 提交结构化计划，"
+                    "等待用户确认后再执行。"
+                )
+
+    # ---- 人工确认（HITL）：纯计算收集本轮待审批项 ----
+    # 挂起恢复会整段重跑本节点：直到 interrupt() 之前不得有任何副作用
+    # （发事件/写库/开线程）；白名单与会话记忆查询都是只读的。
+    # 写/编辑/删除/命令默认 ask；命令命中自动放行白名单或本会话已记住则无需确认；
+    # permission_mode=allow 时全部自动批准（类 Claude Code --dangerously-skip-permissions）。
+    ops: list[dict] = []
+    permission_mode = effective(settings, "tool_permission_mode", "ask")
+    if permission_mode == "ask":
+        ops_by_command: dict[str, dict] = {}  # 同轮同命令去重：一次决定覆盖全部调用
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            args = tc.get("args") or {}
+            if tc.get("id") in blocked:
+                continue
+            needs = is_sensitive_tool(name, args)
+            command = str(args.get("command") or "")
+            if name in ("bash", "command_tool") and (
+                command_allowed(settings, command)[0]
+                or permission_manager.is_session_allowed(rt.get("conv_id"), command)
+            ):
+                needs = False
+            if not needs:
+                continue
+            if command and command in ops_by_command:
+                ops_by_command[command]["also_covers"].append(tc.get("id"))
+                continue
+            op = {
+                "call_id": tc.get("id"),
+                "also_covers": [],
+                "name": name,
+                "arguments": display_args(name, args),
+                "summary": describe_tool_call(name, args),
+            }
+            ops.append(op)
+            if command:
+                ops_by_command[command] = op
+
+    # ---- 计划提交（exit_plan_mode）：并入同一次挂起（纯计算）----
+    # 仅 plan_only 时认 exit_plan_mode；该工具本身不执行，结果在恢复段合成。
+    plan_request: dict | None = None
+    if state.get("plan_only"):
+        for tc in tool_calls:
+            if tc.get("name") != PLAN_EXIT_TOOL_NAME or tc.get("id") in blocked:
+                continue
+            args = tc.get("args") or {}
+            steps = [
+                str(s).strip() for s in (args.get("steps") or []) if str(s).strip()
+            ][:8]
+            if steps:
+                plan_request = {
+                    "call_id": tc.get("id"),
+                    "steps": steps,
+                    "summary": str(args.get("summary") or "")[:200],
+                }
+                break
+
+    # ---- 决定收集：原生 interrupt 一次收齐（敏感操作 + 计划提交）；
+    #      无 checkpointer 时回落阻塞式 ----
+    use_interrupt = getattr(deps, "approval_mode", "blocking") == "interrupt"
+    approval: dict[str, dict] = {}
+    plan_result: dict[str, dict] = {}  # exit_plan_mode 的合成结果（_execute 直接取用）
+    plan_confirm_text: str | None = None
+    if ops or (use_interrupt and plan_request):
+        if use_interrupt:
+            payload: dict = {
+                "kind": "approval",
+                "conversation_id": rt.get("conv_id"),
+                # 挂起批次标识：超时 watchdog 用它防止误伤后续轮次的审批
+                "created_at": time.time(),
+                "ops": ops,
+            }
+            if plan_request:
+                payload["plan"] = plan_request
+            resume_value = interrupt(payload)
+            # 恢复段（本节点从头重跑后才会执行到这里）：副作用沿链路只发生一次
+            decisions = (resume_value or {}).get("decisions") or {}
+            for op in ops:
+                d = decisions.get(op.get("call_id")) or {}
+                approved = bool(d.get("approve"))
+                reason = str(d.get("reason") or "").strip()
+                command = str((op.get("arguments") or {}).get("command") or "")
+                if approved:
+                    if d.get("remember_session") and command:
+                        permission_manager.mark_session_allowed(rt.get("conv_id"), command)
+                    if d.get("remember_forever") and command:
+                        _remember_command_forever(db, command, settings)
+                    entry = {
+                        "ok": True,
+                        "reason": "",
+                        "remember": bool(
+                            d.get("remember_session") or d.get("remember_forever")
+                        ),
+                    }
+                    bus.emit(
+                        "permission_resolved",
+                        {"id": op.get("call_id"), "approved": True, "reason": ""},
+                    )
+                else:
+                    entry = {
+                        "ok": False,
+                        "reason": reason or "用户拒绝了该操作（未收到有效决定）",
+                    }
+                    bus.emit(
+                        "permission_resolved",
+                        {
+                            "id": op.get("call_id"),
+                            "approved": False,
+                            "reason": entry["reason"],
+                        },
+                    )
+                for cid in [op.get("call_id"), *(op.get("also_covers") or [])]:
+                    if cid:
+                        approval[cid] = entry
+            # ---- 计划决定（恢复段应用，副作用只发生一次）----
+            if plan_request:
+                pd = (resume_value or {}).get("plan") or {}
+                approved = bool(pd.get("approved"))
+                steps = [
+                    str(s).strip()
+                    for s in (pd.get("steps") or plan_request["steps"])
+                    if str(s).strip()
+                ][:8]
+                if approved and steps:
+                    state["plan_steps"] = steps
+                    state["plan_map"] = [_plan_hint(s) for s in steps]
+                    state["plan_push_count"] = 0
+                    if db is not None and rt.get("conv_id") is not None:
+                        try:
+                            from ...todos import refresh_todos_for_plan
+
+                            todos = refresh_todos_for_plan(db, rt["conv_id"], steps)
+                            state["todos"] = todos or []
+                            if state["todos"]:
+                                bus.emit("todos", {"todos": state["todos"]})
+                        except Exception as exc:
+                            logger.warning("计划确认后播种任务清单失败：%s", exc)
+                    # 退出计划模式：写/命令恢复可执行（否则随后的敏感操作会被 plan_only 拦截）
+                    state["plan_only"] = False
+                    bus.emit("plan", {"steps": steps})
+                    plan_result[plan_request["call_id"]] = {
+                        "summary": f"计划已确认（{len(steps)} 步），开始执行",
+                        "_duration_ms": None,
+                    }
+                    plan_confirm_text = (
+                        f"用户已确认执行计划（共 {len(steps)} 步），已退出计划模式并播种任务清单，"
+                        "请立即按顺序开始执行（不要重新规划）：\n"
+                        + "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
+                        + "\n每完成一步立即用 todo_update complete 标记；"
+                        "有未完成步骤时不要提前给出最终回答。"
+                    )
+                else:
+                    reason = str(pd.get("reason") or "").strip()
+                    plan_result[plan_request["call_id"]] = {
+                        "summary": "用户未确认该计划",
+                        "error": (
+                            "用户未确认该计划"
+                            + (f"：{reason}" if reason else "")
+                            + "。请调整计划（可用 exit_plan_mode 重新提交）或先向用户说明。"
+                        ),
+                        "_duration_ms": None,
+                    }
+        else:
+            # 回退路径（原生检查点关闭或初始化失败）：逐项阻塞等待，行为与旧版一致
+            for op in ops:
+                req = permission_manager.submit(
+                    tool=op["name"],
+                    arguments=op["arguments"],
+                    summary=op["summary"],
+                    conversation_id=rt.get("conv_id"),
+                )
+                bus.emit(
+                    "permission_request",
+                    {
+                        "id": req.id,
+                        "name": op["name"],
+                        "arguments": req.arguments,
+                        "summary": op["summary"],
+                    },
+                )
+                bus.emit("status", {"phase": "permission", "text": f"等待确认：{op['summary']}"})
+                approved = permission_manager.wait(
+                    req,
+                    timeout=int(effective(settings, "permission_timeout", 0) or 0),
+                    stop_event=stop_event,
+                )
+                command = str((op.get("arguments") or {}).get("command") or "")
+                if approved:
+                    bus.emit("permission_resolved", {"id": req.id, "approved": True, "reason": ""})
+                    if req.remember_session and command:
+                        permission_manager.mark_session_allowed(rt.get("conv_id"), command)
+                    if req.remember_forever and command:
+                        _remember_command_forever(db, command, settings)
+                    entry = {
+                        "ok": True,
+                        "reason": "",
+                        "remember": bool(req.remember_session or req.remember_forever),
+                    }
+                else:
+                    reason = req.reason or (
+                        "用户拒绝了该操作" if req.status == "denied" else "等待确认超时，已自动取消"
+                    )
+                    bus.emit("permission_resolved", {"id": req.id, "approved": False, "reason": reason})
+                    entry = {"ok": False, "reason": reason}
+                for cid in [op.get("call_id"), *(op.get("also_covers") or [])]:
+                    if cid:
+                        approval[cid] = entry
+
+    # ---- 预生成"思考摘要"（后台线程）：与工具执行并行 ----
+    # 放在决定收集之后：挂起恢复会整段重跑本节点，提前启动会重复开线程。
     if effective(settings, "reasoning_summary_enabled", False):
         try:
             evt = {"summary": None, "done": threading.Event()}
@@ -88,79 +326,6 @@ def _tools_node(state: AgentState, runtime) -> dict:
         except Exception as exc:
             logger.warning("启动思考摘要预生成失败：%s", exc)
 
-    # ---- 计划模式（只读）：敏感操作直接拦截，不弹审批 ----
-    blocked: dict[str, str] = {}
-    if state.get("plan_only"):
-        for tc in tool_calls:
-            name = tc.get("name", "")
-            args = tc.get("args") or {}
-            if is_sensitive_tool(name, args):
-                blocked[tc.get("id")] = (
-                    "当前为计划模式（只读）：不允许写文件/编辑/删除/执行命令。"
-                    "请用只读手段把现状摸清，然后用 exit_plan_mode 提交结构化计划，"
-                    "等待用户确认后再执行。"
-                )
-
-    # ---- 人工确认（HITL）：敏感操作先请求用户批准，再进入执行 ----
-    # 写/编辑/删除/命令默认 ask；命令命中自动放行白名单或本会话已记住则无需确认；
-    # permission_mode=allow 时全部自动批准（类 Claude Code --dangerously-skip-permissions）。
-    approval: dict[str, dict] = {}
-    permission_mode = effective(settings, "tool_permission_mode", "ask")
-    if permission_mode == "ask":
-        for tc in tool_calls:
-            name = tc.get("name", "")
-            args = tc.get("args") or {}
-            if tc.get("id") in blocked:
-                continue
-            needs = is_sensitive_tool(name, args)
-            command = str(args.get("command") or "")
-            if name in ("bash", "command_tool") and (
-                command_allowed(settings, command)[0]
-                or permission_manager.is_session_allowed(rt.get("conv_id"), command)
-            ):
-                needs = False
-            if not needs:
-                continue
-            summary = describe_tool_call(name, args)
-            req = permission_manager.submit(
-                tool=name,
-                arguments=display_args(name, args),
-                summary=summary,
-                conversation_id=rt.get("conv_id"),
-            )
-            bus.emit(
-                "permission_request",
-                {
-                    "id": req.id,
-                    "name": name,
-                    "arguments": req.arguments,
-                    "summary": summary,
-                },
-            )
-            bus.emit("status", {"phase": "permission", "text": f"等待确认：{summary}"})
-            approved = permission_manager.wait(
-                req,
-                timeout=int(effective(settings, "permission_timeout", 0) or 0),
-                stop_event=stop_event,
-            )
-            if approved:
-                bus.emit("permission_resolved", {"id": req.id, "approved": True, "reason": ""})
-                if req.remember_session and command:
-                    permission_manager.mark_session_allowed(
-                        rt.get("conv_id"), command
-                    )
-                approval[tc.get("id")] = {
-                    "ok": True,
-                    "reason": "",
-                    "remember": bool(req.remember_session or req.remember_forever),
-                }
-            else:
-                reason = req.reason or (
-                    "用户拒绝了该操作" if req.status == "denied" else "等待确认超时，已自动取消"
-                )
-                bus.emit("permission_resolved", {"id": req.id, "approved": False, "reason": reason})
-                approval[tc.get("id")] = {"ok": False, "reason": reason}
-
     # 并行执行多个工具调用（检索类内部已有 GPU 锁；API 类并发安全），保持返回顺序
     tool_cache: dict = rt.setdefault("tool_cache", {})
 
@@ -178,6 +343,10 @@ def _tools_node(state: AgentState, runtime) -> dict:
                 "permission": "plan_only",
                 "_duration_ms": None,
             }
+        preset = plan_result.get(tc.get("id"))
+        if preset is not None:
+            # 计划提交不真正执行工具：结果由恢复段合成
+            return tc, dict(preset)
         gate = approval.get(tc.get("id"))
         if gate is not None and not gate["ok"]:
             return tc, {
@@ -288,7 +457,8 @@ def _tools_node(state: AgentState, runtime) -> dict:
                     "status",
                     {"phase": "plan", "text": "已进入计划模式（只读探索）"},
                 )
-        elif name == PLAN_EXIT_TOOL_NAME and "error" not in result:
+        elif name == PLAN_EXIT_TOOL_NAME and "error" not in result and not use_interrupt:
+            # 旧路径（阻塞式回退）：提交后本轮强制收尾，等用户以 resume_plan 重发确认
             steps = [
                 str(s).strip()
                 for s in (result.get("steps") or (tc.get("args") or {}).get("steps") or [])
@@ -395,6 +565,10 @@ def _tools_node(state: AgentState, runtime) -> dict:
     if plan_entered:
         # 所有 ToolMessage 都已入链，此时插计划模式规则才不破坏 tool_use/tool_result 配对
         messages.append(SystemMessage(content=PLAN_MODE_SYSTEM_HINT))
+
+    if plan_confirm_text:
+        # 同上：必须在所有 ToolMessage 之后再插（Anthropic 的 tool_use/tool_result 相邻要求）
+        messages.append(SystemMessage(content=plan_confirm_text))
 
     if hook_contexts:
         messages.append(
