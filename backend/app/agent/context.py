@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..db import repository as repo
+from ..runtime_config import effective
 from ..llm_text import message_text
 from ..tracing import get_aux_usage_collector
 
@@ -108,8 +109,6 @@ def context_window_for(settings) -> int:
         return explicit
     name = ""
     try:
-        from ..runtime_config import effective
-
         active = str(effective(settings, "active_chat_provider") or "")
         for provider in effective(settings, "providers") or []:
             if str(provider.get("id")) == active:
@@ -204,7 +203,7 @@ class ContextService:
         rows = repo.list_messages_with_id(db, conversation_id, limit=500)
         if not rows:
             return None, []
-        max_messages = self.settings.history_max_messages
+        max_messages = int(effective(self.settings, "history_max_messages") or 400)
         budget = self.history_budget_for(db, conversation_id)
         old_summary, up_to = repo.get_summary_state(db, conversation_id)
         window = [r for r in rows if r["id"] > up_to]
@@ -235,7 +234,7 @@ class ContextService:
         """上下文占用统计（/context 命令与 Web 上下文面板共用）。"""
         rows = repo.list_messages_with_id(db, conversation_id, limit=500)
         budget = self.history_budget_for(db, conversation_id)
-        max_messages = self.settings.history_max_messages
+        max_messages = int(effective(self.settings, "history_max_messages") or 400)
         summary, up_to = repo.get_summary_state(db, conversation_id)
         covered = sum(1 for r in rows if r["id"] <= up_to)
         # 发送窗口口径与 compact_conversation 保持一致：起点=摘要边界（粘滞），
@@ -309,7 +308,13 @@ class ContextService:
                 "summarized_messages": 0,
                 "summary_chars": 0,
             }
-        keep = max(4, min(self.settings.history_max_messages, len(rows) // 4))
+        keep = max(
+            4,
+            min(
+                int(effective(self.settings, "history_max_messages") or 400),
+                len(rows) // 4,
+            ),
+        )
         cutoff = len(rows) - keep
         cutoff_id = rows[cutoff - 1]["id"]
         old_summary, up_to = repo.get_summary_state(db, conversation_id)
@@ -339,7 +344,7 @@ class ContextService:
         最终预算会被模型上下文窗口夹紧（窗口 − 固定开销），换小窗口模型
         时不会把预算撑爆导致超窗报错。
         """
-        default = self.settings.history_max_tokens
+        default = int(effective(self.settings, "history_max_tokens") or 64000)
         by_category = {
             "general": self.settings.history_budget_general,
             "knowledge": self.settings.history_budget_knowledge,
@@ -636,11 +641,13 @@ class ContextService:
                 last = None
         if last is not None and (
             datetime.now() - last
-            < timedelta(hours=self.settings.memory_consolidate_interval_hours)
+            < timedelta(
+                hours=int(effective(self.settings, "memory_consolidate_interval_hours") or 24)
+            )
         ):
             return None
         active = [m for m in repo.list_memories(db, limit=2000)]
-        if len(active) < self.settings.memory_consolidate_threshold:
+        if len(active) < int(effective(self.settings, "memory_consolidate_threshold") or 10):
             return None
         return self.consolidate_memories(db)
 

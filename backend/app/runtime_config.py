@@ -53,10 +53,26 @@ EDITABLE_KEYS = {
     "advanced_tools_enabled",
     "agent_task_max_iterations",
     "agent_task_max_failures",
+    "agent_max_iterations",
+    "agent_max_failures",
+    "agent_max_dispatch_rounds",
+    "agent_llm_stall_timeout_s",
     "task_mode_detect",
     "agent_subagents_enabled",
     "agent_subagent_max_rounds",
     "plan_mode_allowed",
+    # 检索与上下文/记忆调参（2026-09-29 上设置页）
+    "kb_chat_min_score",
+    "crag_fallback_enabled",
+    "crag_min_score",
+    "vision_max_images",
+    "history_max_messages",
+    "history_max_tokens",
+    "memory_auto_extract_min_chars",
+    "project_memory_max_chars",
+    "memory_consolidate_threshold",
+    "memory_consolidate_interval_hours",
+    "checkpoint_keep_per_thread",
     "verify_command",
     "verify_auto_detect",
     "verify_max_retries",
@@ -92,8 +108,43 @@ READONLY_KEYS = {
     "embed_batch_size",
     "opensearch_url",
     "opensearch_index",
-    "history_max_messages",
-    "history_max_tokens",
+}
+
+# 数值型可编辑键的合法区间（保存时夹取，防前端/手改传坏值把节点搞崩）
+_INT_RANGES = {
+    "agent_max_iterations": (1, 200),
+    "agent_max_failures": (1, 50),
+    "agent_task_max_iterations": (1, 500),
+    "agent_task_max_failures": (1, 100),
+    "agent_max_dispatch_rounds": (1, 10),
+    "agent_subagent_max_rounds": (1, 20),
+    "vision_max_images": (1, 10),
+    "history_max_messages": (8, 500),
+    "history_max_tokens": (1000, 200000),
+    "memory_auto_extract_min_chars": (50, 5000),
+    "project_memory_max_chars": (500, 20000),
+    "memory_consolidate_threshold": (2, 500),
+    "memory_consolidate_interval_hours": (1, 720),
+    "checkpoint_keep_per_thread": (5, 200),
+    "verify_max_retries": (0, 5),
+}
+_FLOAT_RANGES = {
+    "agent_llm_stall_timeout_s": (10.0, 1800.0),
+    "kb_chat_min_score": (0.0, 1.0),
+    "crag_min_score": (0.0, 1.0),
+}
+_BOOL_KEYS = {
+    "advanced_tools_enabled",
+    "agent_subagents_enabled",
+    "plan_mode_allowed",
+    "task_mode_detect",
+    "verify_auto_detect",
+    "sandbox_workspace_readonly",
+    "skill_sandbox_enabled",
+    "reasoning_summary_enabled",
+    "trajectory_compress_enabled",
+    "mcp_enabled",
+    "crag_fallback_enabled",
 }
 
 # 旧键值 -> 供应商字段的映射（保存旧键时同步到 providers，保持两套机制一致）
@@ -192,6 +243,20 @@ def save_overrides(db, updates: dict, settings=None) -> dict:
             value = max(0.0, min(2.0, float(value)))
         elif key == "web_search_max_results":
             value = max(1, min(20, int(value)))
+        elif key in _INT_RANGES:
+            lo, hi = _INT_RANGES[key]
+            try:
+                value = max(lo, min(hi, int(value)))
+            except (TypeError, ValueError):
+                continue  # 非数值：跳过该键（不拖垮整批保存）
+        elif key in _FLOAT_RANGES:
+            lo, hi = _FLOAT_RANGES[key]
+            try:
+                value = max(lo, min(hi, float(value)))
+            except (TypeError, ValueError):
+                continue
+        elif key in _BOOL_KEYS:
+            value = bool(value)
         elif key in ("main_model_vision", "skills_enabled"):
             value = bool(value)
         elif key == "tool_permission_mode":

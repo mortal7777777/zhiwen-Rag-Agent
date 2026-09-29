@@ -143,7 +143,10 @@ def conversation_timeline(
                 "sources_count": len(ch.get("sources") or []),
             }
         )
-    return {"items": list(reversed(items))[:50]}
+    # 最新在前（checkpoint_id 时间有序，升序排布对 saver.list 的返回顺序不敏感）；
+    # 只取最近 50 条——旧实现 reversed 后 [:50] 实际留下的是最旧的 50 条
+    items.sort(key=lambda it: it.get("checkpoint_id") or "", reverse=True)
+    return {"items": items[:50]}
 
 
 @router.get("/conversations/{conversation_id}/timeline/{checkpoint_id}")

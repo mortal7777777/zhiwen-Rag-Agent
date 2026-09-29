@@ -102,19 +102,19 @@ def _is_project_task(
 def _iteration_limit(state: AgentState, settings) -> int:
     if state.get("task_mode"):
         return max(
-            int(settings.agent_max_iterations),
+            int(effective(settings, "agent_max_iterations") or 20),
             int(effective(settings, "agent_task_max_iterations") or 24),
         )
-    return int(settings.agent_max_iterations)
+    return int(effective(settings, "agent_max_iterations") or 20)
 
 
 def _failure_limit(state: AgentState, settings) -> int:
     if state.get("task_mode"):
         return max(
-            int(getattr(settings, "agent_max_failures", 3)),
+            int(effective(settings, "agent_max_failures") or 3),
             int(effective(settings, "agent_task_max_failures") or 6),
         )
-    return int(getattr(settings, "agent_max_failures", 3))
+    return int(effective(settings, "agent_max_failures") or 3)
 
 
 def _generate_reasoning_summary(

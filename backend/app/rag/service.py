@@ -732,7 +732,7 @@ class RAGService:
             docs = self.retrieve(question, history=history)
             # S5 相关度门槛：库内没有相关内容（top1 低于阈值）时不喂生成模型，
             # 避免随机块被当依据；0=关闭。校准：库外题 top1≤0.01，库内题≥0.54。
-            min_score = float(self.settings.kb_chat_min_score or 0)
+            min_score = float(effective(self.settings, "kb_chat_min_score") or 0)
             best = max(
                 (
                     float(

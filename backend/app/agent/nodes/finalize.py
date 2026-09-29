@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from ...config import Settings
 from ...db import repository as repo
+from ...runtime_config import effective
 
 logger = logging.getLogger(__name__)
 from ..state import AgentState, EventBus
@@ -307,7 +308,8 @@ def _finalize_node(state: AgentState, runtime) -> dict:
             if saver is not None:
                 from ...native_checkpoint import prune_thread
 
-                prune_thread(saver, f"conv:{conv_id}")
+                keep = int(effective(settings, "checkpoint_keep_per_thread") or 20)
+                prune_thread(saver, f"conv:{conv_id}", keep=keep)
         except Exception as exc:
             logger.warning("裁剪原生检查点失败：%s", exc)
 

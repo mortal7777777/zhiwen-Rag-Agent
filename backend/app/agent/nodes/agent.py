@@ -78,7 +78,7 @@ class _StreamError:
 
 
 def _stall_timeout(settings: Settings) -> float:
-    raw = getattr(settings, "agent_llm_stall_timeout_s", None)
+    raw = effective(settings, "agent_llm_stall_timeout_s")
     try:
         value = float(raw)
     except (TypeError, ValueError):

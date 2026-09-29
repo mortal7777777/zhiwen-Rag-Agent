@@ -161,7 +161,7 @@ class LangGraphAgentService(AgentService):
         """执行 LangGraph 编排，逐事件产出（session/plan/vision/.../done）。"""
         settings = self.settings
         images = [img for img in (images or []) if img and img.strip()][
-            : settings.vision_max_images
+            : int(effective(settings, "vision_max_images") or 6)
         ]
 
         # 工具开关解析：tool_mode 优先，兼容旧前端布尔开关
@@ -321,7 +321,7 @@ class LangGraphAgentService(AgentService):
                 force_memory = self.context.has_memory_intent(question)
                 auto_extract = (
                     len(runtime.get("final_text") or "")
-                    >= int(getattr(settings, "memory_auto_extract_min_chars", 400) or 400)
+                    >= int(effective(settings, "memory_auto_extract_min_chars") or 400)
                 )
                 # 短问答跳过记忆提取，减少一轮无必要 LLM 调用；显式"记住"始终提取
                 if force_memory or auto_extract:
@@ -394,8 +394,8 @@ class LangGraphAgentService(AgentService):
             effective(settings, "web_search_provider"),
             settings.tavily_api_key,
             effective(settings, "web_search_max_results"),
-            crag_enabled=settings.crag_fallback_enabled,
-            crag_min_score=settings.crag_min_score,
+            crag_enabled=bool(effective(settings, "crag_fallback_enabled")),
+            crag_min_score=float(effective(settings, "crag_min_score") or 0.45),
             vision=self.vision,
             skills_enabled=skills_on,
             skill_enabled_ids=skill_enabled_ids,

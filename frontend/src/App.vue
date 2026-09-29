@@ -809,10 +809,6 @@
                   <el-switch v-model="toolsForm.reasoning_summary_enabled" size="small" />
                 </div>
                 <div class="generic-row">
-                  <span class="generic-label">会话 checkpoint 恢复</span>
-                  <el-switch v-model="toolsForm.checkpoint_enabled" size="small" />
-                </div>
-                <div class="generic-row">
                   <span class="generic-label">轨迹压缩摘要</span>
                   <el-switch v-model="toolsForm.trajectory_compress_enabled" size="small" />
                 </div>
@@ -823,6 +819,192 @@
               <el-button type="primary" :loading="toolsSaving" @click="saveToolsSettings">
                 保存工具设置
               </el-button>
+            </div>
+
+            <div class="settings-section">
+              <div class="settings-label">高级参数（Agent / 检索 / 上下文）</div>
+              <div class="settings-tip">
+                一般保持默认即可：预算类调大给模型更多工具调用空间；检索门槛调高更保守
+                （更少低相关引用）。保存后立即生效。
+              </div>
+              <div class="generic-form">
+                <div class="generic-sub">Agent 预算与派发</div>
+                <div class="generic-row">
+                  <span class="generic-label">普通轮次工具预算</span>
+                  <el-input-number
+                    v-model="advForm.agent_max_iterations"
+                    :min="1"
+                    :max="200"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">项目任务工具预算</span>
+                  <el-input-number
+                    v-model="advForm.agent_task_max_iterations"
+                    :min="1"
+                    :max="500"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">连续失败上限（普通）</span>
+                  <el-input-number
+                    v-model="advForm.agent_max_failures"
+                    :min="1"
+                    :max="50"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">连续失败上限（任务）</span>
+                  <el-input-number
+                    v-model="advForm.agent_task_max_failures"
+                    :min="1"
+                    :max="100"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">单轮最多派发轮数</span>
+                  <el-input-number
+                    v-model="advForm.agent_max_dispatch_rounds"
+                    :min="1"
+                    :max="10"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">流式卡死看门狗（秒）</span>
+                  <el-input-number
+                    v-model="advForm.agent_llm_stall_timeout_s"
+                    :min="10"
+                    :max="1800"
+                    :step="10"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">任务态自动识别</span>
+                  <el-switch v-model="advForm.task_mode_detect" size="small" />
+                </div>
+
+                <div class="generic-sub">检索</div>
+                <div class="generic-row">
+                  <span class="generic-label">知识库相关度门槛（0=关闭）</span>
+                  <el-input-number
+                    v-model="advForm.kb_chat_min_score"
+                    :min="0"
+                    :max="1"
+                    :step="0.01"
+                    :precision="2"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">低相关时自动联网兜底（CRAG）</span>
+                  <el-switch v-model="advForm.crag_fallback_enabled" size="small" />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">联网兜底阈值</span>
+                  <el-input-number
+                    v-model="advForm.crag_min_score"
+                    :min="0"
+                    :max="1"
+                    :step="0.01"
+                    :precision="2"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">单次识图张数上限</span>
+                  <el-input-number
+                    v-model="advForm.vision_max_images"
+                    :min="1"
+                    :max="10"
+                    size="small"
+                  />
+                </div>
+
+                <div class="generic-sub">上下文与记忆</div>
+                <div class="generic-row">
+                  <span class="generic-label">历史窗口条数上限</span>
+                  <el-input-number
+                    v-model="advForm.history_max_messages"
+                    :min="8"
+                    :max="500"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">历史 token 预算兜底</span>
+                  <el-input-number
+                    v-model="advForm.history_max_tokens"
+                    :min="1000"
+                    :max="200000"
+                    :step="500"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">记忆自动提取阈值（字符）</span>
+                  <el-input-number
+                    v-model="advForm.memory_auto_extract_min_chars"
+                    :min="50"
+                    :max="5000"
+                    :step="50"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">项目记忆注入上限（字符）</span>
+                  <el-input-number
+                    v-model="advForm.project_memory_max_chars"
+                    :min="500"
+                    :max="20000"
+                    :step="100"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">记忆整合阈值（条）</span>
+                  <el-input-number
+                    v-model="advForm.memory_consolidate_threshold"
+                    :min="2"
+                    :max="500"
+                    size="small"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">记忆整合间隔（小时）</span>
+                  <el-input-number
+                    v-model="advForm.memory_consolidate_interval_hours"
+                    :min="1"
+                    :max="720"
+                    size="small"
+                  />
+                </div>
+
+                <div class="generic-sub">检查点</div>
+                <div class="generic-row">
+                  <span class="generic-label">每会话保留快照数</span>
+                  <el-input-number
+                    v-model="advForm.checkpoint_keep_per_thread"
+                    :min="5"
+                    :max="200"
+                    size="small"
+                  />
+                </div>
+              </div>
+              <div class="settings-save-row">
+                <el-button
+                  type="primary"
+                  :loading="advSaving"
+                  @click="saveAdvancedSettings"
+                >
+                  保存高级参数
+                </el-button>
+              </div>
             </div>
           </div>
         </main>
@@ -1039,11 +1221,33 @@ const toolsForm = ref({
   permission_timeout: 300,
   skill_sandbox_enabled: false,
   reasoning_summary_enabled: false,
-  checkpoint_enabled: true,
   trajectory_compress_enabled: true,
   mcp_enabled: true,
 })
 const toolsSaving = ref(false)
+
+// 高级参数（Agent 预算 / 检索 / 上下文与记忆 / 检查点）——与后端 EDITABLE_KEYS 对应
+const advSaving = ref(false)
+const advForm = ref({
+  agent_max_iterations: 20,
+  agent_task_max_iterations: 50,
+  agent_max_failures: 3,
+  agent_task_max_failures: 6,
+  agent_max_dispatch_rounds: 3,
+  agent_llm_stall_timeout_s: 150,
+  task_mode_detect: true,
+  kb_chat_min_score: 0.2,
+  crag_fallback_enabled: true,
+  crag_min_score: 0.45,
+  vision_max_images: 6,
+  history_max_messages: 400,
+  history_max_tokens: 64000,
+  memory_auto_extract_min_chars: 400,
+  project_memory_max_chars: 2600,
+  memory_consolidate_threshold: 10,
+  memory_consolidate_interval_hours: 24,
+  checkpoint_keep_per_thread: 20,
+})
 
 // MCP 服务器管理
 const mcpServers = ref([])
@@ -1145,9 +1349,28 @@ async function loadSettings() {
       permission_timeout: editable.permission_timeout ?? 300,
       skill_sandbox_enabled: editable.skill_sandbox_enabled === true,
       reasoning_summary_enabled: editable.reasoning_summary_enabled !== false,
-      checkpoint_enabled: editable.checkpoint_enabled !== false,
       trajectory_compress_enabled: editable.trajectory_compress_enabled !== false,
       mcp_enabled: editable.mcp_enabled !== false,
+    }
+    advForm.value = {
+      agent_max_iterations: editable.agent_max_iterations ?? 20,
+      agent_task_max_iterations: editable.agent_task_max_iterations ?? 50,
+      agent_max_failures: editable.agent_max_failures ?? 3,
+      agent_task_max_failures: editable.agent_task_max_failures ?? 6,
+      agent_max_dispatch_rounds: editable.agent_max_dispatch_rounds ?? 3,
+      agent_llm_stall_timeout_s: editable.agent_llm_stall_timeout_s ?? 150,
+      task_mode_detect: editable.task_mode_detect !== false,
+      kb_chat_min_score: editable.kb_chat_min_score ?? 0.2,
+      crag_fallback_enabled: editable.crag_fallback_enabled !== false,
+      crag_min_score: editable.crag_min_score ?? 0.45,
+      vision_max_images: editable.vision_max_images ?? 6,
+      history_max_messages: editable.history_max_messages ?? 400,
+      history_max_tokens: editable.history_max_tokens ?? 64000,
+      memory_auto_extract_min_chars: editable.memory_auto_extract_min_chars ?? 400,
+      project_memory_max_chars: editable.project_memory_max_chars ?? 2600,
+      memory_consolidate_threshold: editable.memory_consolidate_threshold ?? 10,
+      memory_consolidate_interval_hours: editable.memory_consolidate_interval_hours ?? 24,
+      checkpoint_keep_per_thread: editable.checkpoint_keep_per_thread ?? 20,
     }
   } catch (error) {
     ElMessage.error(error.response?.data?.detail || '加载设置失败')
@@ -1317,6 +1540,20 @@ async function loadMcp() {
   }
 }
 
+/** 保存高级参数：整体提交，后端按区间夹取后即时生效 */
+async function saveAdvancedSettings() {
+  advSaving.value = true
+  try {
+    await saveSettings({ ...advForm.value })
+    await loadSettings()
+    ElMessage.success('高级参数已保存并生效')
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '保存失败')
+  } finally {
+    advSaving.value = false
+  }
+}
+
 async function saveToolsSettings() {
   toolsSaving.value = true
   try {
@@ -1339,7 +1576,6 @@ async function saveToolsSettings() {
       permission_timeout: f.permission_timeout,
       skill_sandbox_enabled: f.skill_sandbox_enabled,
       reasoning_summary_enabled: f.reasoning_summary_enabled,
-      checkpoint_enabled: f.checkpoint_enabled,
       trajectory_compress_enabled: f.trajectory_compress_enabled,
       mcp_enabled: f.mcp_enabled,
     })
@@ -2272,6 +2508,15 @@ onMounted(() => {
 
 .generic-row:last-child {
   border-bottom: none;
+}
+
+.generic-sub {
+  margin: 12px 0 2px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2, #666);
 }
 
 .generic-label {

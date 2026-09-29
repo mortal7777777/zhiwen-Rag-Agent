@@ -386,6 +386,18 @@ export const rewindConversation = (conversationId, messageId) =>
     .post(`/conversations/${conversationId}/rewind`, { message_id: messageId })
     .then((res) => res.data)
 
+/** 会话快照时间线（原生检查点，最近 50 条） */
+export const getConversationTimeline = (conversationId) =>
+  client.get(`/conversations/${conversationId}/timeline`).then((res) => res.data)
+
+/** 回滚会话消息与任务清单到某个快照（下一次提问从该状态继续） */
+export const rollbackConversation = (conversationId, checkpointId) =>
+  client
+    .post(
+      `/conversations/${conversationId}/timeline/${encodeURIComponent(checkpointId)}/rollback`,
+    )
+    .then((res) => res.data)
+
 /** TodoWrite 任务清单：读取/保存某会话的任务 */
 export const getTodos = (conversationId) =>
   client.get(`/todos/${conversationId}`).then((res) => res.data)

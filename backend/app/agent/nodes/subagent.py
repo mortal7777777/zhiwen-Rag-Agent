@@ -193,8 +193,8 @@ def _subagent_tools(
         make_knowledge_base_tool(
             service.rag,
             counter,
-            settings.crag_fallback_enabled,
-            settings.crag_min_score,
+            bool(effective(settings, "crag_fallback_enabled")),
+            float(effective(settings, "crag_min_score") or 0.45),
             effective(settings, "web_search_provider"),
             settings.tavily_api_key,
             effective(settings, "web_search_max_results"),

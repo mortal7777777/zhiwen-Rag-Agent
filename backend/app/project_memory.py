@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 
 from .db import repository as repo
+from .runtime_config import effective
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,7 @@ def load_project_memory(
         if text:
             # 文件是完整文档，注入的是节选：按行边界截断并标注（硬切会切断
             # 条目，也让模型以为内容到此为止），控制在 project_memory_max_chars
-            limit = int(getattr(settings, "project_memory_max_chars", 0) or 0) or 4000
+            limit = int(effective(settings, "project_memory_max_chars") or 0) or 4000
             if len(text) > limit:
                 cut = text.rfind("\n", 0, limit)
                 text = text[: cut if cut > 0 else limit].rstrip()

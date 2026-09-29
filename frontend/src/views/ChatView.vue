@@ -94,6 +94,16 @@ wo<template>
           <el-icon><Histogram /></el-icon>
           上下文
         </el-button>
+        <el-button
+          text
+          type="primary"
+          class="memory-btn"
+          :disabled="!activeId"
+          @click="openTimeline"
+        >
+          <el-icon><Clock /></el-icon>
+          快照
+        </el-button>
       </header>
 
       <div
@@ -872,6 +882,32 @@ wo<template>
       </template>
     </el-dialog>
 
+    <!-- 会话快照时间线（原生检查点）：可回滚消息与任务清单到任意最近快照 -->
+    <el-drawer v-model="timelineVisible" title="会话快照" size="440px">
+      <div v-if="timelineLoading" class="timeline-hint">加载中…</div>
+      <div v-else-if="!timelineItems.length" class="timeline-hint">
+        暂无快照（每轮收尾后按「高级参数 → 每会话保留快照数」裁剪保留最近若干条）
+      </div>
+      <div v-else class="timeline-list">
+        <div v-for="(cp, i) in timelineItems" :key="cp.checkpoint_id" class="timeline-item">
+          <div class="timeline-head">
+            <span class="timeline-time">{{ formatCheckpointTime(cp.created_at) }}</span>
+            <el-tag v-if="i === 0" size="small" type="success">最新</el-tag>
+            <el-button size="small" text type="primary" @click="rollbackTo(cp)">
+              回滚到此
+            </el-button>
+          </div>
+          <div class="timeline-meta">
+            消息 {{ cp.messages }} · 计划 {{ (cp.plan || []).length }} 步（完成
+            {{ cp.plan_done_count || 0 }}） · 来源 {{ cp.sources_count || 0 }}
+          </div>
+          <div v-if="cp.plan && cp.plan.length" class="timeline-plan">
+            {{ cp.plan.slice(0, 3).join('；') }}{{ cp.plan.length > 3 ? ' …' : '' }}
+          </div>
+        </div>
+      </div>
+    </el-drawer>
+
     <!-- 引用「查看原文」文档查看器 -->
     <DocumentViewer ref="docViewerRef" />
   </div>
@@ -883,6 +919,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowDown,
   CircleCheck,
+  Clock,
   Close,
   Collection,
   CopyDocument,
@@ -925,6 +962,7 @@ import {
   deleteTemplate,
   getAgentContext,
   getConversationMessages,
+  getConversationTimeline,
   getPendingApproval,
   getSuggestions,
   getTodos,
@@ -935,6 +973,7 @@ import {
   renameConversation,
   resumeAgentChat,
   rewindConversation,
+  rollbackConversation,
   streamAgentChat,
   updateMemory,
   updateTemplate,
@@ -1582,6 +1621,69 @@ async function openContextDialog() {
 function onContextClose() {
   // 关闭时作废进行中的请求：15s 超时回调不会再触碰对话框状态
   contextReqId++
+}
+
+// ---------------- 会话快照时间线（原生检查点，时间旅行） ----------------
+
+const timelineVisible = ref(false)
+const timelineLoading = ref(false)
+const timelineItems = ref([])
+
+async function openTimeline() {
+  if (!activeId.value) return
+  timelineVisible.value = true
+  timelineLoading.value = true
+  try {
+    const res = await getConversationTimeline(activeId.value)
+    timelineItems.value = res.items || []
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '读取快照失败')
+    timelineItems.value = []
+  } finally {
+    timelineLoading.value = false
+  }
+}
+
+function formatCheckpointTime(ts) {
+  if (!ts) return '—'
+  try {
+    return new Date(ts).toLocaleString('zh-CN', { hour12: false })
+  } catch {
+    return String(ts)
+  }
+}
+
+async function rollbackTo(cp) {
+  if (!activeId.value || loading.value) return
+  try {
+    await ElMessageBox.confirm(
+      `回滚把消息历史与任务清单恢复到该快照（${formatCheckpointTime(cp.created_at)}，` +
+        `消息 ${cp.messages} 条）；比它新的消息会从会话里删除，仍可从更新的快照回滚回来。确定继续？`,
+      '回滚到快照',
+      { type: 'warning', confirmButtonText: '回滚', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const res = await rollbackConversation(activeId.value, cp.checkpoint_id)
+    const history = await getConversationMessages(activeId.value)
+    messages.value = history.map(mapHistoryMessage)
+    try {
+      const todoRes = await getTodos(activeId.value)
+      const lastAssistant = [...messages.value]
+        .reverse()
+        .find((m) => m.role === 'assistant')
+      if (lastAssistant && todoRes.todos?.length) lastAssistant.todos = todoRes.todos
+    } catch {
+      // 任务清单刷新失败不影响回滚结果
+    }
+    timelineVisible.value = false
+    ElMessage.success(`已回滚（恢复 ${res.restored_messages} 条消息）`)
+    scrollToBottom(true)
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '回滚失败')
+  }
 }
 
 async function handleCompact() {
@@ -3309,6 +3411,50 @@ onBeforeUnmount(() => {
 .interrupted-bar {
   border-color: #e6a23c;
   color: #b88230;
+}
+
+/* 会话快照时间线（抽屉） */
+.timeline-hint {
+  color: var(--text-2, #666);
+  font-size: 13px;
+  padding: 8px 2px;
+}
+
+.timeline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.timeline-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.timeline-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.timeline-time {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.timeline-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-2, #666);
+}
+
+.timeline-plan {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-2, #666);
+  line-height: 1.5;
 }
 
 .suspension-actions {
