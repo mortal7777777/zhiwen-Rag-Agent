@@ -18,7 +18,7 @@ from ..context import trim_history_for_budget
 from ..prompts import compose_system_prompt
 
 logger = logging.getLogger(__name__)
-from ..state import AgentState, EventBus
+from ..state import RESULTS_RESET, AgentState, EventBus
 from .common import _plan_hint, _is_project_task
 from ..utils import (
     _rows_to_history,
@@ -35,15 +35,20 @@ if TYPE_CHECKING:
 from ..tools import build_tools
 
 # ==== 函数体（原文）====
-def _prepare_node(state: AgentState) -> dict:
-    """会话/历史/规划/记忆/视觉/工具组装，输出分层消息。"""
-    service: LangGraphAgentService = state["service"]
-    bus: EventBus = state["bus"]
-    db: Session | None = state["db"]
+def _prepare_node(state: AgentState, runtime) -> dict:
+    """会话/历史/规划/记忆/视觉/工具组装，输出分层消息。
+
+    第二参数必须是 LangGraph 注入的 Runtime（按参数名注入），请求级依赖从
+    `runtime.context`（Deps）取；状态里的遥测字典用 `rt` 指代。
+    """
+    deps = runtime.context
+    service: LangGraphAgentService = deps.service
+    bus: EventBus = deps.bus
+    db: Session | None = deps.db
     settings: Settings = service.settings
     rag: RAGService = service.rag
-    runtime: dict = state["runtime"]
-    stop_event = state.get("stop_event")
+    rt: dict = state["runtime"]
+    stop_event = deps.stop_event
 
     question = state["question"]
     images = state["images"] or []
@@ -104,7 +109,7 @@ def _prepare_node(state: AgentState) -> dict:
             logger.warning("读写会话失败，降级为无记忆模式：%s", exc)
             conv_id = conversation_id
             history_messages = []
-    runtime["conv_id"] = conv_id
+    rt["conv_id"] = conv_id
 
     # ---- checkpoint 恢复：上次任务中断时从快照继续 ----
     restored: dict | None = None
@@ -150,8 +155,9 @@ def _prepare_node(state: AgentState) -> dict:
 
         title_thread = threading.Thread(target=_generate_title_async, daemon=True)
         title_thread.start()
-    state["title_holder"] = title_holder
-    state["title_thread"] = title_thread
+    # 标题伴侣（结果盒 + 线程）是请求级活对象：挂到 Deps，finalize 从 context 读
+    deps.title_holder = title_holder
+    deps.title_thread = title_thread
 
     # ---- 计划来源：仅剩「用户确认过的计划」与「恢复的快照」 ----
     # 2026-09-25 删除 planner：它只看单条问题、不知道对话与磁盘现状，却决定了
@@ -414,7 +420,7 @@ def _prepare_node(state: AgentState) -> dict:
         # 派发状态不随快照恢复：本轮重新计数，避免恢复后立刻撞派发上限
         state["dispatch_rounds"] = 0
         state["pending_subtasks"] = []
-        runtime["final_text"] = restored.get("final_text") or ""
+        rt["final_text"] = restored.get("final_text") or ""
     else:
         # 纯追加链（DeepSeek 自动前缀缓存无显式断点，只能靠前缀字节稳定）：
         #   1. 静态核心（模板+工具规则）：跨轮字节级稳定，是缓存命中区
@@ -496,7 +502,7 @@ def _prepare_node(state: AgentState) -> dict:
     tools.extend(
         service.extra_tools(
             project_dir=state.get("project_dir"),
-            sandbox=runtime.get("command_sandbox"),
+            sandbox=rt.get("command_sandbox"),
         )
     )
     # 用户自写工具（动态目录）：agent 按 tool-authoring 技能规范生成的工具，
@@ -539,7 +545,7 @@ def _prepare_node(state: AgentState) -> dict:
     # bind_tools 的工具定义是缓存前缀的一部分，会话内变化会断缓存。
     # 记录到 run 的 token_usage.tools_hash，并与上一 run 对比告警。
     tools_hash = _tools_prefix_hash(tools)
-    runtime["tools_hash"] = tools_hash
+    rt["tools_hash"] = tools_hash
     if db is not None and conv_id is not None:
         try:
             prev_runs = repo.list_agent_runs(db, limit=1, conversation_id=conv_id)
@@ -567,8 +573,8 @@ def _prepare_node(state: AgentState) -> dict:
     # 比对，首个分歧位置就是 provider 前缀命中的断点，写日志与 trace，
     # 用于定位"哪里断了"（工具轮消息重建、静态段渲染、D 块位置等）。
     chain_hashes = _chain_fingerprints(messages)
-    runtime["chain_len"] = len(messages)
-    runtime["chain_hashes"] = chain_hashes
+    rt["chain_len"] = len(messages)
+    rt["chain_hashes"] = chain_hashes
     if db is not None and conv_id is not None and restored is None:
         divergence = None
         try:
@@ -601,14 +607,13 @@ def _prepare_node(state: AgentState) -> dict:
                     )
         except Exception as exc:
             logger.debug("消息链指纹比对失败：%s", exc)
-        runtime["chain_divergence"] = divergence
+        rt["chain_divergence"] = divergence
 
     state["messages"] = messages
-    state["tools"] = tools
+    deps.tools = tools  # 活对象走 Deps，不进检查点
     state["persist_start"] = persist_start
     return {
         "messages": messages,
-        "tools": tools,
         "persist_start": persist_start,
         "plan_steps": plan_steps,
         "plan_map": plan_map,
@@ -617,8 +622,6 @@ def _prepare_node(state: AgentState) -> dict:
         "memory_summary": memory_summary,
         "vision_descriptions": vision_descriptions,
         "summary_text": summary_text,
-        "title_holder": title_holder,
-        "title_thread": title_thread,
         "todos": todos,
         "plan_done_count": plan_done_count,
         # 每轮重置进度行去重标记：保证本轮至少注入一条计划进度
@@ -632,6 +635,9 @@ def _prepare_node(state: AgentState) -> dict:
         # 每轮重置派发状态：上一轮的声明/轮数绝不能跨轮残留在 checkpointer 里
         "pending_subtasks": [],
         "dispatch_rounds": 0,
+        # 清空子代理结果通道：它是 reducer 通道，传入空列表清不掉（会被 add），
+        # 必须显式走一次 reset 归约（旧实现靠跨轮游标兜底，见 state.py）
+        "subagent_results": [RESULTS_RESET],
         "sources": state["sources"],
         "tool_trace": state["tool_trace"],
         "tool_calls_used": state["tool_calls_used"],

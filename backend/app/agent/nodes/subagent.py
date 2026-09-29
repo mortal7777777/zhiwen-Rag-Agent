@@ -18,7 +18,6 @@ from ...runtime_config import effective
 logger = logging.getLogger(__name__)
 from ..state import AgentState, EventBus
 from ..utils import _run_verify
-from .common import _plan_hint
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from typing import TYPE_CHECKING
@@ -164,20 +163,6 @@ def _renumber_subagent_sources(results: list[dict], counter: list[int]) -> list[
             item["index"] = counter[0]
             merged.append(item)
     return merged
-
-
-def _remaining_needs_tools(remaining: list[dict]) -> bool:
-    """剩余计划步骤里是否还有需要工具的步骤（用于计划硬约束判断）。"""
-    return any(
-        (
-            item.get("tool_hint")
-            if isinstance(item, dict) and "tool_hint" in item
-            else _plan_hint(
-                str(item.get("text") or item.get("step") or item)
-            ).get("tool_hint")
-        )
-        for item in remaining or []
-    )
 
 
 def _subagent_tools(
@@ -335,17 +320,19 @@ def _truncate_summary(text: str, limit: int = 1200) -> str:
     return out.strip()[:limit]
 
 
-def _dispatch_node(state: AgentState) -> dict:
+def _dispatch_node(state: AgentState, runtime) -> dict:
     """受理声明：把子任务落进任务清单（硬约束的种子），并升格任务态预算。
 
     真正的 Send 扇出由条件边函数 _dispatch_tasks 发出；这里只做落库与状态同步。
+    第二参数是 LangGraph 按名注入的 Runtime（请求级依赖取 `runtime.context`）。
     """
     from ...todos import append_plan_todos, plan_progress
 
+    deps = runtime.context
     subtasks = state.get("pending_subtasks") or []
-    bus: EventBus | None = state.get("bus")
-    db: Session | None = state.get("db")
-    runtime: dict = state.get("runtime") or {}
+    bus: EventBus | None = deps.bus
+    db: Session | None = deps.db
+    rt: dict = state.get("runtime") or {}
     steps: list[str] = []
     for task in subtasks:
         label = _todo_label(task.get("task"))
@@ -355,9 +342,9 @@ def _dispatch_node(state: AgentState) -> dict:
     # 声明就是本轮的工作清单：追加进 todos，硬约束据此生效
     # （无 todos 时 agent.py 的计划硬约束恒不触发，声明轮之后就成了"无约束"）
     todos = state.get("todos") or []
-    if db is not None and runtime.get("conv_id") and steps:
+    if db is not None and rt.get("conv_id") and steps:
         try:
-            todos = append_plan_todos(db, runtime["conv_id"], steps) or todos
+            todos = append_plan_todos(db, rt["conv_id"], steps) or todos
         except Exception as exc:
             logger.warning("子任务落清单失败：%s", exc)
     done, total, remaining = plan_progress(todos)
@@ -400,26 +387,19 @@ def _dispatch_tasks(state: AgentState):
     if not subtasks:
         # 声明为空（异常路径）：直接进 merge 回一条提示，避免"空扇出"让图
         # 静默结束（那样连 finalize 都不会跑，回答与落库全丢）。
-        # Send 的 payload 就是该节点看到的 state，所以这里显式带齐 merge 要用的键。
+        # Send 的 payload 就是该节点看到的 state，所以这里显式带齐 merge 要用的键
+        # ——「merge 必读键 ⊆ 本载荷」由 test_subagent_merge.py 的契约测试守住。
         logger.warning("派发声明为空，跳过扇出直接合并")
         return [
             Send(
                 "merge",
                 {
-                    "service": state["service"],
-                    "bus": state["bus"],
                     "runtime": state["runtime"],
-                    "db": state["db"],
                     "question": state.get("question"),
-                    "stop_event": state.get("stop_event"),
                     "messages": state.get("messages") or [],
                     "sources": state.get("sources") or [],
                     "counter": state.get("counter") or [0],
                     "tool_trace": state.get("tool_trace") or [],
-                    "subagent_results": state.get("subagent_results") or [],
-                    "subagent_consumed": int(
-                        state.get("subagent_consumed") or 0
-                    ),
                     "dispatch_rounds": int(state.get("dispatch_rounds") or 0),
                     "todos": state.get("todos") or [],
                     "plan_done_count": int(state.get("plan_done_count") or 0),
@@ -431,12 +411,8 @@ def _dispatch_tasks(state: AgentState):
             "subagent",
             {
                 "sub_task": task,
-                "service": state["service"],
                 "question": state["question"],
-                "bus": state["bus"],
                 "runtime": state["runtime"],
-                "db": state["db"],
-                "stop_event": state.get("stop_event"),
                 "project_dir": state.get("project_dir"),
             },
         )
@@ -452,7 +428,7 @@ def _run_sensitive_subagent_tool(
     invoke_fn,
     tool,
     bus,
-    runtime: dict,
+    rt: dict,
     stop_event,
 ) -> dict:
     """子代理执行敏感工具：白名单自动放行，否则走与主 Agent 一致的 HITL。"""
@@ -465,7 +441,7 @@ def _run_sensitive_subagent_tool(
         name in ("bash", "command_tool")
         and (
             command_allowed(settings, command)[0]
-            or permission_manager.is_session_allowed(runtime.get("conv_id"), command)
+            or permission_manager.is_session_allowed(rt.get("conv_id"), command)
         )
     )
     mode = effective(settings, "tool_permission_mode") or "ask"
@@ -477,7 +453,7 @@ def _run_sensitive_subagent_tool(
         tool=name,
         arguments=display_args(name, args),
         summary=summary,
-        conversation_id=runtime.get("conv_id"),
+        conversation_id=rt.get("conv_id"),
     )
     if bus is not None:
         bus.emit(
@@ -505,7 +481,7 @@ def _run_sensitive_subagent_tool(
                 {"id": req.id, "approved": True, "reason": ""},
             )
         if req.remember_session and command:
-            permission_manager.mark_session_allowed(runtime.get("conv_id"), command)
+            permission_manager.mark_session_allowed(rt.get("conv_id"), command)
         result = invoke_fn(tool, args)
         if req.remember_forever and command:
             result["summary"] = (
@@ -570,9 +546,9 @@ def _collect_evidence(
             files_read.append(target[:200])
 
 
-def _subagent_node(state: AgentState) -> dict:
+def _subagent_node(state: AgentState, runtime) -> dict:
     """一个子代理分支：独立 messages + 受限工具，敏感操作走 HITL，
-    返回结论摘要 + 产物证据。"""
+    返回结论摘要 + 产物证据。第二参数是 LangGraph 按名注入的 Runtime。"""
     from ...permissions import (
         describe_tool_call,
         display_args,
@@ -580,13 +556,13 @@ def _subagent_node(state: AgentState) -> dict:
         is_sensitive_tool,
     )
     from ...tools_extra import command_allowed
-    from ...hooks import run_hooks
     from ..tools import extract_sources
 
-    service: LangGraphAgentService = state["service"]
+    deps = runtime.context
+    service: LangGraphAgentService = deps.service
     settings = service.settings
-    bus: EventBus | None = state.get("bus")
-    runtime: dict = state.get("runtime") or {}
+    bus: EventBus | None = deps.bus
+    rt: dict = state.get("runtime") or {}
     question = state.get("question") or ""
     task = state.get("sub_task") or {}
     step = str(task.get("task") or task.get("step") or "")
@@ -595,7 +571,7 @@ def _subagent_node(state: AgentState) -> dict:
     counter: list[int] = [0]
     tools = _subagent_tools(
         service, mode, counter, state.get("project_dir"),
-        sandbox=runtime.get("command_sandbox"),
+        sandbox=rt.get("command_sandbox"),
     )
 
     pack = _build_context_pack(service, state, mode)
@@ -621,7 +597,7 @@ def _subagent_node(state: AgentState) -> dict:
     commands: list[dict] = []
     files_read: list[str] = []
     verify_results: list[dict] = []
-    stop_event = state.get("stop_event")
+    stop_event = deps.stop_event
     permission_manager = get_permission_manager()
     if mode == MODE_EXECUTE:
         # 执行类至少要 写→验→修 三轮，2 轮根本做不完（旧配置一刀切 2 轮）
@@ -761,28 +737,29 @@ def _subagent_node(state: AgentState) -> dict:
     }
 
 
-def _merge_node(state: AgentState) -> dict:
+def _merge_node(state: AgentState, runtime) -> dict:
     """fan-in：把各子代理结果按 **tool_call 一一对应**回填成 ToolMessage。
 
     与旧实现（system 消息断言"（已完成）"）的关键差别：结果以**工具返回值**
     进入主 agent 上下文，它天然可以怀疑、重派、自己重做——从结构上拆掉了
-    "低质结果被当成既成事实"的放大机制。
+    "低质结果被当成既成事实"的放大机制。第二参数是 LangGraph 注入的 Runtime。
     """
     from ...todos import complete_steps_by_text, load_todos, plan_progress
 
-    bus: EventBus = state["bus"]
-    db: Session | None = state["db"]
-    runtime: dict = state["runtime"]
+    deps = runtime.context
+    bus: EventBus = deps.bus
+    db: Session | None = deps.db
+    rt: dict = state["runtime"]
     messages = state["messages"]
     results = state.get("subagent_results") or []
     counter = state["counter"]
 
-    # subagent_results 的归约器是 operator.add，且 state 经 checkpointer 按
-    # conversation 跨轮持久化，列表只增不减。全量遍历会把此前每一轮的子代理
-    # 结论重新拼进本轮摘要（实测 4 轮后单行累积到 10 个块 / 3,870 字符，
-    # 整份都是缓存 miss 且此后常驻历史）。只消费本轮新增的部分。
-    consumed = int(state.get("subagent_consumed") or 0)
+    # 只消费本轮新增的部分：同一次派发分多轮时，前面的结果已在上一轮 merge 过。
+    # 游标放 runtime（每轮新建的字典，不随 checkpointer 跨轮走）——通道本身
+    # 已由 prepare 的 reset 归约保证每轮清空，跨轮残留问题从源头消除。
+    consumed = int(rt.get("subagent_merged") or 0)
     fresh = results[consumed:] if 0 <= consumed <= len(results) else list(results)
+    rt["subagent_merged"] = len(results)
 
     merged_sources: list[dict] = []
     by_call: dict[str, list[dict]] = {}
@@ -857,17 +834,17 @@ def _merge_node(state: AgentState) -> dict:
 
     # 任务清单：把已完成子任务勾掉（声明时已 append 成 plan 项）
     todos = state.get("todos") or []
-    if db is not None and runtime.get("conv_id") and fresh:
+    if db is not None and rt.get("conv_id") and fresh:
         try:
             texts = [
                 _todo_label(r.get("task")) for r in fresh if r.get("task")
             ]
             if texts:
-                updated = complete_steps_by_text(db, runtime["conv_id"], texts)
+                updated = complete_steps_by_text(db, rt["conv_id"], texts)
                 if updated:
                     todos = updated
             else:
-                todos = load_todos(db, runtime["conv_id"]) or todos
+                todos = load_todos(db, rt["conv_id"]) or todos
             state["todos"] = todos
             done, total, remaining = plan_progress(todos)
             state["plan_done_count"] = done
@@ -897,7 +874,6 @@ def _merge_node(state: AgentState) -> dict:
         # 声明已消费：清空后若模型再声明，条件边会再派一轮（多轮派发）
         "pending_subtasks": [],
         "dispatch_rounds": next_round,
-        "subagent_consumed": len(results),
         "subagent_round_count": next_round,
     }
 

@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessageChunk
 from app.agent.nodes.agent import _agent_node, _should_retry_empty
 from app.agent.nodes.finalize import _finalize_node
 from app.agent.state import EventBus
+from _node_rt import runtime_from_state  # noqa: E402
 
 
 # ---------------- 判定纯函数 ----------------
@@ -130,7 +131,7 @@ def test_empty_answer_triggers_retry_and_switches_model():
     plain = _FakeChat(text="这是正文", out_tokens=20)
     state = _state(_service(chat, plain), bus)
 
-    result = _agent_node(state)
+    result = _agent_node(state, runtime_from_state(state))
 
     assert result["empty_retry_count"] == 1
     assert result["empty_retry_pending"] is True
@@ -153,7 +154,7 @@ def test_retry_round_uses_no_thinking_model():
         empty_retry_count=1,
     )
 
-    _agent_node(state)
+    _agent_node(state, runtime_from_state(state))
 
     assert plain.used is True
     assert chat.used is False
@@ -188,7 +189,7 @@ def test_finalize_empty_answer_marks_error():
         "todos": [],
     }
 
-    _finalize_node(state)
+    _finalize_node(state, runtime_from_state(state))
 
     assert state["runtime"]["status"] == "error"
     events = []

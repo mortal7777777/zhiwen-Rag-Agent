@@ -1,4 +1,4 @@
-"""编排层纯逻辑单测：子代理拆分 / 来源重编号 / 计划硬约束判断。"""
+"""编排层纯逻辑单测：子代理拆分 / 来源重编号 / 预算判定 / 写后验证。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from app.agent.nodes.common import (
 from app.agent.nodes.subagent import (
     DISPATCH_TOOL_NAME,
     _parse_declared_subtasks,
-    _remaining_needs_tools,
     _renumber_subagent_sources,
     _run_sensitive_subagent_tool,
     _split_declaration,
@@ -156,14 +155,19 @@ def test_renumber_subagent_sources():
     assert counter[0] == 8
 
 
-def test_remaining_needs_tools():
-    assert _remaining_needs_tools(
-        [{"text": "检索知识库", "tool_hint": "knowledge_base_search"}]
+def test_plan_hard_constraint_triggers_on_any_unfinished_step():
+    """硬约束只看"有无未完成步骤"这个事实，不再按关键词 hint 过滤。
+
+    旧实现要求剩余步骤里有关键词 hint 才推模型继续：hint 判错（如纯推理步骤
+    被误判为工具型）会让约束行为偏离预期。现在触发条件与措辞都只看清单事实，
+    真正的判定在 agent 节点（见 test_dispatch_declaration / test_plan_mode 的
+    节点级用例），这里锁定的是"过滤条件已移除"这一契约。
+    """
+    from app.agent.nodes import agent as agent_node_module
+
+    assert not hasattr(agent_node_module, "_remaining_needs_tools"), (
+        "关键词过滤已移除：硬约束不该再依赖 hint"
     )
-    assert _remaining_needs_tools(
-        [{"step": "运行脚本", "tool_hint": "file_tool/bash"}]
-    )
-    assert not _remaining_needs_tools([{"text": "整理总结"}])
 
 
 class _SubagentSettings:

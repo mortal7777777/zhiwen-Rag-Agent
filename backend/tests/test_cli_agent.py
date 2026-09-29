@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import sys
 
 import cli_agent as c
@@ -120,6 +121,42 @@ def test_markdown_stream_wrap_respects_width():
     out = m.feed("这是一段非常非常长的文本需要被换行显示\n")
     for line in out.splitlines():
         assert c.strwidth(line) <= 20
+
+
+# ------------------------------------------------------------------ 增量流式撤回
+
+
+def test_visible_rows_counts_wrap_cjk_and_ansi():
+    assert c.visible_rows("abc", 80) == 1
+    assert c.visible_rows("abc\n", 80) == 2  # 结尾换行：光标停在下一行
+    assert c.visible_rows("中文" * 30, 20) == 6  # 60 全角字 = 120 列 → 6 行
+    assert c.visible_rows(c.paint("x" * 100, "red"), 40) == 3  # ANSI 不计宽
+    assert c.visible_rows("a\n\nb", 80) == 3  # 空行也占一行
+
+
+def test_markdown_stream_reset_discards_partial():
+    m = c.MarkdownStream(80)
+    assert m.feed("半截过渡文本") == ""
+    assert m.has_partial()
+    m.reset()
+    assert not m.has_partial()
+    assert m.partial() == ""  # 撤回后残留片段不会再被打印
+    assert m.flush() == ""
+
+
+def test_screen_erase_block_moves_up_and_clears(monkeypatch):
+    buf = io.StringIO()
+    monkeypatch.setattr(c.sys, "stdout", buf)
+    screen = c.Screen()
+    screen.on_line = True
+    screen.erase_block(3)
+    assert buf.getvalue() == "\033[2A\r\033[J"
+    assert screen.on_line is False
+
+    buf.seek(0)
+    buf.truncate()
+    screen.erase_block(1)  # 单行块：只清当前行
+    assert buf.getvalue() == "\r\033[J"
 
 
 # ------------------------------------------------------------------ 补全与工具参数

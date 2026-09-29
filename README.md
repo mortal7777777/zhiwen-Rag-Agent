@@ -4,7 +4,7 @@
 > 源码包（zip / tar.gz）可从 Releases 页面下载，不含数据、模型与私有文档。
 
 前后端分离的个人知识库 + 智能助手：基于 **LangChain 框架**，Agent 编排层使用
-**LangGraph 状态图**（6 节点 + 条件路由）实现按需工具调用，支持个人知识库问答、
+**LangGraph 状态图**（7 节点 + 条件路由）实现按需工具调用，支持个人知识库问答、
 联网搜索、视觉识别、本机 Skills 复用、三层对话记忆（MySQL）、预设提示词模板、
 多供应商模型管理与可视化设置。
 <img width="2520" height="1174" alt="image" src="https://github.com/user-attachments/assets/ec283eff-59a9-4bf9-b9da-ef8d7e451709" />
@@ -36,20 +36,22 @@
   未经核实由主 Agent 自行判断采信或重派；每轮最多 4 个子任务、execute 只放开一个；
 - **知识库写入**：新增 `add_document` 工具（txt/md/csv/json），
   保存文档并增量建索引；属敏感操作，经人工确认后才执行；
-- **TodoWrite 任务清单（计划硬约束）**：规划后自动播种任务清单（MySQL 持久化、跨轮跟踪），
+- **TodoWrite 任务清单（计划硬约束）**：由主 Agent 声明的子任务或用户确认的计划自动播种（MySQL 持久化、跨轮跟踪），
   Agent 可经 `todo_update` 增删改查（list/add/complete/remove/set，set 支持整体修订），
   前端计划卡片渲染为可勾选清单，切换会话后自动恢复；
-- **每轮自动同步**：工具执行后按计划进度自动勾选已完成的工具型步骤（`todo_update`
-  本身不推进计划），模型也可主动 complete/add/remove/set 维护；纯推理/总结步骤
-  在收尾时自动补完成，未完成的工具型步骤保留未勾选状态（审计留痕）；
-- **计划硬约束**：存在未完成的工具型步骤时，模型不允许提前输出最终回答，
-  图路由会把任务推回 agent 继续执行（最多提示 3 次，超限或达调用上限才强制收尾）；
+- **进度以显式勾选为准**：模型经 `todo_update` complete/add/remove/set 维护清单并推进
+  进度（提示词要求"每完成一步立即标记"）；子任务声明完成时按文本补勾，纯推理/总结
+  步骤在收尾时补完成，未完成的工具型步骤保留未勾选状态（审计留痕）。不再按"1 次
+  工具调用 = 1 个步骤"自动推进——那会把同一轮的多次检索算成多步、勾过头；
+- **计划硬约束**：存在未完成步骤时（清单来自用户确认的计划或模型自己的派发声明），
+  模型不允许提前输出最终回答，图路由会把任务推回 agent 继续执行（推送语会说明如何用
+  `todo_update` complete/remove 收尾；最多提示 3 次，超限或达调用上限才强制收尾）；
 - **可审计**：运行 trace（JSONL）记录每次运行的 todos 快照与 `plan_done_count`；
-- **计划-工具映射**：复杂问题先规划，每步解析建议工具，工具调用后回填"已完成 x/y 步、当前步骤、剩余步骤"；
-- 工具调用上限（默认 12 次，task_mode 30），剩余最后一次时提示"补充检索后必须作答"，超限强制收尾；
+- **计划进度回填**：声明/确认的计划落成任务清单后，每轮工具执行完毕自动回填"已完成 x/y 步、当前步骤、剩余步骤"，并作为硬约束依据；
+- 工具调用上限（默认 20 次，task_mode 50），剩余最后一次时提示"补充检索后必须作答"，超限强制收尾；
 - 空参数工具调用兜底（返回"参数缺失"，不浪费调用）；`recursion_limit` 超限时自动兜底收尾；
 - **停止生成**：客户端断开后后端感知并置停止信号，只保存问题、不落半截回答；
-- **打字机流式**：后端逐 token SSE，前端 24ms 节流 + 积压自适应加速，观感连续不拖沓；
+- **打字机流式**：后端按窗口（~60ms / 120 字）推送正文增量 `stream_delta`，前端 24ms 节流 + 积压自适应加速，首字随生成出现；工具轮的过渡思考文本整轮 `stream_end{keep:false}` 撤回，正文轮 `keep:true`（全文 `token` 仍发，供 CLI/评测消费，前端跳过避免重复）；
 - **SSE 心跳**：工具长执行（10~20s）时发送 `: keepalive` 注释行保活；
 - **标题后置**：新会话首 token 不被标题阻塞，后台生成后经 `title` 事件更新；
 - **引用溯源**：知识库/联网结果带全局 index，回答用 `[n]` 标注，前端可点击高亮来源卡片；
@@ -84,10 +86,9 @@
   这修复了"一次路径错误耗尽 6 次预算导致任务半途而废"的问题；
 - **路径容错**：绝对路径落在工作目录内自动接受；落在外部返回可操作错误
   （告知工作目录根 + 改用相对路径 + 修改工作目录的建议）；
-- **自动分步规划**：是否需要规划由 Agent 自己判断（多步/涉及文件或检索的复杂任务
-  自动拆解），规划结果直接列给用户；执行时每完成一步前端自动打对钩
-  （任务清单与计划进度联动），Agent 每完成一个小阶段会先汇报进度再继续，
-  全部完成后再给最终总结。
+- **自动分步拆解**：要不要拆、怎么拆由主 Agent 自己判断（复杂任务声明子任务或进入计划
+  模式），拆解结果落成任务清单并实时展示；执行时每完成一步前端自动打对钩
+  （任务清单与计划进度联动），每完成一个小阶段先汇报进度再继续，全部完成后再给最终总结。
 - **计划模式（模型自主 + 用户可关）**：涉及写文件/命令、影响面大的任务，
   模型可自行 `enter_plan_mode` 只读探索，再用 `exit_plan_mode` 提交结构化步骤；
   前端渲染成**可编辑的确认卡**，确认（或改完步骤）后按同一份清单执行，
@@ -247,8 +248,10 @@ START ──> prepare ──> agent ──> tools ──> agent ──> ...
 - **tools**：执行工具、回填 `ToolMessage`、注入计划进度、检查调用上限、空参数兜底；广播 `tool_start/tool_result`。
 - **finalize**：来源去重、联网附录、持久化消息、运行记录 + trace、标题事件、`done`。
 
-状态通过 `AgentState`（TypedDict）传递；节点经 `EventBus` 推送事件，SSE 协议与旧版一致。
-`recursion_limit=30`，超限/异常走兜底收尾，保证有最终回答与运行记录。
+状态通过 `AgentState`（TypedDict）传递；节点经 `EventBus` 推送事件。SSE 协议向后兼容地新增
+`stream_delta`（正文增量）与 `stream_end{keep}`（保留/撤回本轮增量）：`token` 仍是全文事件，
+CLI / `run_json` / 评测脚本无需改动。
+`recursion_limit=110`（与工具上限 50×2 + 派发分支配套），超限/异常走兜底收尾，保证有最终回答与运行记录。
 
 ### 一次问答的数据流
 
@@ -282,7 +285,7 @@ rag_knowledge_base/
 │   │   ├── agent/
 │   │   │   ├── langgraph_agent.py   # LangGraph 编排（7 节点 + 条件路由）
 │   │   │   ├── agent.py             # AgentService 基础（模型/上下文/视觉懒加载）
-│   │   │   ├── context.py           # 记忆/摘要/规划/上下文工程
+│   │   │   ├── context.py           # 记忆/摘要/记忆提取/上下文工程
 │   │   │   ├── tools.py             # @tool 工具（KB / Web / Vision / Skill）
 │   │   │   ├── prompts.py           # 模板 + 工具规则 + 系统提示组装
 │   │   │   └── skills.py            # 本机 Skills 扫描/去重/启停/结构化目录
@@ -462,11 +465,13 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-当前 127 个用例覆盖：任务清单（播种/同步/跨轮刷新/模糊完成/修订/进度）、文件工具
-安全边界与命令白名单、CUDA 降级逻辑、技能内容清洗、联网可信度标注、
-RAG 工具纯函数、CLI 交互（Ctrl+C/行编辑/审批弹窗）、文档文件服务、
-取消机制（run_id 注入 + 逐帧停流）、hooks 门禁、用户工具加载、
-run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
+当前 308 个用例覆盖：编排（声明式派发解析/路由/上限、merge 回填 ToolMessage、
+计划模式进入与结构化提交、工具轮链序不变量）、健壮性（空正文重试、流式看门狗、
+tool_trace 截断、bash 后台进程不挂死）、供应商兼容（Anthropic 思考块回传）、
+任务清单（播种/同步/跨轮刷新/模糊完成/修订/进度）、文件工具安全边界与命令白名单、
+CUDA 降级逻辑、技能内容清洗、联网可信度标注、RAG 工具纯函数、
+CLI 交互（Ctrl+C/行编辑/审批弹窗）、文档文件服务、取消机制（run_id 注入 + 逐帧停流）、
+hooks 门禁、用户工具加载、run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 
 提交前自动跑测试：已安装 pre-commit 钩子（`scripts/install-git-hooks.ps1`），
 `git commit` 前会自动执行 pytest，失败则阻止提交（`--no-verify` 可跳过）。
@@ -526,7 +531,7 @@ run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
 | `MEMORY_MIN_SCORE` / `MEMORY_MAX_TOKENS` | `0.35` / `600` | 记忆召回阈值 / token 预算 |
 | `MEMORY_CANDIDATE_LIMIT` / `MEMORY_RECENT_FALLBACK` | `100` / `50` | 记忆粗筛候选 / 最近补位 |
 | `MEMORY_CONSOLIDATE_INTERVAL_HOURS` / `MEMORY_CONSOLIDATE_THRESHOLD` | `24` / `10` | 自动整合间隔 / 触发条数 |
-| `PLANNER_ENABLED` | `1` | 复杂问题规划 |
+| `PLAN_MODE_ALLOWED` | `1` | 计划模式总开关（设置页可改；关闭=不注册 enter/exit_plan_mode） |
 | `CRAG_FALLBACK_ENABLED` / `CRAG_MIN_SCORE` | `1` / `0.45` | 知识库不足时补联网 |
 | `QUERY_EXPANSION_ENABLED` / `EXPANSION_*` | `1` | 查询扩展各开关（含简单问题自动跳过） |
 | `PARENT_CHUNK_SIZE` / `PARENT_MAX_CHUNK_SIZE` | `600` / `900` | Parent 切分参数 |

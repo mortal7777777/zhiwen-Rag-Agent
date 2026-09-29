@@ -17,7 +17,6 @@ from ..state import AgentState, EventBus
 from .common import _iteration_limit
 from .subagent import (
     _parse_declared_subtasks,
-    _remaining_needs_tools,
     _split_declaration,
 )
 from ..utils import (
@@ -100,28 +99,30 @@ def _stall_timeout(settings: Settings) -> float:
     return value if value > 0 else _DEFAULT_STALL_TIMEOUT_S
 
 
-def _agent_node(state: AgentState) -> dict:
-    service: LangGraphAgentService = state["service"]
-    bus: EventBus = state["bus"]
+def _agent_node(state: AgentState, runtime) -> dict:
+    """第二参数是 LangGraph 按名注入的 Runtime；请求级依赖取 `runtime.context`。"""
+    deps = runtime.context
+    service: LangGraphAgentService = deps.service
+    bus: EventBus = deps.bus
     settings: Settings = service.settings
-    runtime: dict = state["runtime"]
+    rt: dict = state["runtime"]
     messages = state["messages"]
-    tools = state["tools"]
-    stop_event = state.get("stop_event")
+    tools = deps.tools
+    stop_event = deps.stop_event
 
     def stopped() -> bool:
         return stop_event is not None and stop_event.is_set()
 
     if stopped():
-        runtime["status"] = "stopped"
+        rt["status"] = "stopped"
         return {}
 
     # 计划已提交：不再调模型（实测提交后还会再多跑两轮共 4 分钟），
     # 直接把计划渲染成正文收尾，把回合让给用户确认
-    approval = runtime.get("plan_approval") or {}
+    approval = rt.get("plan_approval") or {}
     if approval.get("steps"):
         text = _render_plan_text(approval)
-        runtime["final_text"] = (runtime.get("final_text") or "") + text
+        rt["final_text"] = (rt.get("final_text") or "") + text
         bus.emit("token", text)
         return {
             "pending_tool_calls": [],
@@ -158,11 +159,11 @@ def _agent_node(state: AgentState) -> dict:
     if (
         state["tool_calls_used"] > 0
         and effective(settings, "reasoning_summary_enabled", False)
-        and not runtime.get("reasoning_emitted")
+        and not rt.get("reasoning_emitted")
     ):
-        runtime["reasoning_emitted"] = True
+        rt["reasoning_emitted"] = True
         summary = ""
-        evt = runtime.get("_reasoning")
+        evt = deps.reasoning
         if evt is not None:
             # 摘要已在工具执行期间后台预生成，最多等 1s；超时不阻塞正文
             evt["done"].wait(timeout=1.0)
@@ -190,7 +191,7 @@ def _agent_node(state: AgentState) -> dict:
         model = service.chat_plain if thinking_off else service.chat
         chat = (
             model
-            if not tools or runtime.get("forced_tool_rounds", 0) >= 2
+            if not tools or rt.get("forced_tool_rounds", 0) >= 2
             else model.bind_tools(tools)
         )
         chunks: list = []
@@ -243,9 +244,15 @@ def _agent_node(state: AgentState) -> dict:
         _threading.Thread(target=_producer, daemon=True).start()
         stream_error: Exception | None = None
         stalled = False
+        # 增量推送按窗口聚合（时间 + 字符双阈值）：供应商的 chunk 很碎
+        # （实测 930 字回答 440 片），逐片直发既产生数百个 SSE 帧，又让
+        # 前端打字机按"小积压"节奏慢放、反而落后生成速度。
+        emit_buf: list[str] = []
+        emit_len = 0
+        emit_last = time.perf_counter()
         while True:
             if stopped():
-                runtime["status"] = "stopped"
+                rt["status"] = "stopped"
                 break
             try:
                 item = stream_queue.get(timeout=stall_s)
@@ -262,24 +269,37 @@ def _agent_node(state: AgentState) -> dict:
             delta = message_text(getattr(chunk, "content", None))
             if delta:
                 # TTFT 打点：首个内容 chunk 到达（含工具轮过渡文本，即 API 首字）
-                timings = runtime.setdefault("timings", {})
+                timings = rt.setdefault("timings", {})
                 if "first_token_ms" not in timings:
                     timings["first_token_ms"] = round(
-                        (time.perf_counter() - runtime["started"]) * 1000
+                        (time.perf_counter() - rt["started"]) * 1000
                     )
                 buf_parts.append(delta)
+                # 增量推送正文：用户不必等整段生成完才见到第一个字。
+                # 工具轮的过渡思考文本也已推送，由下面的 stream_end 撤回。
+                emit_buf.append(delta)
+                emit_len += len(delta)
+                now = time.perf_counter()
+                if emit_len >= 120 or now - emit_last >= 0.06:
+                    bus.emit("stream_delta", "".join(emit_buf))
+                    emit_buf.clear()
+                    emit_len = 0
+                    emit_last = now
     finally:
         service.rag.release_llm()
 
     if stalled:
-        runtime["status"] = "error"
-        runtime["error"] = (
+        if buf_parts:
+            # 已推送的文本属于未完成轮（不落库），整轮撤回保持前后端一致
+            bus.emit("stream_end", {"keep": False})
+        rt["status"] = "error"
+        rt["error"] = (
             f"模型响应卡死：连续 {stall_s:.0f} 秒未收到任何输出，已中断本轮。"
             "请重试；若反复出现，检查网络/代理或供应商状态。"
         )
         bus.emit(
             "error",
-            {"message": runtime["error"], "phase": "llm", "code": "llm_stall"},
+            {"message": rt["error"], "phase": "llm", "code": "llm_stall"},
         )
         if stop_event is not None:
             stop_event.set()
@@ -293,14 +313,16 @@ def _agent_node(state: AgentState) -> dict:
             "todos": state.get("todos") or [],
         }
     if stream_error is not None:
-        runtime["status"] = "error"
-        runtime["error"] = (
+        if buf_parts:
+            bus.emit("stream_end", {"keep": False})
+        rt["status"] = "error"
+        rt["error"] = (
             f"模型调用中断：{type(stream_error).__name__}: {stream_error}"
         )
         bus.emit(
             "error",
             {
-                "message": runtime["error"],
+                "message": rt["error"],
                 "phase": "llm",
                 "code": "llm_stream_error",
             },
@@ -318,6 +340,9 @@ def _agent_node(state: AgentState) -> dict:
         }
 
     if stopped():
+        if buf_parts:
+            # 停止生成：本轮的文本不落库，前端也撤回，避免"看到了但刷新就没了"
+            bus.emit("stream_end", {"keep": False})
         return {}
     if not chunks:
         # 模型没有输出（如空响应）：直接收尾，避免死循环
@@ -336,7 +361,7 @@ def _agent_node(state: AgentState) -> dict:
         merged = merged + chunk
     usage = getattr(merged, "usage_metadata", None)
     if usage:
-        runtime["token_usage"] = dict(usage)
+        rt["token_usage"] = dict(usage)
         # 流式调用不在 on_llm_end 的 llm_output 里，手动补记到聚合统计
         get_usage_collector().add_usage(
             int(usage.get("input_tokens") or 0),
@@ -344,7 +369,7 @@ def _agent_node(state: AgentState) -> dict:
         )
         get_usage_collector().add_cache_usage(dict(usage))
         # 逐调用遥测（P2）：定位轮内断链——哪次调用、命中多少 token
-        runtime.setdefault("calls", []).append(
+        rt.setdefault("calls", []).append(
             {
                 "in": int(usage.get("input_tokens") or 0),
                 "out": int(usage.get("output_tokens") or 0),
@@ -352,14 +377,14 @@ def _agent_node(state: AgentState) -> dict:
                     ((usage.get("input_token_details") or {}).get("cache_read"))
                     or 0
                 ),
-                "t_ms": round((time.perf_counter() - runtime["started"]) * 1000),
+                "t_ms": round((time.perf_counter() - rt["started"]) * 1000),
             }
         )
 
     tool_calls = list(getattr(merged, "tool_calls", None) or [])
     if state["forced_final"] and tool_calls:
         # forced_final 下模型仍调工具：计数，超过阈值后解除绑定兜底
-        runtime["forced_tool_rounds"] = runtime.get("forced_tool_rounds", 0) + 1
+        rt["forced_tool_rounds"] = rt.get("forced_tool_rounds", 0) + 1
     merged_text = message_text(merged.content)
     # 全角/DSML 前缀变体先归一化：否则 <｜DSML｜tool_calls> 这类标签
     # 漏过工具轮判定，正文（含标签）直接泄漏进最终回答
@@ -469,11 +494,22 @@ def _agent_node(state: AgentState) -> dict:
     is_tool_round = bool(tool_calls) or any(
         m in merged_text for m in _XML_TOOL_MARKERS
     )
+    # 轮结束：补发最后一个聚合窗口的残留。正文轮的展示以增量文本为准
+    # （前端会跳过随后的全文 token），少发这一段正文就缺尾。
+    if buf_parts and emit_buf:
+        bus.emit("stream_delta", "".join(emit_buf))
+        emit_buf.clear()
+    if buf_parts and is_tool_round:
+        # 工具轮的过渡思考文本已随流增量推送：整轮撤回（不展示、不入历史）
+        bus.emit("stream_end", {"keep": False})
     if not is_tool_round and buf_parts:
         # 逐片清理 XML 工具调用标记：sensenova 等模型偶尔把
         # <tool_calls> 写进正文，直接展示会泄漏
         text = _strip_xml_tool_tags("".join(buf_parts))
-        runtime["final_text"] += text
+        rt["final_text"] += text
+        # 正文已增量推送：告知前端跳过下面这条全文 token，避免重复显示；
+        # 这条 token 仍保留给 CLI / run_json / 评测脚本消费（事件协议向后兼容）
+        bus.emit("stream_end", {"keep": True})
         bus.emit("token", text)
 
     # ---- XML 标记存在但兜底解析失败：有界重试，避免"静默停止" ----
@@ -507,7 +543,7 @@ def _agent_node(state: AgentState) -> dict:
         merged_text=merged_text,
         usage=usage,
         forced_final=bool(state["forced_final"]),
-        status=runtime.get("status"),
+        status=rt.get("status"),
         retry_count=int(state.get("empty_retry_count") or 0),
     ):
         state["empty_retry_count"] = int(state.get("empty_retry_count") or 0) + 1
@@ -529,7 +565,7 @@ def _agent_node(state: AgentState) -> dict:
     if (
         not tool_calls
         and not state["forced_final"]
-        and runtime.get("status") != "stopped"
+        and rt.get("status") != "stopped"
         and int(state.get("plan_push_count") or 0) < 3
     ):
         try:
@@ -546,8 +582,10 @@ def _agent_node(state: AgentState) -> dict:
                     len(state["plan_map"]),
                 )
                 remaining = state["plan_map"][done:]
-            remaining_hint = _remaining_needs_tools(remaining)
-            if remaining_hint:
+            # 触发条件是"还有未完成步骤"这个事实本身（清单来自用户确认的计划或
+            # 模型自己的派发声明）。旧实现再按关键词 hint 过滤（只推"工具型"步骤），
+            # 而 hint 是猜的：漏判会让约束整条失效，误判会推着模型做已做完的事。
+            if remaining:
                 force_continue = True
                 state["plan_push_count"] = (
                     int(state.get("plan_push_count") or 0) + 1
@@ -559,11 +597,12 @@ def _agent_node(state: AgentState) -> dict:
                 messages.append(
                     SystemMessage(
                         content=(
-                            "【计划硬约束】以下步骤尚未完成且需要工具："
+                            "【计划硬约束】以下步骤尚未完成："
                             f"{remaining_text}\n"
-                            "请继续调用对应工具完成这些步骤，不要提前输出最终回答；"
-                            "若某步确实无需执行，先用 todo_update remove 删除它，"
-                            "或用 todo_update complete 标记为已完成，再结束。"
+                            "请继续完成它们，不要提前输出最终回答；"
+                            "若某步确实无需执行或已完成，先用 todo_update "
+                            "complete 标记为已完成（无需执行的用 remove 删除），"
+                            "再结束。"
                         )
                     )
                 )

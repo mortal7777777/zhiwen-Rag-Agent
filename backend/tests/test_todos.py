@@ -23,6 +23,20 @@ def _install_store(monkeypatch, store: FakeStore) -> FakeStore:
     return store
 
 
+def _mark_done(conv: int, texts: list[str]) -> None:
+    """测试夹具：把指定步骤标为已完成。
+
+    生产路径由模型经 todo_update complete 标记（进度不再按工具调用数自动推进），
+    这里直接改存储，避免夹具依赖工具的 DB 装配。
+    """
+    items = todos.load_todos(object(), conv)
+    wanted = {t.strip() for t in texts}
+    for item in items:
+        if str(item.get("text", "")).strip() in wanted:
+            item["done"] = True
+    todos.save_todos(object(), conv, items)
+
+
 def test_seed_and_progress(monkeypatch):
     store = _install_store(monkeypatch, FakeStore())
     conv = 1001
@@ -37,28 +51,17 @@ def test_seed_and_progress(monkeypatch):
     assert store._data[f"todos_{conv}"]
 
 
-def test_sync_marks_hinted_steps_only(monkeypatch):
-    store = _install_store(monkeypatch, FakeStore())
+def test_progress_follows_explicit_marks_only(monkeypatch):
+    """进度只认显式勾选：改存储标记后 plan_progress 才推进（不再按调用数推断）。"""
+    _install_store(monkeypatch, FakeStore())
     conv = 1002
     plan = ["step A", "step B", "step C"]
     todos.seed_todos_from_plan(object(), conv, plan)
-    items = todos.sync_todos_from_plan(
-        object(), conv, plan, 3, hints=["kb", "", "bash"]
-    )
-    assert [i["done"] for i in items] == [True, False, True]
-
-
-def test_sync_legacy_without_source(monkeypatch):
-    store = _install_store(monkeypatch, FakeStore())
-    conv = 1003
-    plan = ["step A", "step B"]
-    todos.seed_todos_from_plan(object(), conv, plan)
-    items = todos.load_todos(object(), conv)
-    for i in items:
-        i.pop("source", None)
-    todos.save_todos(object(), conv, items)
-    synced = todos.sync_todos_from_plan(object(), conv, plan, 1)
-    assert [i["done"] for i in synced] == [True, False]
+    assert todos.plan_progress(todos.load_todos(object(), conv))[0] == 0
+    _mark_done(conv, ["step A", "step C"])
+    done, total, remaining = todos.plan_progress(todos.load_todos(object(), conv))
+    assert (done, total) == (2, 3)
+    assert [r["text"] for r in remaining] == ["step B"]
 
 
 def test_tool_operations(monkeypatch):
@@ -84,10 +87,8 @@ def test_tool_operations(monkeypatch):
         }
     )
     assert len(r["todos"]) == 3
-    # 全 manual 清单不计入计划进度，也不会被 sync 误标
+    # 全 manual 清单不计入计划进度
     assert todos.plan_progress(todos.load_todos(object(), conv)) == (0, 0, [])
-    synced = todos.sync_todos_from_plan(object(), conv, plan, 2)
-    assert not any(i["done"] for i in synced)
 
     r = tool.invoke({"operation": "remove", "text": "new 2"})
     assert len(r["todos"]) == 2
@@ -114,7 +115,7 @@ def test_complete_steps_by_text(monkeypatch):
     conv = 1005
     plan = ["step A", "step B", "step C"]
     todos.seed_todos_from_plan(object(), conv, plan)
-    todos.sync_todos_from_plan(object(), conv, plan, 2)
+    _mark_done(conv, ["step A", "step B"])
     items = todos.complete_steps_by_text(object(), conv, ["step C"])
     assert all(i["done"] for i in items)
     assert todos.todos_to_text(items).count("[x]") == 3
@@ -140,7 +141,7 @@ def test_refresh_keeps_same_plan_progress(monkeypatch):
     conv = 1007
     plan = ["step A", "step B"]
     todos.seed_todos_from_plan(object(), conv, plan)
-    todos.sync_todos_from_plan(object(), conv, plan, 1)
+    _mark_done(conv, ["step A"])
     items = todos.refresh_todos_for_plan(object(), conv, plan)
     assert [i["done"] for i in items] == [True, False]
     assert store._data[f"todos_{conv}"]
@@ -150,7 +151,7 @@ def test_refresh_clears_completed_when_no_new_plan(monkeypatch):
     store = _install_store(monkeypatch, FakeStore())
     conv = 1008
     todos.seed_todos_from_plan(object(), conv, ["step A"])
-    todos.sync_todos_from_plan(object(), conv, ["step A"], 1)
+    _mark_done(conv, ["step A"])
     assert todos.refresh_todos_for_plan(object(), conv, []) == []
     assert todos.load_todos(object(), conv) == []
     # 未完成时保留（跨轮续做）

@@ -215,6 +215,16 @@ def term_width(default: int = 80) -> int:
         return default
 
 
+def visible_rows(text: str, width: int) -> int:
+    """文本在终端里占用的行数（含 \\n 与自动折行；CJK 按 2 列、ANSI 不计宽）。
+
+    用于撤回整轮输出时定位块首：光标在块的最后一行（结尾换行时在下一行），
+    上移 rows-1 行即到块首。空行也占一行，故 split 后的空串要计入。
+    """
+    w = max(20, width)
+    return sum(max(1, -(-strwidth(line) // w)) for line in text.split("\n"))
+
+
 class Screen:
     """跟踪当前行状态，避免 spinner/卡片破坏流式文本。"""
 
@@ -254,6 +264,22 @@ class Screen:
         sys.stdout.write(text)
         sys.stdout.flush()
         self.on_line = not text.endswith("\n")
+
+    def erase_block(self, rows: int) -> None:
+        """撤回刚打印的一块输出：上移到块首、清除到屏幕末尾。
+
+        rows = 块占用的终端行数（含折行，见 visible_rows）；光标在块的最后
+        一行，故上移 rows-1 行后 \r 归零再 ESC[J 清屏。超出可见屏幕的部分
+        已进滚动区，无法回收（过渡文本通常只有 1~3 行，不构成问题）。
+        """
+        if self.busy:
+            sys.stdout.write("\r\033[2K")
+            self.busy = False
+        if rows > 1:
+            sys.stdout.write(f"\033[{rows - 1}A")
+        sys.stdout.write("\r\033[J")
+        sys.stdout.flush()
+        self.on_line = False
 
 
 # ------------------------------------------------------------------ Markdown
@@ -321,6 +347,13 @@ class MarkdownStream:
         self._line = ""
         self._flushed = 0
         return "".join(out)
+
+    def reset(self) -> None:
+        """丢弃缓冲（撤回整轮输出后调用，避免残留片段再次被打印）。"""
+        self._line = ""
+        self._flushed = 0
+        self._in_fence = False
+        self._fence_char = ""
 
     def _complete(self, raw: str) -> list[str]:
         if self._flushed:
@@ -1657,6 +1690,8 @@ def stream_question(
     threading.Thread(target=reader_thread, daemon=True).start()
 
     md = MarkdownStream(term_width())
+    round_printed = ""  # 本轮已打印到终端的文本（含 ANSI），供整轮撤回
+    skip_next_token = False  # 正文轮的增量已展示：随后的全文 token 跳过
     run_id: str | None = None
     conv_id: int | None = conversation_id
     t0 = time.time()
@@ -1772,11 +1807,46 @@ def stream_question(
                     screen.write(paint("   ▶ 已批准", "green"))
                 else:
                     screen.write(paint(f"   ▶ 已拒绝：{safe_text(data.get('reason', ''))}", "red"))
-            elif name == "token":
-                token = safe_text(data if isinstance(data, str) else str(data))
+            elif name == "stream_delta":
+                # 正文增量：边生成边渲染（与 Web 端一致）。工具轮的过渡思考
+                # 文本随后会被 stream_end{keep:false} 整轮撤回。
                 busy_text = None
-                screen.write_stream(md.feed(token))
+                chunk = md.feed(
+                    safe_text(data if isinstance(data, str) else str(data))
+                )
+                chunk += md.partial()
+                if chunk:
+                    screen.write_stream(chunk)
+                    round_printed += chunk
                 last_partial = time.time()
+            elif name == "stream_end":
+                if data.get("keep"):
+                    # 增量即正文：把末行收尾（避免与后续轮次输出拼在同一行，
+                    # 那会让"只撤回本轮"的清屏范围算错），全文 token 跳过
+                    tail = md.flush()
+                    if tail:
+                        screen.write_stream(tail)
+                    screen.newline()
+                    skip_next_token = True
+                    round_printed = ""
+                else:
+                    # 工具轮过渡文本 / 卡死 / 停止生成：整轮撤回
+                    if round_printed:
+                        rows = visible_rows(round_printed, md.width)
+                        height = shutil.get_terminal_size((80, 24)).lines
+                        if rows < height - 1:
+                            screen.erase_block(rows)
+                    md.reset()
+                    round_printed = ""
+            elif name == "token":
+                if skip_next_token:
+                    # 正文已按增量展示；这条全文 token 服务 CLI 之外的消费方
+                    skip_next_token = False
+                else:
+                    token = safe_text(data if isinstance(data, str) else str(data))
+                    busy_text = None
+                    screen.write_stream(md.feed(token))
+                    last_partial = time.time()
             elif name == "title":
                 screen.write(paint(f"[标题：{safe_text(data.get('title', ''))}]", "dim"))
             elif name == "hook":
@@ -1834,6 +1904,13 @@ def stream_question(
                     resp.close()
             except Exception:
                 pass
+            # 打断时本轮正文不落库（与 Web 端一致）：撤回已打印的半截内容
+            if round_printed:
+                rows = visible_rows(round_printed, md.width)
+                height = shutil.get_terminal_size((80, 24)).lines
+                if rows < height - 1:
+                    screen.erase_block(rows)
+                round_printed = ""
             screen.newline()
             screen.write(paint("⏹ 已打断生成" + ("（后端已停止）" if cancelled else "（已断开连接）"), "yellow"))
             screen.write(paint("   按 ↑ 可找回刚才的问题，回车继续对话。", "dim"))

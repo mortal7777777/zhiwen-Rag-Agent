@@ -120,7 +120,6 @@ def _failure_limit(state: AgentState, settings) -> int:
 def _generate_reasoning_summary(
     service: "LangGraphAgentService",
     state: AgentState,
-    runtime: dict,
 ) -> str:
     """生成"执行摘要"：基于计划+工具轨迹，用低温模型写一段简短的执行说明。
 
@@ -152,12 +151,5 @@ def _generate_reasoning_summary(
 # ============================================================
 # 节点：prepare
 # ============================================================
-
-
-
-_TASK_MODE_KEYWORDS = (
-    "完成", "实现", "开发", "搭建", "重构", "改造", "整个项目", "端到端",
-    "从零", "全部做完", "把这个项目", "做完整个",
-)
 
 

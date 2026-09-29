@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessageChunk
 
 from app.agent.nodes.agent import _agent_node, _stall_timeout
 from app.agent.state import EventBus
+from _node_rt import runtime_from_state  # noqa: E402
 
 
 class _FakeRag:
@@ -84,7 +85,7 @@ def test_stall_emits_error_and_sets_status():
     bus = EventBus(queue.Queue())
     state = _state(_service(_FakeChat(delays=[5.0])), bus)
     started = time.perf_counter()
-    result = _agent_node(state)
+    result = _agent_node(state, runtime_from_state(state))
     elapsed = time.perf_counter() - started
 
     assert elapsed < 3.0, "看门狗应在阈值附近收尾，而不是等流自己结束"
@@ -103,7 +104,7 @@ def test_no_false_positive_when_chunks_flow():
         _service(_FakeChat(delays=[0.05] * 4, texts=["你", "好", "，", "世界"])),
         bus,
     )
-    _agent_node(state)
+    _agent_node(state, runtime_from_state(state))
 
     assert state["runtime"].get("status") != "error"
     assert state["runtime"]["final_text"] == "你好，世界"

@@ -8,39 +8,22 @@ from __future__ import annotations
 
 import json
 import logging
-import operator
-import os
-import re
-import sys
 import threading
 import time
 import uuid
-from pathlib import Path
-from datetime import datetime
 from queue import Queue
-from typing import Annotated, TypedDict
-from zoneinfo import ZoneInfo
 
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-)
-from langgraph.graph import END, START, StateGraph
-from langgraph.types import Send
 from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..db import repository as repo
 from ..rag.service import RAGService
 from ..runtime_config import effective
-from ..tracing import get_aux_usage_collector, get_usage_collector, reset_usage, usage_summary, usage_summary_with_aux, write_trace
+from ..tracing import reset_usage
 from .agent import AgentService
 from .graph import build_agent_graph
 from .nodes.finalize import _finalize_node
-from .prompts import compose_system_prompt
-from .state import AgentState, EventBus
+from .state import AgentState, Deps, EventBus, runtime_of
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +184,8 @@ class LangGraphAgentService(AgentService):
 
         queue: Queue = Queue()
         bus = EventBus(queue)
+        # 请求级活对象走 Runtime context（不进检查点）；state 只留可序列化数据
+        deps = Deps(service=self, bus=bus, db=db, stop_event=stop_event)
         runtime: dict = {
             "conv_id": conversation_id,
             "started": time.perf_counter(),
@@ -214,11 +199,7 @@ class LangGraphAgentService(AgentService):
             "timings": {},
         }
         state: AgentState = {
-            "service": self,
-            "bus": bus,
-            "db": db,
             "runtime": runtime,
-            "stop_event": stop_event,
             "question": question,
             "images": images,
             "use_web_search": use_web_search,
@@ -231,7 +212,6 @@ class LangGraphAgentService(AgentService):
             "resume_plan": list(resume_plan) if resume_plan else None,
             "project_dir": project_dir,
             "messages": [],
-            "tools": [],
             "pending_tool_calls": [],
             "pending_subtasks": [],
             "sources": [],
@@ -262,8 +242,6 @@ class LangGraphAgentService(AgentService):
             "task_mode": False,
             "subagent_results": [],
             "sub_task": {},
-            "title_holder": [],
-            "title_thread": None,
             "persist_start": 0,
         }
 
@@ -279,6 +257,7 @@ class LangGraphAgentService(AgentService):
                             "thread_id": f"conv:{conversation_id or uuid.uuid4().hex}"
                         },
                     },
+                    context=deps,
                 )
                 queue.put(None)
             except Exception as exc:
@@ -299,8 +278,8 @@ class LangGraphAgentService(AgentService):
                         bus.emit("token", msg)
                 queue.put({"event": "error", "data": {"message": str(exc)}})
                 try:
-                    # 超限/异常兜底：保证有 done 事件与运行记录
-                    _finalize_node(state)
+                    # 超限/异常兜底：保证有 done 事件与运行记录（图外直调，给 runtime 替身）
+                    _finalize_node(state, runtime_of(deps))
                 except Exception as inner:
                     logger.warning("兜底收尾失败：%s", inner)
                 queue.put(None)

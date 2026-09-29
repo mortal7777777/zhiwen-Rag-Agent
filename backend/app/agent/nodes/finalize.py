@@ -29,37 +29,39 @@ if TYPE_CHECKING:
 from ...tracing import usage_summary, usage_summary_with_aux, write_trace
 
 # ==== 函数体（原文）====
-def _finalize_node(state: AgentState) -> dict:
-    service: LangGraphAgentService = state["service"]
-    bus: EventBus = state["bus"]
-    db: Session | None = state["db"]
+def _finalize_node(state: AgentState, runtime) -> dict:
+    """第二参数是 LangGraph 按名注入的 Runtime；图外兜底直调时传 `runtime_of(deps)`。"""
+    deps = runtime.context
+    service: LangGraphAgentService = deps.service
+    bus: EventBus = deps.bus
+    db: Session | None = deps.db
     settings: Settings = service.settings
-    runtime: dict = state["runtime"]
+    rt: dict = state["runtime"]
 
-    final_text = runtime.get("final_text") or ""
+    final_text = rt.get("final_text") or ""
     # 收尾清理：完整文本上再清一次 XML 工具标记 + strip（分片清理可能漏跨片标签）
     cleaned_final = _strip_xml_tool_tags(final_text).strip()
     if cleaned_final != final_text:
         final_text = cleaned_final
-        runtime["final_text"] = cleaned_final
+        rt["final_text"] = cleaned_final
     sources = state.get("sources") or []
     tool_trace = state.get("tool_trace") or []
-    conv_id = runtime.get("conv_id")
+    conv_id = rt.get("conv_id")
 
     # 空正文兜底：输出预算被思考吃光或上游卡死时可能一个字都没有。
     # 静默返回空回答且 status=ok 会让用户完全不知道发生了什么
     # （2026-09-24 实测 answer_len=0 / status=ok / 前端"没有回答"），
     # 这里降级为明确错误并推送 error 事件。
-    if not final_text and runtime.get("status") == "ok":
-        runtime["status"] = "error"
-        runtime["error"] = runtime.get("error") or (
+    if not final_text and rt.get("status") == "ok":
+        rt["status"] = "error"
+        rt["error"] = rt.get("error") or (
             "本轮未产出正文（输出预算可能被思考耗尽，或上游流中断）。请重试；"
             "若反复出现，检查供应商状态或调高 max_tokens。"
         )
         bus.emit(
             "error",
             {
-                "message": runtime["error"],
+                "message": rt["error"],
                 "phase": "finalize",
                 "code": "empty_answer",
             },
@@ -67,7 +69,7 @@ def _finalize_node(state: AgentState) -> dict:
 
     # 收尾同步任务清单：纯推理/总结类步骤视为被最终回答覆盖，自动补完成；
     # 工具型步骤若仍未完成则保留未勾选状态（审计留痕，不假装完成）
-    if db is not None and conv_id is not None and runtime.get("status") == "ok":
+    if db is not None and conv_id is not None and rt.get("status") == "ok":
         try:
             from ...todos import complete_steps_by_text, load_todos, plan_progress
 
@@ -120,7 +122,7 @@ def _finalize_node(state: AgentState) -> dict:
             )
             appendix = f"\n\n**参考来源**\n{refs}"
             final_text += appendix
-            runtime["final_text"] = final_text
+            rt["final_text"] = final_text
 
     # 持久化 user 消息 + assistant 消息
     if db is not None and conv_id is not None:
@@ -195,7 +197,7 @@ def _finalize_node(state: AgentState) -> dict:
                 # 无 tool_calls 的 AIMessage（最终回答）单独落库，这里跳过
             if not q_inserted:
                 repo.add_message(db, conv_id, "user", state["question"])
-            if runtime.get("status") != "stopped" and final_text:
+            if rt.get("status") != "stopped" and final_text:
                 repo.add_message(
                     db,
                     conv_id,
@@ -211,7 +213,7 @@ def _finalize_node(state: AgentState) -> dict:
             logger.warning("保存对话消息失败：%s", exc)
 
     # 计划模式提交：run 以「等待用户确认」收尾（不是 error、不种 todos）
-    plan_approval = runtime.get("plan_approval") or None
+    plan_approval = rt.get("plan_approval") or None
     if plan_approval and plan_approval.get("steps"):
         bus.emit("plan", {"steps": plan_approval["steps"]})
 
@@ -220,9 +222,9 @@ def _finalize_node(state: AgentState) -> dict:
         try:
             run_status = (
                 "stopped"
-                if runtime.get("status") == "stopped"
+                if rt.get("status") == "stopped"
                 else "error"
-                if runtime.get("error")
+                if rt.get("error")
                 else "awaiting_approval"
                 if plan_approval
                 else "ok"
@@ -234,24 +236,24 @@ def _finalize_node(state: AgentState) -> dict:
                 plan=state.get("plan_steps") or [],
                 tool_trace=tool_trace,
                 answer_len=len(final_text),
-                latency_ms=round((time.perf_counter() - runtime["started"]) * 1000),
+                latency_ms=round((time.perf_counter() - rt["started"]) * 1000),
                 status=run_status,
-                error=runtime.get("error"),
+                error=rt.get("error"),
                 token_usage={
                     **usage_summary_with_aux(),
-                    "last_call": runtime.get("token_usage"),
+                    "last_call": rt.get("token_usage"),
                     # 逐调用遥测：input/output/cache_read，定位轮内断链
-                    "calls": runtime.get("calls") or [],
+                    "calls": rt.get("calls") or [],
                     # 分阶段耗时：prepare/dispatch/subagent/merge/agent/tools/finalize + TTFT
-                    "timings": dict(runtime.get("timings") or {}),
+                    "timings": dict(rt.get("timings") or {}),
                     # 工具定义哈希（缓存前缀监测）：与上一 run 对比，
                     # 变化说明前缀被破坏，命中率可能下降
-                    "tools_hash": runtime.get("tools_hash"),
+                    "tools_hash": rt.get("tools_hash"),
                     # 消息链指纹（缓存前缀监测）：下一轮与本轮做前缀比对，
                     # 首个分歧位置即前缀命中断点
-                    "chain_len": runtime.get("chain_len"),
-                    "chain_divergence": runtime.get("chain_divergence"),
-                    "chain_hashes": runtime.get("chain_hashes") or [],
+                    "chain_len": rt.get("chain_len"),
+                    "chain_divergence": rt.get("chain_divergence"),
+                    "chain_hashes": rt.get("chain_hashes") or [],
                 },
             )
             write_trace(
@@ -264,17 +266,17 @@ def _finalize_node(state: AgentState) -> dict:
                     "tool_trace": tool_trace,
                     "answer_len": len(final_text),
                     "latency_ms": round(
-                        (time.perf_counter() - runtime["started"]) * 1000
+                        (time.perf_counter() - rt["started"]) * 1000
                     ),
                     "status": run_status,
-                    "error": runtime.get("error"),
+                    "error": rt.get("error"),
                     "memory_hits": (state.get("memory_hits") or [])[:5],
                     "todos": state.get("todos") or [],
                     "plan_done_count": state.get("plan_done_count", 0),
                     "subagents": int(state.get("subagent_round_count") or 0),
                     "usage": usage_summary(),
-                    "calls": runtime.get("calls") or [],
-                    "timings": dict(runtime.get("timings") or {}),
+                    "calls": rt.get("calls") or [],
+                    "timings": dict(rt.get("timings") or {}),
                 },
             )
         except Exception as exc:
@@ -313,11 +315,11 @@ def _finalize_node(state: AgentState) -> dict:
             logger.warning("清除 checkpoint 失败：%s", exc)
 
     # 标题后置：后台已生成则推送给前端更新（未完成则由会话刷新兜底）
-    title_thread = state.get("title_thread")
+    title_thread = deps.title_thread
     if title_thread is not None and title_thread.is_alive():
         title_thread.join(timeout=1.0)
-    if state.get("title_holder"):
-        bus.emit("title", {"title": state["title_holder"][0]})
+    if deps.title_holder:
+        bus.emit("title", {"title": deps.title_holder[0]})
 
     # 附录作为 token 补发 + done
     if appendix:
@@ -326,7 +328,7 @@ def _finalize_node(state: AgentState) -> dict:
         "done",
         {
             "ok": True,
-            "stopped": runtime.get("status") == "stopped",
+            "stopped": rt.get("status") == "stopped",
             "sources": deduped,
             "tool_trace": tool_trace,
         },

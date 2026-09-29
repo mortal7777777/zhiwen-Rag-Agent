@@ -21,6 +21,7 @@ from app.agent.nodes.subagent import (
     _dispatch_node,
 )
 from app.agent.state import EventBus
+from _node_rt import runtime_from_state  # noqa: E402
 
 
 # ---------------- 条件边 ----------------
@@ -28,22 +29,23 @@ from app.agent.state import EventBus
 
 def test_route_prefers_dispatch_then_tools():
     assert (
-        _route_after_agent({"pending_subtasks": [{"task": "A"}]}) == "dispatch"
+        _route_after_agent({"pending_subtasks": [{"task": "A"}]}, runtime_from_state({})) == "dispatch"
     )
     assert (
         _route_after_agent(
-            {"pending_subtasks": [{"task": "A"}], "pending_tool_calls": [{}]}
+            {"pending_subtasks": [{"task": "A"}], "pending_tool_calls": [{}]},
+            runtime_from_state({}),
         )
         == "dispatch"
     )
-    assert _route_after_agent({"pending_tool_calls": [{}]}) == "tools"
-    assert _route_after_agent({"force_continue": True}) == "agent"
-    assert _route_after_agent({}) == "finalize"
+    assert _route_after_agent({"pending_tool_calls": [{}]}, runtime_from_state({})) == "tools"
+    assert _route_after_agent({"force_continue": True}, runtime_from_state({})) == "agent"
+    assert _route_after_agent({}, runtime_from_state({})) == "finalize"
 
 
 def test_route_stop_wins():
     ev = SimpleNamespace(is_set=lambda: True)
-    assert _route_after_agent({"stop_event": ev, "pending_subtasks": [{}]}) == "finalize"
+    assert _route_after_agent({"pending_subtasks": [{}]}, runtime_from_state({"stop_event": ev})) == "finalize"
 
 
 # ---------------- agent 节点解析声明 ----------------
@@ -123,7 +125,7 @@ def _decl(task="写一个页面", mode="execute", call_id="c1"):
 def test_agent_node_parses_declaration():
     bus = EventBus(queue.Queue())
     state = _state(_service([_decl()]), bus)
-    out = _agent_node(state)
+    out = _agent_node(state, runtime_from_state(state))
 
     assert [s["task"] for s in out["pending_subtasks"]] == ["写一个页面"]
     # 声明不进 tools 节点：否则会被当成未知工具执行
@@ -136,7 +138,8 @@ def test_agent_node_parses_declaration():
 def test_agent_node_defers_other_tools_in_declaration_round():
     bus = EventBus(queue.Queue())
     calls = [_decl(), {"name": "read_file", "args": {"path": "x"}, "id": "c2", "type": "tool_call"}]
-    out = _agent_node(_state(_service(calls), bus))
+    st = _state(_service(calls), bus)
+    out = _agent_node(st, runtime_from_state(st))
 
     assert len(out["pending_subtasks"]) == 1
     assert out["pending_tool_calls"] == []
@@ -148,9 +151,8 @@ def test_agent_node_defers_other_tools_in_declaration_round():
 
 def test_declaration_rejected_at_cap():
     bus = EventBus(queue.Queue())
-    out = _agent_node(
-        _state(_service([_decl()]), bus, dispatch_rounds=3)
-    )
+    st = _state(_service([_decl()]), bus, dispatch_rounds=3)
+    out = _agent_node(st, runtime_from_state(st))
     assert out["pending_subtasks"] == []
     # 达上限：声明当作普通工具调用走 tools 节点（无副作用）并提示模型自己收尾
     assert [tc["name"] for tc in out["pending_tool_calls"]] == [DISPATCH_TOOL_NAME]
@@ -174,7 +176,7 @@ def test_dispatch_node_seeds_todos_and_escalates_task_mode():
         "todos": [],
         "task_mode": False,
     }
-    out = _dispatch_node(state)
+    out = _dispatch_node(state, runtime_from_state(state))
     assert out["task_mode"] is True
     events = []
     while not bus._queue.empty():
@@ -183,18 +185,17 @@ def test_dispatch_node_seeds_todos_and_escalates_task_mode():
 
 
 def test_dispatch_node_research_keeps_budget():
-    out = _dispatch_node(
-        {
-            "bus": EventBus(queue.Queue()),
-            "db": None,
-            "runtime": {},
-            "pending_subtasks": [
-                {"task": "查资料", "mode": "research", "call_id": "c1"}
-            ],
-            "todos": [],
-            "task_mode": False,
-        }
-    )
+    st = {
+        "bus": EventBus(queue.Queue()),
+        "db": None,
+        "runtime": {},
+        "pending_subtasks": [
+            {"task": "查资料", "mode": "research", "call_id": "c1"}
+        ],
+        "todos": [],
+        "task_mode": False,
+    }
+    out = _dispatch_node(st, runtime_from_state(st))
     assert out["task_mode"] is False
 
 

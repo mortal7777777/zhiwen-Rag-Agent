@@ -230,60 +230,6 @@ def plan_progress(items: list[dict] | None) -> tuple[int, int, list[dict]]:
     return done, len(plan_items), remaining
 
 
-def sync_todos_from_plan(
-    db: Session | None,
-    conversation_id: int | None,
-    plan_steps: list[str],
-    done_count: int,
-    hints: list[str] | None = None,
-) -> list[dict]:
-    """按计划执行进度自动标记已完成步骤（硬约束同步，不依赖模型自觉）。
-
-    done_count：前 N 个计划步骤视为已完成。source=plan 且 step_index < done_count
-    的未完成项会被标记为 done；hints 提供每步的工具提示（非空=工具型步骤），
-    仅工具型步骤会被自动标记，纯推理/总结步骤留给收尾补完成；
-    旧数据无 source 时按列表顺序前 N 项处理。
-    """
-    items = load_todos(db, conversation_id)
-    if not items or not plan_steps:
-        return items
-    done_count = max(0, min(int(done_count or 0), len(plan_steps)))
-    sources = {i.get("source") for i in items}
-    if "plan" in sources:
-        use_plan_source = True
-    elif all(not i.get("source") for i in items):
-        use_plan_source = False  # 旧数据：无 source 字段，按顺序处理
-    else:
-        use_plan_source = None  # 无计划项（全部 manual）：不自动标记
-    changed = False
-    for idx, item in enumerate(items):
-        if item.get("done"):
-            continue
-        if use_plan_source is True:
-            raw_idx = item.get("step_index")
-            step_idx = int(raw_idx) if raw_idx is not None else -1
-            if hints is not None:
-                hint = hints[step_idx] if 0 <= step_idx < len(hints) else ""
-            else:
-                hint = ""
-            match = (
-                item.get("source") == "plan"
-                and step_idx < done_count
-                and (hints is None or bool(hint))
-            )
-        elif use_plan_source is False:
-            match = idx < done_count
-        else:
-            match = False
-        if match:
-            item["done"] = True
-            item["completed_at"] = time.time()
-            changed = True
-    if changed:
-        save_todos(db, conversation_id, items)
-    return items
-
-
 def complete_steps_by_text(
     db: Session | None,
     conversation_id: int | None,

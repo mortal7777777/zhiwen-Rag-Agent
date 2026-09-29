@@ -37,14 +37,16 @@ if TYPE_CHECKING:
 from ..tools import extract_sources
 
 # ==== 函数体（原文）====
-def _tools_node(state: AgentState) -> dict:
-    service: LangGraphAgentService = state["service"]
-    bus: EventBus = state["bus"]
+def _tools_node(state: AgentState, runtime) -> dict:
+    """第二参数是 LangGraph 按名注入的 Runtime；请求级依赖取 `runtime.context`。"""
+    deps = runtime.context
+    service: LangGraphAgentService = deps.service
+    bus: EventBus = deps.bus
     settings: Settings = service.settings
-    runtime: dict = state["runtime"]
+    rt: dict = state["runtime"]
     messages = state["messages"]
-    db: Session | None = state["db"]
-    stop_event = state.get("stop_event")
+    db: Session | None = deps.db
+    stop_event = deps.stop_event
     from ...permissions import (
         SENSITIVE_TOOLS,
         describe_tool_call,
@@ -61,7 +63,7 @@ def _tools_node(state: AgentState) -> dict:
     except Exception:
         pass
 
-    tools_by_name = {t.name: t for t in state["tools"]}
+    tools_by_name = {t.name: t for t in deps.tools}
     tool_calls = state.get("pending_tool_calls") or []
     if not tool_calls:
         return {}
@@ -71,11 +73,11 @@ def _tools_node(state: AgentState) -> dict:
     if effective(settings, "reasoning_summary_enabled", False):
         try:
             evt = {"summary": None, "done": threading.Event()}
-            runtime["_reasoning"] = evt
+            deps.reasoning = evt
 
             def _pre_generate():
                 try:
-                    text = _generate_reasoning_summary(service, state, runtime)
+                    text = _generate_reasoning_summary(service, state)
                     evt["summary"] = (text or "")[:200]
                 except Exception:
                     evt["summary"] = ""
@@ -114,7 +116,7 @@ def _tools_node(state: AgentState) -> dict:
             command = str(args.get("command") or "")
             if name in ("bash", "command_tool") and (
                 command_allowed(settings, command)[0]
-                or permission_manager.is_session_allowed(runtime.get("conv_id"), command)
+                or permission_manager.is_session_allowed(rt.get("conv_id"), command)
             ):
                 needs = False
             if not needs:
@@ -124,7 +126,7 @@ def _tools_node(state: AgentState) -> dict:
                 tool=name,
                 arguments=display_args(name, args),
                 summary=summary,
-                conversation_id=runtime.get("conv_id"),
+                conversation_id=rt.get("conv_id"),
             )
             bus.emit(
                 "permission_request",
@@ -145,7 +147,7 @@ def _tools_node(state: AgentState) -> dict:
                 bus.emit("permission_resolved", {"id": req.id, "approved": True, "reason": ""})
                 if req.remember_session and command:
                     permission_manager.mark_session_allowed(
-                        runtime.get("conv_id"), command
+                        rt.get("conv_id"), command
                     )
                 approval[tc.get("id")] = {
                     "ok": True,
@@ -160,7 +162,7 @@ def _tools_node(state: AgentState) -> dict:
                 approval[tc.get("id")] = {"ok": False, "reason": reason}
 
     # 并行执行多个工具调用（检索类内部已有 GPU 锁；API 类并发安全），保持返回顺序
-    tool_cache: dict = runtime.setdefault("tool_cache", {})
+    tool_cache: dict = rt.setdefault("tool_cache", {})
 
     def _execute(tc: dict) -> tuple[dict, dict]:
         name = tc.get("name", "")
@@ -271,7 +273,7 @@ def _tools_node(state: AgentState) -> dict:
     plan_entered = False
     for tc, result in outcomes:
         if stop_event is not None and stop_event.is_set():
-            runtime["status"] = "stopped"
+            rt["status"] = "stopped"
             break
         name = tc.get("name", "")
         # ---- 计划模式控制工具：在这里改状态/发事件（工具本身无副作用）----
@@ -295,7 +297,7 @@ def _tools_node(state: AgentState) -> dict:
             if steps:
                 # 结构化计划：前端据此渲染确认卡（可编辑），确认后以
                 # resume_plan 重发 → prepare 沿用并种进任务清单
-                runtime["plan_approval"] = {
+                rt["plan_approval"] = {
                     "steps": steps,
                     "summary": str((tc.get("args") or {}).get("summary") or "")[:200],
                 }
@@ -304,7 +306,7 @@ def _tools_node(state: AgentState) -> dict:
                 plan_approval = True
                 bus.emit(
                     "plan_approval",
-                    {"steps": steps, "summary": runtime["plan_approval"]["summary"]},
+                    {"steps": steps, "summary": rt["plan_approval"]["summary"]},
                 )
         entry = {
             "name": name,
@@ -494,12 +496,16 @@ def _tools_node(state: AgentState) -> dict:
                     },
                 )
 
-    # ---- 计划进度同步 + 任务清单自动更新（硬约束）----
+    # ---- 计划进度同步（进度由模型显式勾选，不再按调用数推断）----
     plan_steps = state.get("plan_steps") or []
     plan_map = state.get("plan_map") or [_plan_hint(s) for s in plan_steps]
     todos = state.get("todos") or []
-    conv_id = runtime.get("conv_id")
-    # 工具执行后重新读取 DB，保证 todo_update 的修改立即反映到进度与前端
+    conv_id = rt.get("conv_id")
+    # 工具执行后重新读取 DB，保证 todo_update 的修改立即反映到进度与前端。
+    # 进度只来自清单本身：旧实现"1 次成功工具调用 = 推进 1 个计划步骤"会把
+    # 一轮里为同一步做的多次检索算成多步（清单勾过头 → 硬约束提前放行），
+    # 现在由模型用 todo_update complete 显式标记（系统提示词要求"每完成一步
+    # 立即标记"），merge 与 finalize 另有两条按文本补勾的可靠路径。
     if db is not None and conv_id is not None:
         try:
             from ...todos import load_todos
@@ -507,30 +513,6 @@ def _tools_node(state: AgentState) -> dict:
             todos = load_todos(db, conv_id) or todos
         except Exception as exc:
             logger.warning("任务清单重新读取失败：%s", exc)
-    # 成功的非 todo_update 工具调用推进一个计划步骤；
-    # todo_update 只维护清单（list/add/complete/remove/set），不推进计划进度
-    advance = sum(
-        1
-        for tc in tool_calls
-        if tc.get("id") not in failed_ids and tc.get("name") != "todo_update"
-    )
-    if plan_steps and advance > 0:
-        prev_done = int(state.get("plan_done_count") or 0)
-        target = min(prev_done + advance, len(plan_steps))
-        if db is not None and conv_id is not None:
-            try:
-                from ...todos import sync_todos_from_plan
-
-                hints = [_plan_hint(s).get("tool_hint") for s in plan_steps]
-                todos = (
-                    sync_todos_from_plan(db, conv_id, plan_steps, target, hints=hints)
-                    or todos
-                )
-            except Exception as exc:
-                logger.warning("任务清单自动同步失败：%s", exc)
-        else:
-            # DB 不可用时仅推进内存进度
-            state["plan_done_count"] = target
     done = 0
     total = 0
     remaining: list[dict] = []
@@ -567,13 +549,10 @@ def _tools_node(state: AgentState) -> dict:
                 "剩余步骤："
                 + "；".join(str(t.get("text", "")) for t in remaining)
             )
-            if any(
-                _plan_hint(str(t.get("text", ""))).get("tool_hint")
-                for t in remaining
-            ):
-                progress.append(
-                    "硬约束：剩余步骤尚未完成，请继续按顺序执行；不要提前输出最终回答。"
-                )
+            # 与 agent 节点的硬约束一致：有未完成步骤就提示（不再按关键词 hint 过滤）
+            progress.append(
+                "硬约束：剩余步骤尚未完成，请继续按顺序执行；不要提前输出最终回答。"
+            )
         else:
             progress.append("剩余：无，可以基于已获取的信息作答。")
         progress_text = "\n".join(progress)
@@ -609,7 +588,7 @@ def _tools_node(state: AgentState) -> dict:
     if (
         state["tool_calls_used"] >= _iteration_limit(state, settings)
         and not state["forced_final"]
-        and runtime.get("status") != "stopped"
+        and rt.get("status") != "stopped"
     ):
         state["forced_final"] = True
         messages.append(
@@ -636,7 +615,7 @@ def _tools_node(state: AgentState) -> dict:
     if (
         state.get("failure_count", 0) >= max_failures
         and not state["forced_final"]
-        and runtime.get("status") != "stopped"
+        and rt.get("status") != "stopped"
     ):
         state["forced_final"] = True
         messages.append(
@@ -660,19 +639,19 @@ def _tools_node(state: AgentState) -> dict:
         )
 
     # checkpoint：每轮工具执行后保存快照，异常中断可恢复
-    if settings.checkpoint_enabled and db is not None and runtime.get("conv_id"):
+    if settings.checkpoint_enabled and db is not None and rt.get("conv_id"):
         try:
             from ...checkpoint import get_store
 
             get_store(settings).save(
-                runtime["conv_id"],
+                rt["conv_id"],
                 {
                     "messages": messages,
                     "sources": state["sources"],
                     "tool_trace": state["tool_trace"],
                     "plan_steps": state.get("plan_steps") or [],
                     "plan_map": state.get("plan_map") or [],
-                    "final_text": runtime.get("final_text") or "",
+                    "final_text": rt.get("final_text") or "",
                     "tool_calls_used": state["tool_calls_used"],
                     "failure_count": state.get("failure_count", 0),
                     "forced_final": state["forced_final"],

@@ -7,10 +7,8 @@ import time
 
 from langgraph.graph import END, START, StateGraph
 
-from ..runtime_config import effective
-
 logger = logging.getLogger(__name__)
-from .state import AgentState
+from .state import AgentState, Deps
 from .nodes.agent import _agent_node
 from .nodes.finalize import _finalize_node
 from .nodes.prepare import _prepare_node
@@ -23,8 +21,9 @@ from .nodes.subagent import (
 from .nodes.tools import _tools_node
 
 # ==== 函数体（原文）====
-def _route_after_agent(state: AgentState) -> str:
-    if state.get("stop_event") is not None and state["stop_event"].is_set():
+def _route_after_agent(state: AgentState, runtime) -> str:
+    stop_event = getattr(runtime.context, "stop_event", None)
+    if stop_event is not None and stop_event.is_set():
         return "finalize"
     # 派发声明优先：声明由主代理在运行中自己发起（不再是 prepare 之后
     # 由 planner + 规则层做的一次性预派发），扇出仍走 Send 真并行
@@ -38,8 +37,9 @@ def _route_after_agent(state: AgentState) -> str:
     return "finalize"
 
 
-def _route_after_tools(state: AgentState) -> str:
-    if state.get("stop_event") is not None and state["stop_event"].is_set():
+def _route_after_tools(state: AgentState, runtime) -> str:
+    stop_event = getattr(runtime.context, "stop_event", None)
+    if stop_event is not None and stop_event.is_set():
         return "finalize"
     return "agent"
 
@@ -49,17 +49,18 @@ def _timed_node(name: str, fn):
 
     subagent 每个分支、agent/tools 每一轮都进同一节点函数，
     用 += 累加得到该阶段的总耗时；finalize 落库到 agent_runs.token_usage.timings。
+    第二参数是 LangGraph 的 Runtime（携带请求级 Deps），原样透传给节点。
     """
 
-    def wrapped(state: AgentState) -> dict:
-        runtime = state.get("runtime")
-        if runtime is None:
-            runtime = {}
-            state["runtime"] = runtime
-        timings = runtime.setdefault("timings", {})
+    def wrapped(state: AgentState, runtime) -> dict:
+        rt = state.get("runtime")
+        if rt is None:
+            rt = {}
+            state["runtime"] = rt
+        timings = rt.setdefault("timings", {})
         t0 = time.perf_counter()
         try:
-            return fn(state)
+            return fn(state, runtime)
         finally:
             timings[f"{name}_ms"] = (
                 timings.get(f"{name}_ms", 0)
@@ -72,7 +73,7 @@ def _timed_node(name: str, fn):
 def build_agent_graph(checkpointer=None):
     """构建 LangGraph：prepare -> agent ⇄ tools -> finalize
     （agent 可自行声明 → dispatch -> subagents -> merge -> agent）。"""
-    graph = StateGraph(AgentState)
+    graph = StateGraph(AgentState, context_schema=Deps)
     graph.add_node("prepare", _timed_node("prepare", _prepare_node))
     graph.add_node("dispatch", _timed_node("dispatch", _dispatch_node))
     graph.add_node("subagent", _timed_node("subagent", _subagent_node))

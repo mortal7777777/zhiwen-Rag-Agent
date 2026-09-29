@@ -77,7 +77,9 @@ class Settings:
     searxng_engines: str = ""  # 逗号分隔指定引擎（如 bing,baidu,sogou）；空=实例默认
 
     # ---- Agent 参数 ----
-    agent_max_iterations: int = 12      # ReAct 循环最大轮数（2026-08:6→12，参考 Claude Code 单轮约 10 次）
+    agent_max_iterations: int = 20      # 普通轮次的工具调用上限（2026-08: 6→12；2026-09-28: 12→20。
+    # 关键词预判漏掉的"读多写少/分析"类任务在 12 次内做不完就被强制收尾；真实副作用
+    # 仍会升格到 task 预算（50），这里只是兜底宽度）
     agent_max_failures: int = 3         # 工具连续失败重试上限（失败不占迭代预算，超过则强制收尾）
     agent_task_max_iterations: int = 50  # 项目级任务（task_mode）的工具调用上限
     # 2026-09-24: 30→50。Claude Code 单轮工具调用实测 p50=6 / p90=40 / max=150
@@ -284,7 +286,7 @@ class Settings:
             web_search_max_results=int(_env("WEB_SEARCH_MAX_RESULTS", "6")),
             searxng_base_url=_env("SEARXNG_BASE_URL", "http://localhost:8888"),
             searxng_engines=_env("SEARXNG_ENGINES", ""),
-            agent_max_iterations=int(_env("AGENT_MAX_ITERATIONS", "12")),
+            agent_max_iterations=int(_env("AGENT_MAX_ITERATIONS", "20")),
             agent_max_failures=int(_env("AGENT_MAX_FAILURES", "3")),
             agent_task_max_iterations=int(_env("AGENT_TASK_MAX_ITERATIONS", "50")),
             agent_task_max_failures=int(_env("AGENT_TASK_MAX_FAILURES", "6")),

@@ -962,6 +962,10 @@ let restoringTemplate = false // 切换会话时回填模板，不触发持久�
 const pendingText = ref('')
 let typewriterTimer = null
 let streamMsg = null
+// 增量流式状态：本轮 stream_delta 已推送字符数（工具轮撤回用）与
+// 「跳过随后全文 token」标记（正文轮已增量显示，token 是同一段全文）
+let streamedLen = 0
+let skipNextToken = false
 
 function flushTypewriter() {
   if (typewriterTimer) {
@@ -975,6 +979,28 @@ function flushTypewriter() {
   }
 }
 
+// 撤回本轮增量推送的字符（工具轮过渡文本 / 停止生成）：已推送的字符在流的
+// 最尾部，先扣未显示的缓冲区，不足的部分再从消息正文尾部扣
+function dropStreamedRound() {
+  if (!streamMsg || !streamedLen) {
+    streamedLen = 0
+    return
+  }
+  const fromPending = Math.min(streamedLen, pendingText.value.length)
+  pendingText.value = pendingText.value.slice(
+    0,
+    pendingText.value.length - fromPending,
+  )
+  const rest = streamedLen - fromPending
+  if (rest > 0) {
+    streamMsg.content = streamMsg.content.slice(
+      0,
+      Math.max(0, streamMsg.content.length - rest),
+    )
+  }
+  streamedLen = 0
+}
+
 function startTypewriter() {
   if (typewriterTimer || !streamMsg) return
   let scrollCounter = 0
@@ -983,10 +1009,11 @@ function startTypewriter() {
       flushTypewriter()
       return
     }
-    // 24ms 一帧，单帧最多 10 字符：
+    // 24ms 一帧，单帧最多 20 字符：
     // - 稳态约 35~70 字符/秒，有清晰打字机观感；
-    // - 大段一次性到达时以最高约 400 字符/秒快速追赶，观感流畅又不拖沓
-    const n = Math.max(1, Math.min(10, Math.round(pendingText.value.length / 10)))
+    // - 后端增量流式时积压持续增长，上限 20（≈800 字符/秒）保证打字机
+    //   不落后于生成速度，避免末尾一次性倾泻
+    const n = Math.max(1, Math.min(20, Math.round(pendingText.value.length / 10)))
     streamMsg.content += pendingText.value.slice(0, n)
     pendingText.value = pendingText.value.slice(n)
     // 滚动节流：隔帧滚动一次，避免每 24ms 触发滚动导致底部抖动闪烁
@@ -1853,6 +1880,8 @@ async function send(options = {}) {
   // 用响应式代理引用消息：typewriter 每帧增量更新 content 时能触发渲染
   streamMsg = messages.value[messages.value.length - 1]
   pendingText.value = ''
+  streamedLen = 0
+  skipNextToken = false
   question.value = ''
   // 发送成功：清空该会话草稿（内容已发出）
   drafts.value[currentDraftKey()] = ''
@@ -2009,7 +2038,26 @@ async function send(options = {}) {
           }
           scrollToBottom()
         },
+        onStreamDelta: (text) => {
+          pendingText.value += text
+          streamedLen += text.length
+          startTypewriter()
+        },
+        onStreamEnd: (data) => {
+          if (data && data.keep) {
+            // 正文：已增量显示，后端随后还会发同一段全文 token（供 CLI/评测），
+            // 这里标记跳过，避免同一段文字被追加两次
+            skipNextToken = true
+          } else {
+            // 工具轮过渡文本：整轮撤回
+            dropStreamedRound()
+          }
+        },
         onToken: (token) => {
+          if (skipNextToken) {
+            skipNextToken = false
+            return
+          }
           pendingText.value += token
           startTypewriter()
         },
@@ -2028,7 +2076,9 @@ async function send(options = {}) {
   } catch (error) {
     flushTypewriter()
     if (error.name === 'AbortError' || error.message === 'aborted') {
-      // 用户主动停止生成
+      // 用户主动停止生成：撤回本轮未完成的正文（与后端"不落半截回答"一致），
+      // 早前轮次已确认的正文保留
+      dropStreamedRound()
       streamMsg.content = streamMsg.content || '（已停止生成）'
     } else {
       const detail = error.message || '请求失败，请确认后端服务已启动'

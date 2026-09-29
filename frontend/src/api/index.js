@@ -13,7 +13,7 @@ export const chat = (question, history = []) =>
 /**
  * Agent SSE 流式对话。
  * payload: { question, conversation_id, use_web_search, use_knowledge_base, template_id }
- * handlers: { onSession, onToolStart, onToolResult, onToken, onDone, onError }
+ * handlers: { onSession, onToolStart, onToolResult, onStreamDelta, onStreamEnd, onToken, onDone, onError }
  * options:  { signal } 传入 AbortController.signal 可中止请求（停止生成）
  */
 export async function streamAgentChat(payload = {}, handlers = {}, options = {}) {
@@ -76,6 +76,13 @@ export async function streamAgentChat(payload = {}, handlers = {}, options = {})
         handlers.onHook(data)
       } else if (event === 'todos' && handlers.onTodos) {
         handlers.onTodos(data)
+      } else if (event === 'stream_delta' && handlers.onStreamDelta) {
+        // 正文增量推送（后端按窗口聚合；工具轮会再发 stream_end 撤回）
+        handlers.onStreamDelta(data)
+      } else if (event === 'stream_end' && handlers.onStreamEnd) {
+        // keep=true：增量文本即最终正文（随后的 token 是全文，需跳过避免重复）
+        // keep=false：工具轮过渡文本，撤回已推送的部分
+        handlers.onStreamEnd(data)
       } else if (event === 'token' && handlers.onToken) {
         handlers.onToken(data)
       } else if (event === 'done' && handlers.onDone) {
