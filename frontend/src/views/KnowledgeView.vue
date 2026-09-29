@@ -325,9 +325,9 @@
           <span class="meta-file">{{ status.data_dir || '-' }}</span>
         </el-form-item>
         <el-form-item label="新目录">
-          <el-input
+          <DirPicker
             v-model="changeDirForm.path"
-            placeholder="输入绝对路径，如 D:\AI\my_docs；不存在会自动创建"
+            placeholder="选择或输入绝对路径，如 D:\AI\my_docs；不存在会自动创建"
           />
         </el-form-item>
         <div class="dir-hint">
@@ -349,6 +349,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled, Loading, ArrowDown } from '@element-plus/icons-vue'
 import DocumentViewer from '../components/DocumentViewer.vue'
+import DirPicker from '../components/DirPicker.vue'
 import {
   archiveDocumentVersion,
   deleteDocument,

@@ -19,6 +19,7 @@ from .api.advanced import router as advanced_router
 from .api.chat import router as chat_router
 from .api.conversations import router as conversations_router
 from .api.documents import router as documents_router
+from .api.fs import router as fs_router
 from .api.health import router as health_router
 from .api.memories import router as memories_router
 from .api.runs import router as runs_router
@@ -116,6 +117,7 @@ app.add_middleware(
 )
 
 app.include_router(health_router, prefix="/api")
+app.include_router(fs_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(documents_router, prefix="/api")
 app.include_router(agent_router, prefix="/api")

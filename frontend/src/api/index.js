@@ -291,6 +291,10 @@ export const saveSettings = (updates) =>
 export const listChatModels = () =>
   client.get('/settings/models').then((res) => res.data)
 
+/** 列出本机某个路径下的子目录（设置页目录选择器用；仅本机可访问） */
+export const browseDirs = (path = '') =>
+  client.get('/fs/browse', { params: { path }, timeout: 15000 }).then((res) => res.data)
+
 /** 列出本机可复用的 Agent 技能（include_hidden=true 时同时返回已隐藏项） */
 export const listSkills = (includeHidden = false) =>
   client

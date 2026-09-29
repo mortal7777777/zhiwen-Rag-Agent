@@ -428,48 +428,6 @@
                   <span class="generic-label">回答温度</span>
                   <el-input-number v-model="temperature" :min="0" :max="2" :step="0.1" size="small" />
                 </div>
-                <div class="generic-row">
-                  <span class="generic-label">联网搜索</span>
-                  <el-select v-model="webProvider" size="small" class="generic-select">
-                    <el-option label="DuckDuckGo（免费）" value="duckduckgo" />
-                    <el-option label="SearXNG（自托管，无限量）" value="searxng" />
-                    <el-option label="Tavily" value="tavily" />
-                    <el-option label="关闭" value="off" />
-                  </el-select>
-                </div>
-                <div v-if="webProvider === 'searxng'" class="generic-row">
-                  <span class="generic-label">SearXNG 地址</span>
-                  <el-input
-                    v-model="searxngBaseUrl"
-                    size="small"
-                    placeholder="http://localhost:8889"
-                    class="generic-select"
-                  />
-                </div>
-                <div v-if="webProvider === 'searxng'" class="generic-row">
-                  <span class="generic-label">引擎（可选）</span>
-                  <el-input
-                    v-model="searxngEngines"
-                    size="small"
-                    placeholder="bing,baidu,sogou（逗号分隔，留空用实例默认）"
-                    class="generic-select"
-                  />
-                </div>
-                <div v-if="webProvider === 'tavily'" class="generic-row">
-                  <span class="generic-label">Tavily Key</span>
-                  <el-input
-                    v-model="tavilyKey"
-                    type="password"
-                    show-password
-                    size="small"
-                    :placeholder="tavilyMasked ? `已设置 ${tavilyMasked}（留空保持不变）` : '未设置'"
-                    class="generic-select"
-                  />
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">结果条数</span>
-                  <el-input-number v-model="webMaxResults" :min="1" :max="20" size="small" />
-                </div>
               </div>
             </div>
 
@@ -608,8 +566,8 @@
           <!-- ============ 工具与集成 ============ -->
           <div v-show="activeTab === 'tools'" class="settings-pane">
             <div class="pane-head">
-              <div class="pane-title">工具与集成</div>
-              <div class="pane-sub">受控执行 · MCP · 技能沙箱 · 项目记忆</div>
+              <div class="pane-title">工具</div>
+              <div class="pane-sub">受控执行 · 子代理与派发 · 计划模式 · 写后验证 · MCP</div>
             </div>
 
             <div class="settings-section">
@@ -619,47 +577,15 @@
               </div>
               <div class="provider-hint">
                 读取类操作（列目录 / 读文件 / 搜索）自动执行；写入、编辑、删除、
-                执行命令等敏感操作默认弹窗请求人工确认。工作目录限制在下方指定路径内。
+                执行命令等敏感操作在「审批」页配置确认策略。工作目录限制在下方路径内。
               </div>
               <div class="generic-form">
                 <div class="generic-row">
                   <span class="generic-label">工作目录</span>
-                  <el-input
+                  <DirPicker
                     v-model="toolsForm.tool_workspace"
                     placeholder="留空 = 项目根"
-                    size="small"
-                    class="generic-select"
                   />
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">命令白名单</span>
-                  <el-input
-                    v-model="toolsForm.command_allowlist"
-                    placeholder="python, git status, npm test（命中即自动执行，无需确认）"
-                    size="small"
-                    class="generic-select"
-                  />
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">敏感操作确认</span>
-                  <el-select v-model="toolsForm.tool_permission_mode" size="small" class="generic-select">
-                    <el-option label="每次确认（推荐）" value="ask" />
-                    <el-option label="自动批准（跳过确认）" value="allow" />
-                  </el-select>
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">确认超时（秒）</span>
-                  <el-input-number
-                    v-model="toolsForm.permission_timeout"
-                    :min="30"
-                    :max="3600"
-                    :step="30"
-                    size="small"
-                  />
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">执行超时（秒）</span>
-                  <el-input-number v-model="toolsForm.command_timeout" :min="5" :max="300" size="small" />
                 </div>
                 <div class="generic-row">
                   <span class="generic-label">子代理并行</span>
@@ -701,42 +627,59 @@
                     size="small"
                   />
                 </div>
-                <div class="generic-row">
-                  <span class="generic-label">命令执行环境</span>
-                  <el-select v-model="toolsForm.command_sandbox" size="small" class="generic-select">
-                    <el-option label="本机子进程（默认）" value="subprocess" />
-                    <el-option label="Docker 沙箱" value="docker" />
-                  </el-select>
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">沙箱镜像</span>
-                  <el-input
-                    v-model="toolsForm.sandbox_image"
-                    placeholder="python:3.11-slim"
-                    size="small"
-                    class="generic-select"
-                  />
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">沙箱内工作目录只读</span>
-                  <el-switch v-model="toolsForm.sandbox_workspace_readonly" size="small" />
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">技能沙箱执行</span>
-                  <el-switch v-model="toolsForm.skill_sandbox_enabled" size="small" />
-                </div>
               </div>
               <div class="provider-hint">
-                白名单命令自动放行；未命中的命令在“每次确认”模式下仍会弹窗请求批准。
-                “Docker 沙箱”把 bash 放进容器执行；“技能沙箱执行”只控制技能命令的
-                执行接口，不影响技能是否加载/注入上下文。“工作目录只读”开启后，
-                项目以只读挂载，写入发生在沙箱内存盘 /scratch。
-                “子代理并行”把计划里的工具型步骤派给独立上下文的子代理同时执行。
-                “自动批准”模式相当于 Claude Code 的 --dangerously-skip-permissions，请谨慎使用。
+                “子代理并行”把计划里的工具型步骤派给独立上下文的子代理同时执行；
+                子代理的敏感操作会交回主代理执行（由主代理发起确认）。
+                写后自动验证在每次写文件后按类型跑语法/测试校验，失败自动重试。
               </div>
               <div class="tools-test-row">
                 <el-button size="small" @click="testTool('file')">测试：列出工作目录</el-button>
                 <el-button size="small" @click="testTool('command')">测试：执行命令</el-button>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <div class="section-head">
+                <span class="settings-label">预算与稳定性</span>
+              </div>
+              <div class="provider-hint">
+                工具调用预算用尽会强制收尾（回复“继续”可接着做）；失败不占预算，
+                只有连续失败超上限才收尾。看门狗用于兜底流式卡死。
+              </div>
+              <div class="generic-form">
+                <div class="generic-row">
+                  <span class="generic-label">普通轮次工具预算</span>
+                  <el-input-number v-model="toolsForm.agent_max_iterations" :min="1" :max="200" size="small" />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">项目任务工具预算</span>
+                  <el-input-number v-model="toolsForm.agent_task_max_iterations" :min="1" :max="500" size="small" />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">连续失败上限（普通）</span>
+                  <el-input-number v-model="toolsForm.agent_max_failures" :min="1" :max="50" size="small" />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">连续失败上限（任务）</span>
+                  <el-input-number v-model="toolsForm.agent_task_max_failures" :min="1" :max="100" size="small" />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">单轮最多派发轮数</span>
+                  <el-input-number v-model="toolsForm.agent_max_dispatch_rounds" :min="1" :max="10" size="small" />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">流式卡死看门狗（秒）</span>
+                  <el-input-number v-model="toolsForm.agent_llm_stall_timeout_s" :min="10" :max="1800" :step="10" size="small" />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">任务态自动识别</span>
+                  <el-switch v-model="toolsForm.task_mode_detect" size="small" />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">思考摘要（已深度思考）</span>
+                  <el-switch v-model="toolsForm.reasoning_summary_enabled" size="small" />
+                </div>
               </div>
             </div>
 
@@ -789,126 +732,180 @@
               </div>
             </div>
 
-            <div class="settings-section">
-              <div class="section-head">
-                <span class="settings-label">项目记忆（AGENTS.md）</span>
-                <el-button size="small" @click="exportProjectMemory">导出</el-button>
-                <el-button size="small" @click="viewProjectMemory">查看</el-button>
-              </div>
-              <div class="settings-tip">
-                把用户画像与长期记忆导出为可编辑文件（类 CLAUDE.md / AGENTS.md），
-                每次会话自动加载进上下文。
-              </div>
-            </div>
-
-            <div class="settings-section">
-              <div class="settings-label">高级开关</div>
-              <div class="generic-form">
-                <div class="generic-row">
-                  <span class="generic-label">思考摘要（已深度思考）</span>
-                  <el-switch v-model="toolsForm.reasoning_summary_enabled" size="small" />
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">轨迹压缩摘要</span>
-                  <el-switch v-model="toolsForm.trajectory_compress_enabled" size="small" />
-                </div>
-              </div>
-            </div>
-
             <div class="settings-save-row">
               <el-button type="primary" :loading="toolsSaving" @click="saveToolsSettings">
                 保存工具设置
               </el-button>
             </div>
+          </div>
+
+          <!-- ============ 审批与安全 ============ -->
+          <div v-show="activeTab === 'approval'" class="settings-pane">
+            <div class="pane-head">
+              <div class="pane-title">审批与安全</div>
+              <div class="pane-sub">敏感操作确认 · 命令白名单 · 沙箱与超时</div>
+            </div>
 
             <div class="settings-section">
-              <div class="settings-label">高级参数（Agent / 检索 / 上下文）</div>
-              <div class="settings-tip">
-                一般保持默认即可：预算类调大给模型更多工具调用空间；检索门槛调高更保守
-                （更少低相关引用）。保存后立即生效。
+              <div class="settings-label">人工确认</div>
+              <div class="provider-hint">
+                敏感操作（写文件 / 编辑 / 删除 / 执行命令）默认逐项弹卡请求批准；
+                白名单命令与「本会话记住」过的命令自动放行。
               </div>
               <div class="generic-form">
-                <div class="generic-sub">Agent 预算与派发</div>
                 <div class="generic-row">
-                  <span class="generic-label">普通轮次工具预算</span>
+                  <span class="generic-label">敏感操作确认</span>
+                  <el-select v-model="toolsForm.tool_permission_mode" size="small" class="generic-select">
+                    <el-option label="每次确认（推荐）" value="ask" />
+                    <el-option label="自动批准（跳过确认）" value="allow" />
+                  </el-select>
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">确认超时（秒）</span>
                   <el-input-number
-                    v-model="advForm.agent_max_iterations"
-                    :min="1"
-                    :max="200"
+                    v-model="toolsForm.permission_timeout"
+                    :min="30"
+                    :max="3600"
+                    :step="30"
                     size="small"
                   />
                 </div>
                 <div class="generic-row">
-                  <span class="generic-label">项目任务工具预算</span>
-                  <el-input-number
-                    v-model="advForm.agent_task_max_iterations"
-                    :min="1"
-                    :max="500"
-                    size="small"
+                  <span class="generic-label">命令白名单</span>
+                  <TagListInput
+                    v-model="toolsForm.command_allowlist"
+                    :suggestions="ALLOWLIST_SUGGESTIONS"
+                    placeholder="回车添加一条命令"
                   />
                 </div>
-                <div class="generic-row">
-                  <span class="generic-label">连续失败上限（普通）</span>
-                  <el-input-number
-                    v-model="advForm.agent_max_failures"
-                    :min="1"
-                    :max="50"
-                    size="small"
-                  />
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">连续失败上限（任务）</span>
-                  <el-input-number
-                    v-model="advForm.agent_task_max_failures"
-                    :min="1"
-                    :max="100"
-                    size="small"
-                  />
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">单轮最多派发轮数</span>
-                  <el-input-number
-                    v-model="advForm.agent_max_dispatch_rounds"
-                    :min="1"
-                    :max="10"
-                    size="small"
-                  />
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">流式卡死看门狗（秒）</span>
-                  <el-input-number
-                    v-model="advForm.agent_llm_stall_timeout_s"
-                    :min="10"
-                    :max="1800"
-                    :step="10"
-                    size="small"
-                  />
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">任务态自动识别</span>
-                  <el-switch v-model="advForm.task_mode_detect" size="small" />
-                </div>
+              </div>
+              <div class="provider-hint">
+                白名单按前缀匹配，且只对**单条**命令生效：命中即无需确认直接执行
+                （如 `git status` 放行 `git status -s`）；含管道 / 重定向 / 串联的命令
+                一律退回人工确认。未命中的命令在「每次确认」模式下仍会弹卡。
+                「自动批准」相当于 Claude Code 的 --dangerously-skip-permissions，请谨慎使用。
+              </div>
+            </div>
 
-                <div class="generic-sub">检索</div>
+            <div class="settings-section">
+              <div class="settings-label">命令执行环境</div>
+              <div class="generic-form">
                 <div class="generic-row">
-                  <span class="generic-label">知识库相关度门槛（0=关闭）</span>
+                  <span class="generic-label">执行超时（秒）</span>
+                  <el-input-number v-model="toolsForm.command_timeout" :min="5" :max="300" size="small" />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">命令执行环境</span>
+                  <el-select v-model="toolsForm.command_sandbox" size="small" class="generic-select">
+                    <el-option label="本机子进程（默认）" value="subprocess" />
+                    <el-option label="Docker 沙箱" value="docker" />
+                  </el-select>
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">沙箱镜像</span>
+                  <el-input
+                    v-model="toolsForm.sandbox_image"
+                    placeholder="python:3.11-slim"
+                    size="small"
+                    class="generic-select"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">沙箱内工作目录只读</span>
+                  <el-switch v-model="toolsForm.sandbox_workspace_readonly" size="small" />
+                </div>
+              </div>
+              <div class="provider-hint">
+                “Docker 沙箱”把 bash 放进容器执行；“工作目录只读”开启后项目以只读挂载，
+                写入发生在沙箱内存盘 /scratch。
+              </div>
+            </div>
+
+            <div class="settings-save-row">
+              <el-button type="primary" :loading="toolsSaving" @click="saveToolsSettings">
+                保存审批设置
+              </el-button>
+            </div>
+          </div>
+
+          <!-- ============ 检索与联网 ============ -->
+          <div v-show="activeTab === 'search'" class="settings-pane">
+            <div class="pane-head">
+              <div class="pane-title">检索与联网</div>
+              <div class="pane-sub">联网搜索 · 知识库检索参数</div>
+            </div>
+
+            <div class="settings-section">
+              <div class="settings-label">联网搜索</div>
+              <div class="generic-form">
+                <div class="generic-row">
+                  <span class="generic-label">搜索供应商</span>
+                  <el-select v-model="webProvider" size="small" class="generic-select">
+                    <el-option label="DuckDuckGo（免费）" value="duckduckgo" />
+                    <el-option label="SearXNG（自托管，无限量）" value="searxng" />
+                    <el-option label="Tavily" value="tavily" />
+                    <el-option label="关闭" value="off" />
+                  </el-select>
+                </div>
+                <div v-if="webProvider === 'searxng'" class="generic-row">
+                  <span class="generic-label">SearXNG 地址</span>
+                  <el-input
+                    v-model="searxngBaseUrl"
+                    size="small"
+                    placeholder="http://localhost:8889"
+                    class="generic-select"
+                  />
+                </div>
+                <div v-if="webProvider === 'searxng'" class="generic-row">
+                  <span class="generic-label">引擎（可选）</span>
+                  <el-input
+                    v-model="searxngEngines"
+                    size="small"
+                    placeholder="bing,baidu,sogou（逗号分隔，留空用实例默认）"
+                    class="generic-select"
+                  />
+                </div>
+                <div v-if="webProvider === 'tavily'" class="generic-row">
+                  <span class="generic-label">Tavily Key</span>
+                  <el-input
+                    v-model="tavilyKey"
+                    type="password"
+                    show-password
+                    size="small"
+                    :placeholder="tavilyMasked ? `已设置 ${tavilyMasked}（留空保持不变）` : '未设置'"
+                    class="generic-select"
+                  />
+                </div>
+                <div class="generic-row">
+                  <span class="generic-label">结果条数</span>
+                  <el-input-number v-model="webMaxResults" :min="1" :max="20" size="small" />
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <div class="settings-label">知识库检索</div>
+              <div class="generic-form">
+                <div class="generic-row">
+                  <span class="generic-label">相关度门槛（0=关闭）</span>
                   <el-input-number
-                    v-model="advForm.kb_chat_min_score"
+                    v-model="toolsForm.kb_chat_min_score"
                     :min="0"
                     :max="1"
                     :step="0.01"
                     :precision="2"
                     size="small"
                   />
+                  <span class="generic-hint">top1 低于此值视为「库里没有相关内容」，直接作答不喂引用</span>
                 </div>
                 <div class="generic-row">
-                  <span class="generic-label">低相关时自动联网兜底（CRAG）</span>
-                  <el-switch v-model="advForm.crag_fallback_enabled" size="small" />
+                  <span class="generic-label">低相关时联网兜底（CRAG）</span>
+                  <el-switch v-model="toolsForm.crag_fallback_enabled" size="small" />
                 </div>
                 <div class="generic-row">
                   <span class="generic-label">联网兜底阈值</span>
                   <el-input-number
-                    v-model="advForm.crag_min_score"
+                    v-model="toolsForm.crag_min_score"
                     :min="0"
                     :max="1"
                     :step="0.01"
@@ -918,19 +915,40 @@
                 </div>
                 <div class="generic-row">
                   <span class="generic-label">单次识图张数上限</span>
-                  <el-input-number
-                    v-model="advForm.vision_max_images"
-                    :min="1"
-                    :max="10"
-                    size="small"
-                  />
+                  <el-input-number v-model="toolsForm.vision_max_images" :min="1" :max="10" size="small" />
                 </div>
+              </div>
+              <div class="provider-hint">
+                CRAG：知识库最佳相关度低于阈值时自动补一次联网检索后再作答。
+                相关度门槛 0 = 不做门槛（任何 top1 都当依据）。
+              </div>
+            </div>
 
-                <div class="generic-sub">上下文与记忆</div>
+            <div class="settings-save-row">
+              <el-button
+                type="primary"
+                :loading="modelSaving || toolsSaving"
+                @click="saveSearchSettings"
+              >
+                保存检索设置
+              </el-button>
+            </div>
+          </div>
+
+          <!-- ============ 上下文与记忆 ============ -->
+          <div v-show="activeTab === 'memory'" class="settings-pane">
+            <div class="pane-head">
+              <div class="pane-title">上下文与记忆</div>
+              <div class="pane-sub">历史窗口 · 长期记忆 · 项目记忆 · 检查点</div>
+            </div>
+
+            <div class="settings-section">
+              <div class="settings-label">上下文窗口</div>
+              <div class="generic-form">
                 <div class="generic-row">
                   <span class="generic-label">历史窗口条数上限</span>
                   <el-input-number
-                    v-model="advForm.history_max_messages"
+                    v-model="toolsForm.history_max_messages"
                     :min="8"
                     :max="500"
                     size="small"
@@ -939,7 +957,7 @@
                 <div class="generic-row">
                   <span class="generic-label">历史 token 预算兜底</span>
                   <el-input-number
-                    v-model="advForm.history_max_tokens"
+                    v-model="toolsForm.history_max_tokens"
                     :min="1000"
                     :max="200000"
                     :step="500"
@@ -947,64 +965,99 @@
                   />
                 </div>
                 <div class="generic-row">
-                  <span class="generic-label">记忆自动提取阈值（字符）</span>
+                  <span class="generic-label">轨迹压缩摘要</span>
+                  <el-switch v-model="toolsForm.trajectory_compress_enabled" size="small" />
+                  <span class="generic-hint">工具调用 ≥3 次的长任务生成过程摘要，下一轮注入</span>
+                </div>
+              </div>
+              <div class="settings-tip">
+                超出软窗口（条数或 token 预算）时下一轮自动压缩：保留近期原文，
+                更早的对话并入滚动摘要（会话头部「上下文」可查看占用与手动压缩）。
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <div class="settings-label">长期记忆</div>
+              <div class="generic-form">
+                <div class="generic-row">
+                  <span class="generic-label">自动提取阈值（字符）</span>
                   <el-input-number
-                    v-model="advForm.memory_auto_extract_min_chars"
+                    v-model="toolsForm.memory_auto_extract_min_chars"
                     :min="50"
                     :max="5000"
                     :step="50"
                     size="small"
                   />
+                  <span class="generic-hint">回答短于该长度不触发事实提取</span>
                 </div>
                 <div class="generic-row">
-                  <span class="generic-label">项目记忆注入上限（字符）</span>
+                  <span class="generic-label">整合阈值（条）</span>
                   <el-input-number
-                    v-model="advForm.project_memory_max_chars"
-                    :min="500"
-                    :max="20000"
-                    :step="100"
-                    size="small"
-                  />
-                </div>
-                <div class="generic-row">
-                  <span class="generic-label">记忆整合阈值（条）</span>
-                  <el-input-number
-                    v-model="advForm.memory_consolidate_threshold"
+                    v-model="toolsForm.memory_consolidate_threshold"
                     :min="2"
                     :max="500"
                     size="small"
                   />
                 </div>
                 <div class="generic-row">
-                  <span class="generic-label">记忆整合间隔（小时）</span>
+                  <span class="generic-label">整合间隔（小时）</span>
                   <el-input-number
-                    v-model="advForm.memory_consolidate_interval_hours"
+                    v-model="toolsForm.memory_consolidate_interval_hours"
                     :min="1"
                     :max="720"
                     size="small"
                   />
                 </div>
+              </div>
+            </div>
 
-                <div class="generic-sub">检查点</div>
+            <div class="settings-section">
+              <div class="section-head">
+                <span class="settings-label">项目记忆（AGENTS.md）</span>
+                <el-button size="small" @click="exportProjectMemory">导出</el-button>
+                <el-button size="small" @click="viewProjectMemory">查看</el-button>
+              </div>
+              <div class="generic-form">
+                <div class="generic-row">
+                  <span class="generic-label">注入上限（字符）</span>
+                  <el-input-number
+                    v-model="toolsForm.project_memory_max_chars"
+                    :min="500"
+                    :max="20000"
+                    :step="100"
+                    size="small"
+                  />
+                </div>
+              </div>
+              <div class="settings-tip">
+                把用户画像与长期记忆导出为可编辑文件（类 CLAUDE.md / AGENTS.md），
+                每次会话自动加载进上下文；超过上限按行截断注入。
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <div class="settings-label">检查点（原生快照）</div>
+              <div class="generic-form">
                 <div class="generic-row">
                   <span class="generic-label">每会话保留快照数</span>
                   <el-input-number
-                    v-model="advForm.checkpoint_keep_per_thread"
+                    v-model="toolsForm.checkpoint_keep_per_thread"
                     :min="5"
                     :max="200"
                     size="small"
                   />
                 </div>
               </div>
-              <div class="settings-save-row">
-                <el-button
-                  type="primary"
-                  :loading="advSaving"
-                  @click="saveAdvancedSettings"
-                >
-                  保存高级参数
-                </el-button>
+              <div class="settings-tip">
+                每轮收尾后每个会话只保留最近 N 条快照（chat 头部「快照」抽屉可查看/回滚，
+                崩溃后也可据此续跑）；调小可进一步压缩 checkpoints.sqlite 体积。
               </div>
+            </div>
+
+            <div class="settings-save-row">
+              <el-button type="primary" :loading="toolsSaving" @click="saveToolsSettings">
+                保存记忆设置
+              </el-button>
             </div>
           </div>
         </main>
@@ -1117,7 +1170,9 @@ import {
   FolderOpened,
   Hide,
   Link,
+  Lock,
   MagicStick,
+  Memo,
   Plus,
   Search,
   Setting,
@@ -1137,6 +1192,8 @@ import {
   searchSkills,
   testMcpServer,
 } from './api'
+import TagListInput from './components/TagListInput.vue'
+import DirPicker from './components/DirPicker.vue'
 
 const navCollapsed = ref(false)
 const settingsVisible = ref(false)
@@ -1145,9 +1202,12 @@ const activeTab = ref('appearance')
 // 左侧功能导航
 const navItems = [
   { key: 'appearance', label: '外观', desc: '主题与内容布局', icon: Brush },
-  { key: 'models', label: '模型与供应商', desc: '对话 / 视觉 / 联网', icon: Cpu },
+  { key: 'models', label: '模型', desc: '对话 / 视觉 / 嵌入 / 重排 + 供应商', icon: Cpu },
   { key: 'skills', label: '技能', desc: '本机 Skills 管理', icon: MagicStick },
-  { key: 'tools', label: '工具与集成', desc: 'MCP / 执行 / 记忆', icon: Connection },
+  { key: 'tools', label: '工具', desc: '受控执行 / 子代理 / 计划模式 / MCP', icon: Connection },
+  { key: 'approval', label: '审批', desc: '敏感操作确认 / 命令白名单 / 沙箱', icon: Lock },
+  { key: 'search', label: '检索', desc: '联网搜索 / 知识库检索参数', icon: Search },
+  { key: 'memory', label: '记忆', desc: '上下文窗口 / 长期记忆 / 项目记忆 / 检查点', icon: Memo },
 ]
 
 // ---------------- 外观 ----------------
@@ -1203,6 +1263,8 @@ watch(contentWidth, () => {
 // ---------------- 模型与供应商 ----------------
 const settingsModel = ref(null)
 const providers = ref([])
+// Agent/工具/审批/检索/记忆类设置统一一个表单（与后端 EDITABLE_KEYS 对应），
+// 「工具 / 审批 / 检索 / 记忆」四个页面的保存按钮都提交它，避免分表单漏字段
 const toolsForm = ref({
   advanced_tools_enabled: false,
   agent_subagents_enabled: true,
@@ -1223,12 +1285,7 @@ const toolsForm = ref({
   reasoning_summary_enabled: false,
   trajectory_compress_enabled: true,
   mcp_enabled: true,
-})
-const toolsSaving = ref(false)
-
-// 高级参数（Agent 预算 / 检索 / 上下文与记忆 / 检查点）——与后端 EDITABLE_KEYS 对应
-const advSaving = ref(false)
-const advForm = ref({
+  // 预算与稳定性
   agent_max_iterations: 20,
   agent_task_max_iterations: 50,
   agent_max_failures: 3,
@@ -1236,10 +1293,12 @@ const advForm = ref({
   agent_max_dispatch_rounds: 3,
   agent_llm_stall_timeout_s: 150,
   task_mode_detect: true,
+  // 检索
   kb_chat_min_score: 0.2,
   crag_fallback_enabled: true,
   crag_min_score: 0.45,
   vision_max_images: 6,
+  // 上下文与记忆 / 检查点
   history_max_messages: 400,
   history_max_tokens: 64000,
   memory_auto_extract_min_chars: 400,
@@ -1248,6 +1307,26 @@ const advForm = ref({
   memory_consolidate_interval_hours: 24,
   checkpoint_keep_per_thread: 20,
 })
+const toolsSaving = ref(false)
+
+// 命令白名单的常用建议（点击即添加；回车也可自填任意命令）
+const ALLOWLIST_SUGGESTIONS = [
+  'python',
+  'python3',
+  'pytest',
+  'node',
+  'npm test',
+  'git status',
+  'git diff',
+  'git log',
+  'ls',
+  'cat',
+  'head',
+  'tail',
+  'grep',
+  'wc',
+  'tree',
+]
 
 // MCP 服务器管理
 const mcpServers = ref([])
@@ -1351,8 +1430,6 @@ async function loadSettings() {
       reasoning_summary_enabled: editable.reasoning_summary_enabled !== false,
       trajectory_compress_enabled: editable.trajectory_compress_enabled !== false,
       mcp_enabled: editable.mcp_enabled !== false,
-    }
-    advForm.value = {
       agent_max_iterations: editable.agent_max_iterations ?? 20,
       agent_task_max_iterations: editable.agent_task_max_iterations ?? 50,
       agent_max_failures: editable.agent_max_failures ?? 3,
@@ -1540,18 +1617,10 @@ async function loadMcp() {
   }
 }
 
-/** 保存高级参数：整体提交，后端按区间夹取后即时生效 */
-async function saveAdvancedSettings() {
-  advSaving.value = true
-  try {
-    await saveSettings({ ...advForm.value })
-    await loadSettings()
-    ElMessage.success('高级参数已保存并生效')
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '保存失败')
-  } finally {
-    advSaving.value = false
-  }
+/** 保存检索设置：联网搜索（模型表单）+ 知识库检索参数（工具表单） */
+async function saveSearchSettings() {
+  await saveModelSettings(true)
+  await saveToolsSettings()
 }
 
 async function saveToolsSettings() {
@@ -1578,9 +1647,27 @@ async function saveToolsSettings() {
       reasoning_summary_enabled: f.reasoning_summary_enabled,
       trajectory_compress_enabled: f.trajectory_compress_enabled,
       mcp_enabled: f.mcp_enabled,
+      agent_max_iterations: f.agent_max_iterations,
+      agent_task_max_iterations: f.agent_task_max_iterations,
+      agent_max_failures: f.agent_max_failures,
+      agent_task_max_failures: f.agent_task_max_failures,
+      agent_max_dispatch_rounds: f.agent_max_dispatch_rounds,
+      agent_llm_stall_timeout_s: f.agent_llm_stall_timeout_s,
+      task_mode_detect: f.task_mode_detect,
+      kb_chat_min_score: f.kb_chat_min_score,
+      crag_fallback_enabled: f.crag_fallback_enabled,
+      crag_min_score: f.crag_min_score,
+      vision_max_images: f.vision_max_images,
+      history_max_messages: f.history_max_messages,
+      history_max_tokens: f.history_max_tokens,
+      memory_auto_extract_min_chars: f.memory_auto_extract_min_chars,
+      project_memory_max_chars: f.project_memory_max_chars,
+      memory_consolidate_threshold: f.memory_consolidate_threshold,
+      memory_consolidate_interval_hours: f.memory_consolidate_interval_hours,
+      checkpoint_keep_per_thread: f.checkpoint_keep_per_thread,
     })
     await loadSettings()
-    ElMessage.success('工具设置已保存并生效')
+    ElMessage.success('设置已保存并生效')
   } catch (error) {
     ElMessage.error(error.response?.data?.detail || '保存失败')
   } finally {
