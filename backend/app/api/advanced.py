@@ -141,7 +141,10 @@ def connect_mcp(
 
     连接在后台进行、不阻塞请求；返回后轮询 GET /mcp 的 status 查看结果。
     """
-    ids = [str(i) for i in ((payload or {}).get("ids") or [])] or None
+    raw_ids = (payload or {}).get("ids") or []
+    if not isinstance(raw_ids, list):
+        raise HTTPException(status_code=422, detail="ids 必须为字符串数组")
+    ids = [str(i) for i in raw_ids] or None
     return agent.connect_mcp_servers(db, ids)
 
 
