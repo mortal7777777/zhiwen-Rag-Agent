@@ -68,7 +68,8 @@ def test_recall_zero_hit_uses_recent_fallback(monkeypatch):
     emb = FakeEmbeddings()  # 全部正交 → 零命中
 
     hits = service.retrieve_memories(None, emb, "完全不相关的问题")
-    assert hits == ["记忆内容 1", "记忆内容 2"]  # 最近 2 条兜底
+    # 最近 2 条兜底；注入格式与主路径一致（带 [分类|录入日期] 锚点）
+    assert hits == ["[other|2026-09-21] 记忆内容 1", "[other|2026-09-21] 记忆内容 2"]
 
 
 def test_recall_with_hits_does_not_pad_to_top_k(monkeypatch):
@@ -98,7 +99,7 @@ def test_recall_respects_token_budget(monkeypatch):
 
 
 def test_recall_counts_hits_for_kept_memories(monkeypatch):
-    """被注入的记忆要累加命中计数（衰减与整合归档的依据）。"""
+    """被注入的记忆要累加命中计数（仅供观测；零命中兜底不计）。"""
     monkeypatch.setattr(
         context_mod.repo, "list_memories", lambda db, limit=500, **kw: _memories()
     )

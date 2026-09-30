@@ -525,9 +525,16 @@ class ContextService:
             top_ids = [p["id"] for p in picked]
             if not selected:
                 # 零命中才用最近记忆兜底（"介绍一下我"这类问候与具体事实
-                # 相似度低，需要一段背景撑底）；兜底不算"命中"
+                # 相似度低，需要一段背景撑底）；兜底不算"命中"。
+                # 注入格式与主路径一致（带 [分类|录入日期] 锚点）——prepare 的
+                # 提示语已声明每条格式为 [分类|录入日期]，裸句子会让模型误判格式。
                 selected = [
-                    str(m.get("content") or "")
+                    (
+                        f"[{m.get('category')}|{_date_of(m)}] "
+                        if (m.get("category") or _date_of(m))
+                        else ""
+                    )
+                    + str(m.get("content") or "")
                     for m in memories[: self.settings.memory_empty_fallback]
                 ]
                 top_ids = []
