@@ -301,7 +301,7 @@ class ContextService:
         window_tokens = sum(estimate_tokens(r["content"]) for r in window)
         high_messages = max_messages + max_messages // 2
         trigger = len(window) > high_messages or window_tokens > int(budget * 1.25)
-        effective = len(window) - (
+        effective_messages = len(window) - (
             max(0, len(window) - max(4, max_messages)) if trigger else 0
         )
         # 最近运行的缓存命中统计（主循环口径，供上下文面板展示）
@@ -328,7 +328,7 @@ class ContextService:
             "conversation_id": conversation_id,
             "message_count": len(rows),
             # 下一轮实际发送的历史条数（窗口；压缩后比 message_count 少）
-            "effective_history_messages": effective,
+            "effective_history_messages": effective_messages,
             "history_max_messages": max_messages,
             # 压缩触发水位（1.5×上限）：窗口超过它才压缩到上限条数
             "history_high_water_messages": high_messages,
