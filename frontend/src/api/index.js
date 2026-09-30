@@ -39,8 +39,8 @@ async function consumeAgentStream(response, handlers = {}) {
         handlers.onTitle(data)
       } else if (event === 'status' && handlers.onStatus) {
         handlers.onStatus(data)
-      } else if (event === 'reasoning' && handlers.onReasoning) {
-        handlers.onReasoning(data)
+      } else if (event === 'reasoning_delta' && handlers.onReasoningDelta) {
+        handlers.onReasoningDelta(data)
       } else if (event === 'plan_progress' && handlers.onPlanProgress) {
         handlers.onPlanProgress(data)
       } else if (event === 'vision' && handlers.onVision) {

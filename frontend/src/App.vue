@@ -737,7 +737,7 @@
                   <el-switch v-model="toolsForm.task_mode_detect" size="small" />
                 </div>
                 <div class="generic-row">
-                  <span class="generic-label">思考摘要（已深度思考）</span>
+                  <span class="generic-label">展示思考过程</span>
                   <el-switch v-model="toolsForm.reasoning_summary_enabled" size="small" />
                 </div>
               </div>

@@ -280,21 +280,7 @@ wo<template>
                   </el-button>
                 </span>
               </div>
-              <div v-if="msg.reasoning" class="reasoning-box">
-                <div
-                  class="reasoning-head"
-                  @click="msg._reasoningOpen = !msg._reasoningOpen"
-                >
-                  <el-icon :size="13"><MagicStick /></el-icon>
-                  <span>已深度思考</span>
-                  <el-icon :size="12" class="arrow" :class="{ open: msg._reasoningOpen }">
-                    <ArrowDown />
-                  </el-icon>
-                </div>
-                <div v-if="msg._reasoningOpen" class="reasoning-body">
-                  {{ msg.reasoning }}
-                </div>
-              </div>
+
               <div v-if="msg.content" class="assistant-content">
                 <MarkdownContent :content="msg.content" :plain="!!msg._streaming" />
                 <div class="msg-actions">
@@ -318,6 +304,7 @@ wo<template>
                 <span v-if="currentTool" class="status-chip">
                   <span class="status-spinner"></span>
                   {{ currentTool }}
+                  <span v-if="statusElapsed >= 3" class="status-time">· {{ statusElapsed }}s</span>
                 </span>
                 <span v-else class="dots"><i /><i /><i /></span>
               </div>
@@ -332,22 +319,35 @@ wo<template>
 
             <!-- 工具调用轨迹：有完整输出（detail）时可点击展开 -->
             <div v-if="msg.tool_trace && msg.tool_trace.length" class="tool-trace">
-              <div v-for="(t, i) in msg.tool_trace" :key="i" class="tool-item">
-                <div
-                  :class="['tool-chip', { expandable: !!t.detail }]"
-                  @click="t.detail && (t._open = !t._open)"
-                >
-                  <el-icon :size="13"><component :is="toolIcon(t.name)" /></el-icon>
-                  <span class="tool-name">{{ toolName(t.name) }}</span>
-                  <span class="tool-summary">
-                    {{ t.summary || (t.arguments && t.arguments.query) || '执行中…' }}
-                  </span>
-                  <el-icon v-if="t.detail" :size="12" class="tool-expand-icon">
-                    <ArrowDown :class="{ open: t._open }" />
-                  </el-icon>
+              <template v-for="(t, i) in msg.tool_trace" :key="i">
+                <div v-if="t.kind === 'thinking'" class="think-block">
+                  <div class="think-head" @click="t.done && (t._open = !t._open)">
+                    <el-icon :size="13"><MagicStick /></el-icon>
+                    <span>{{ t.done ? `已深度思考 · ${t.duration}s` : '深度思考中…' }}</span>
+                    <el-icon v-if="t.done" :size="12" class="arrow" :class="{ open: t._open }">
+                      <ArrowDown />
+                    </el-icon>
+                  </div>
+                  <div v-if="!t.done" class="think-body live">{{ t.text }}</div>
+                  <div v-else-if="t._open" class="think-body">{{ t.text }}</div>
                 </div>
-                <pre v-if="t._open && t.detail" class="tool-detail">{{ t.detail }}</pre>
-              </div>
+                <div v-else class="tool-item">
+                  <div
+                    :class="['tool-chip', { expandable: !!t.detail }]"
+                    @click="t.detail && (t._open = !t._open)"
+                  >
+                    <el-icon :size="13"><component :is="toolIcon(t.name)" /></el-icon>
+                    <span class="tool-name">{{ toolName(t.name) }}</span>
+                    <span class="tool-summary">
+                      {{ t.summary || (t.arguments && t.arguments.query) || '执行中…' }}
+                    </span>
+                    <el-icon v-if="t.detail" :size="12" class="tool-expand-icon">
+                      <ArrowDown :class="{ open: t._open }" />
+                    </el-icon>
+                  </div>
+                  <pre v-if="t._open && t.detail" class="tool-detail">{{ t.detail }}</pre>
+                </div>
+              </template>
             </div>
 
             <!-- 人工确认（HITL）：等待用户批准/拒绝敏感操作 -->
@@ -929,6 +929,7 @@ import {
   Clock,
   Close,
   Collection,
+  Connection,
   CopyDocument,
   DataAnalysis,
   Delete,
@@ -946,6 +947,7 @@ import {
   Plus,
   Position,
   Promotion,
+  Reading,
   RefreshLeft,
   RefreshRight,
   User,
@@ -1025,6 +1027,38 @@ const useKnowledgeBase = ref(false)
 const templateId = ref(0)
 const templates = ref([])
 const currentTool = ref('')
+const statusElapsed = ref(0)
+let statusTickId = null
+watch(currentTool, (val) => {
+  if (val) {
+    statusElapsed.value = 0
+    if (!statusTickId) {
+      statusTickId = window.setInterval(() => {
+        statusElapsed.value += 1
+      }, 1000)
+    }
+  } else if (statusTickId) {
+    window.clearInterval(statusTickId)
+    statusTickId = null
+  }
+})
+onBeforeUnmount(() => {
+  if (statusTickId) window.clearInterval(statusTickId)
+})
+
+/** 结束当前打开的思考段（文本开始输出 / 工具开始 / 收尾时调用） */
+function closeThinkingSegment() {
+  if (!streamMsg || !streamMsg.tool_trace) return
+  const trace = streamMsg.tool_trace
+  const seg = trace[trace.length - 1]
+  if (seg && seg.kind === 'thinking' && !seg.done) {
+    seg.done = true
+    seg.duration = Math.max(
+      1,
+      Math.round((Date.now() - (seg._startedAt || Date.now())) / 1000),
+    )
+  }
+}
 let abortController = null
 let restoringTemplate = false // 切换会话时回填模板，不触发持久化写入
 
@@ -1255,28 +1289,41 @@ async function loadSuggestions() {
 }
 
 function toolName(name) {
-  return {
-    knowledge_base_search: '知识库检索',
-    web_search: '联网搜索',
-    image_to_text: '图片识别',
-    read_file: '读取文件',
-    list_dir: '查看目录',
-    grep_search: '搜索代码',
-    write_file: '写入文件',
-    edit_file: '编辑文件',
-    delete_file: '删除文件',
-    bash: '执行命令',
-    command_tool: '执行命令',
-    file_tool: '文件操作',
-    todo_update: '任务清单',
-    subagent: '子代理',
-    add_document: '添加知识库文档',
-  }[name] || name
+  if (name && name.startsWith('mcp_')) {
+    return `MCP · ${name.slice(4).replace(/_/g, ' ')}`
+  }
+  return (
+    {
+      knowledge_base_search: '知识库检索',
+      web_search: '联网搜索',
+      image_to_text: '图片识别',
+      read_file: '读取文件',
+      list_dir: '查看目录',
+      grep_search: '搜索代码',
+      write_file: '写入文件',
+      edit_file: '编辑文件',
+      delete_file: '删除文件',
+      bash: '执行命令',
+      command_tool: '执行命令',
+      file_tool: '文件操作',
+      todo_update: '任务清单',
+      subagent: '子代理',
+      add_document: '添加知识库文档',
+      skill_lookup: '查找技能',
+      write_skill: '沉淀技能',
+      dispatch_subtasks: '并行子任务',
+      enter_plan_mode: '进入计划模式',
+      exit_plan_mode: '提交计划',
+      verify: '验证结果',
+    }[name] || name
+  )
 }
 
 function toolIcon(name) {
   if (name === 'web_search') return Position
   if (name === 'image_to_text') return Picture
+  if (name === 'skill_lookup') return Reading
+  if (name && name.startsWith('mcp_')) return Connection
   return Collection
 }
 
@@ -2050,13 +2097,29 @@ function buildStreamHandlers() {
         upsertSession({ conversation_id: activeId.value, title: data.title })
       }
     },
-    onReasoning: (data) => {
-      // DeepSeek 网页端式"已深度思考"折叠区（摘要文本，非原始 CoT）
-      if (data.summary) {
-        streamMsg.reasoning = data.summary
-        streamMsg._reasoningOpen = false
-        scrollToBottom()
+    onReasoningDelta: (text) => {
+      // 原始思考链增量（仅展示）：按轮分段落进工具轨迹时间线
+      if (!text || !streamMsg) return
+      const trace = streamMsg.tool_trace
+      let seg = trace[trace.length - 1]
+      if (!seg || seg.kind !== 'thinking' || seg.done) {
+        seg = {
+          kind: 'thinking',
+          text: '',
+          done: false,
+          duration: 0,
+          _open: false,
+          _startedAt: Date.now(),
+        }
+        trace.push(seg)
       }
+      seg.text += text
+      scrollToBottom()
+      nextTick(() => {
+        const els = document.querySelectorAll('.think-body.live')
+        const el = els[els.length - 1]
+        if (el) el.scrollTop = el.scrollHeight
+      })
     },
     onStatus: (data) => {
       // 动态运行状态：准备中…/思考中…（tool_start 会覆盖为具体工具名）
@@ -2082,6 +2145,7 @@ function buildStreamHandlers() {
       scrollToBottom()
     },
     onToolStart: (data) => {
+      closeThinkingSegment()
       currentTool.value = `${toolName(data.name)}…`
       streamMsg.tool_trace.push({
         name: data.name,
@@ -2104,7 +2168,8 @@ function buildStreamHandlers() {
       currentTool.value = '识别图片中…'
     },
     onToolResult: (data) => {
-      currentTool.value = ''
+      // 工具完成后保持反馈连续，衔接下一轮思考（避免状态条闪空）
+      currentTool.value = '继续思考…'
       const trace = streamMsg.tool_trace.find((t) => t.name === data.name && !t.summary)
       if (trace) {
         trace.summary = data.summary
@@ -2118,6 +2183,7 @@ function buildStreamHandlers() {
     },
     onSuspended: (data) => {
       // 原生挂起（interrupt）：本条流即将结束；渲染整批卡片/计划卡，收齐决定后一次提交
+      closeThinkingSegment()
       currentTool.value = '等待人工确认…'
       suspended = {
         conversationId: data.conversation_id || activeId.value,
@@ -2142,6 +2208,7 @@ function buildStreamHandlers() {
       scrollToBottom()
     },
     onStreamDelta: (text) => {
+      closeThinkingSegment() // 文本开始输出：本轮思考结束（含工具轮过渡文本）
       pendingText.value += text
       streamedLen += text.length
       startTypewriter()
@@ -2165,6 +2232,7 @@ function buildStreamHandlers() {
       startTypewriter()
     },
     onDone: () => {
+      closeThinkingSegment()
       currentTool.value = ''
       flushTypewriter()
       streamMsg._streaming = false // 流式结束：切换到完整 Markdown 渲染
@@ -2259,7 +2327,7 @@ async function runResumeStream(conversationId, decisions, stopped, plan = null) 
   flushTypewriter()
   if (suspended && suspended.msg) streamMsg = suspended.msg
   loading.value = true
-  currentTool.value = ''
+  currentTool.value = '正在继续…'
   abortController = new AbortController()
   const body = {
     conversation_id: conversationId,
@@ -2360,7 +2428,7 @@ async function continueInterrupted(msg) {
   streamMsg = msg
   msg._unfinishedBar = false
   loading.value = true
-  currentTool.value = ''
+  currentTool.value = '正在继续执行…'
   abortController = new AbortController()
   try {
     await continueAgentRun(activeId.value, buildStreamHandlers(), {
@@ -2438,7 +2506,7 @@ async function send(options = {}) {
   drafts.value[currentDraftKey()] = ''
   attachedImages.value = []
   loading.value = true
-  currentTool.value = ''
+  currentTool.value = '正在理解问题…'
   abortController = new AbortController()
   scrollFollow.value = true
   scrollToBottom(true)
@@ -3229,43 +3297,52 @@ onBeforeUnmount(() => {
   }
 }
 
-/* 已深度思考（折叠区） */
-.reasoning-box {
-  margin-bottom: 8px;
-  border-radius: var(--radius-md);
-  background: var(--plan-bg);
-  border: 1px solid var(--plan-border);
-  overflow: hidden;
+/* 思考链时间线（原始思考，仅展示；设置页开关控制，默认关闭） */
+.think-block {
+  margin: 4px 0;
 }
 
-.reasoning-head {
+.think-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 14px;
+  padding: 2px 0;
   font-size: var(--font-sm);
-  font-weight: 600;
-  color: var(--primary);
+  color: var(--text-3);
   cursor: pointer;
   user-select: none;
 }
 
-.reasoning-head .arrow {
+.think-head .arrow {
   margin-left: auto;
-  color: var(--text-3);
   transition: transform 0.2s;
 }
 
-.reasoning-head .arrow.open {
+.think-head .arrow.open {
   transform: rotate(180deg);
 }
 
-.reasoning-body {
-  padding: 2px 14px 12px;
-  font-size: var(--font-sm);
+.think-body {
+  margin: 4px 0 8px 19px;
+  padding: 8px 12px;
+  border-left: 2px solid var(--plan-border);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--plan-bg);
   color: var(--text-2);
+  font-size: 12.5px;
   line-height: 1.7;
   white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.think-body.live {
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.status-time {
+  color: var(--text-3);
+  font-weight: 400;
 }
 
 .msg-actions {
