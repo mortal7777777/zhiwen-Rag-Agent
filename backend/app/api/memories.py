@@ -39,7 +39,7 @@ class MemoryOut(BaseModel):
     category: str
     status: str
     source_conversation_id: int | None = None
-    hit_count: int = 0          # 被注入上下文的累计次数（判断"有用"的依据）
+    hit_count: int = 0          # 被注入上下文的累计次数（仅观测展示，不作归档依据）
     last_hit_at: object | None = None
     created_at: object
     updated_at: object

@@ -165,7 +165,8 @@ class Memory(Base):
       "最近的事实"排序）；
     - updated_at：**内容/分类被编辑或合并**的时间——命中计数累加、归档/恢复等
       管理动作都不刷新（不要用 onupdate，否则召回也会刷新它）；
-    - last_hit_at：最后一次被注入上下文的时间（衰减依据，与上面两者无关）。
+    - last_hit_at：最后一次被注入上下文的时间（仅观测/面板展示——**不作归档依据**，
+      归档只允许"被合并的重复项"与"被新事实明确覆盖的旧项"，见 consolidate_memories）。
     """
 
     __tablename__ = "memories"
@@ -175,8 +176,8 @@ class Memory(Base):
     category = Column(String(50), default="other", nullable=False)
     status = Column(String(20), default="active", nullable=False)
     source_conversation_id = Column(BigInteger, nullable=True)
-    # 被注入上下文的累计次数与最后一次时间：给记忆一个"衰减"依据——
-    # 长期零命中的琐碎记忆可在整合时优先归档（此前所有记忆一律平等）
+    # 被注入上下文的累计次数与最后一次时间：仅供观测与面板展示。
+    # 注意：命中次数**不作为整合归档依据**（2026-09-30 收紧：旧记忆可能只是还没被召回）
     hit_count = Column(Integer, default=0, nullable=False)
     last_hit_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)

@@ -718,7 +718,7 @@ def list_memories(
 
 
 def bump_memory_hits(db: Session, memory_ids: list[int]) -> None:
-    """记忆被注入上下文时累加命中计数（衰减与整合归档的依据）。"""
+    """记忆被注入上下文时累加命中计数（仅供观测；不作整合归档依据，见 Memory 模型注释）。"""
     ids = [int(i) for i in (memory_ids or []) if i]
     if not ids:
         return
