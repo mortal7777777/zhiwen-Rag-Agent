@@ -107,7 +107,9 @@ def save_mcp_servers(
         )
     repo.set_meta(db, "mcp_servers", json.dumps(cleaned, ensure_ascii=False))
     agent.refresh()
-    return {"ok": True, "servers": cleaned}
+    # 保存即应用：为启用项立即发起连接、关闭禁用项；状态回传面板
+    connect = agent.connect_mcp_servers(db)
+    return {"ok": True, "servers": cleaned, "status": connect.get("status", {})}
 
 
 @router.post("/mcp/test")
@@ -127,6 +129,20 @@ def test_mcp_server(payload: dict) -> dict:
     }
     # 说明：session 在测试进程内独立启动，结果不进入运行时管理器；
     # 面板状态以 GET /mcp 的 status 为准（随 Agent 运行/重连更新）。
+
+
+@router.post("/mcp/connect")
+def connect_mcp(
+    payload: dict | None = None,
+    db: Session = Depends(get_db),
+    agent: LangGraphAgentService = Depends(get_agent_service),
+) -> dict:
+    """立即启动/重连 MCP 服务器（面板「启动」按钮；空 ids = 全部启用项）。
+
+    连接在后台进行、不阻塞请求；返回后轮询 GET /mcp 的 status 查看结果。
+    """
+    ids = [str(i) for i in ((payload or {}).get("ids") or [])] or None
+    return agent.connect_mcp_servers(db, ids)
 
 
 # ---------------- 原生 checkpointer：时间旅行（快照审计） ----------------

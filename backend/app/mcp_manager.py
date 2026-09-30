@@ -466,6 +466,22 @@ class MCPManager:
                 }
             return out
 
+    def warm(self, ids: list[str] | None = None) -> list[str]:
+        """立即为未连接的服务器发起后台连接（面板「启动」/保存配置后）。
+
+        返回本轮触发的 id 列表；手动触发不受重连冷却期限制。
+        """
+        started: list[str] = []
+        with self._lock:
+            for sid, srv in self._servers.items():
+                if ids and sid not in ids:
+                    continue
+                if srv.connected or getattr(srv, "_connecting", False):
+                    continue
+                if srv.start_background(timeout=self.connect_timeout):
+                    started.append(sid)
+        return started
+
     def shutdown(self) -> None:
         with self._lock:
             for server in self._servers.values():

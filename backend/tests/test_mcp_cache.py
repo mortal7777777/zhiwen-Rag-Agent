@@ -181,3 +181,29 @@ def test_manager_status_reports_sessions():
     assert st["demo2"]["cached"] is True
     assert st["demo2"]["tool_count"] == 1
 
+
+def test_manager_warm_starts_disconnected_only(tmp_path, monkeypatch):
+    """warm()：只对未连接的服务器发起后台连接（面板「启动」按钮）。"""
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        MCPServerSession,
+        "start_background",
+        lambda self, timeout=120.0: spawned.append(self.id) or True,
+    )
+    mgr = MCPManager(cache_dir=tmp_path)
+    mgr.configure([CFG, dict(CFG, id="b", name="B")])
+    spawned.clear()  # configure 阶段的连接不算
+
+    mgr._servers["demo"].connected = True
+    started = mgr.warm()
+    assert started == ["b"]
+    assert spawned == ["b"]
+
+    # ids 过滤 + 已连接跳过
+    assert mgr.warm(["demo"]) == []
+
+    # 指定未连接项：正常触发
+    mgr._servers["demo"].connected = False
+    assert mgr.warm(["demo"]) == ["demo"]
+
+

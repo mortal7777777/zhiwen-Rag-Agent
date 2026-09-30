@@ -118,6 +118,28 @@ class LangGraphAgentService(AgentService):
         except Exception:
             return {}
 
+    def connect_mcp_servers(self, db: Session | None, ids: list[str] | None = None) -> dict:
+        """立即创建/连接 MCP 会话（面板「启动」按钮、保存配置后调用）。
+
+        连接在后台线程进行、不阻塞请求；调用方随后轮询 mcp_status() 看结果。
+        """
+        if not effective(self.settings, "mcp_enabled", True):
+            return {"ok": False, "error": "MCP 功能总开关未启用", "status": {}}
+        if db is None:
+            return {"ok": False, "error": "数据库不可用", "status": {}}
+        if self._mcp is None:
+            from ..mcp_manager import MCPManager
+
+            self._mcp = MCPManager(cache_dir=self._mcp_cache_dir())
+        servers = self._load_mcp_servers(db)
+        try:
+            self._mcp.configure(servers)
+            started = self._mcp.warm(ids)
+        except Exception as exc:
+            logger.warning("MCP 手动连接失败：%s", exc)
+            return {"ok": False, "error": str(exc), "status": {}}
+        return {"ok": True, "started": started, "status": self._mcp.status()}
+
     def extra_tools(
         self, project_dir: str | None = None, sandbox: str | None = None
     ) -> list:
