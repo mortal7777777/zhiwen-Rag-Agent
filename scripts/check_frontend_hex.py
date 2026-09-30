@@ -21,7 +21,7 @@ import re
 import sys
 from pathlib import Path
 
-BASELINE = 23  # 2026-09-30 阶段 2 完成时存量（见文件头）
+BASELINE = 32  # 2026-09-30 阶段 2 存量 23 + 界面风格卡色卡 9（外观页风格预览需固定色）
 
 HEX = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 

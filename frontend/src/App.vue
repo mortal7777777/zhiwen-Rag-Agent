@@ -133,6 +133,35 @@
             </div>
 
             <div class="settings-section">
+              <div class="settings-label">界面风格</div>
+              <div class="theme-options">
+                <div
+                  v-for="opt in styleOptions"
+                  :key="opt.value"
+                  :class="['theme-card', { active: styleMode === opt.value }]"
+                  @click="styleMode = opt.value"
+                >
+                  <div class="style-swatch" :class="opt.value">
+                    <span class="sw-side"></span>
+                    <span class="sw-body">
+                      <i class="sw-line"></i>
+                      <i class="sw-line short"></i>
+                    </span>
+                  </div>
+                  <div class="theme-meta">
+                    <span class="theme-name">{{ opt.label }}</span>
+                    <el-icon v-if="styleMode === opt.value" class="theme-check">
+                      <CircleCheckFilled />
+                    </el-icon>
+                  </div>
+                </div>
+              </div>
+              <div class="settings-tip">
+                风格与深浅主题独立生效：改变配色与排版气质，立即应用并记住选择。
+              </div>
+            </div>
+
+            <div class="settings-section">
               <div class="settings-label">内容宽度</div>
               <el-segmented
                 v-model="contentWidth"
@@ -1232,6 +1261,28 @@ const widthLabel = computed(
   () => widthOptions.find((o) => o.value === contentWidth.value)?.label || contentWidth.value,
 )
 
+// ---------------- 外观 · 界面风格 ----------------
+const STYLE_KEY = 'rag_style'
+const styleMode = ref('default')
+const styleOptions = [
+  { value: 'default', label: '默认（品牌蓝）' },
+  { value: 'quiet', label: '静奢雅致' },
+  { value: 'salon', label: '书斋暖读' },
+]
+
+function applyStyle() {
+  if (styleMode.value === 'default') {
+    delete document.documentElement.dataset.style
+  } else {
+    document.documentElement.dataset.style = styleMode.value
+  }
+}
+
+watch(styleMode, () => {
+  applyStyle()
+  localStorage.setItem(STYLE_KEY, styleMode.value)
+})
+
 function resolveDark() {
   if (theme.value === 'dark') return true
   if (theme.value === 'light') return false
@@ -2006,6 +2057,7 @@ watch(settingsVisible, (visible) => {
 try {
   navCollapsed.value = localStorage.getItem('rag_nav_collapsed') === '1'
   theme.value = localStorage.getItem(THEME_KEY) || 'system'
+  styleMode.value = localStorage.getItem(STYLE_KEY) || 'default'
   const savedWidth = localStorage.getItem(WIDTH_KEY)
   // 旧版 px 档位迁移到按比例档位
   const legacyMap = { '960px': '55%', '1200px': '70%', '1440px': '85%', none: '100%' }
@@ -2025,6 +2077,7 @@ watch(navCollapsed, (value) => {
 onMounted(() => {
   applyTheme()
   applyWidth()
+  applyStyle()
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme)
 })
 </script>
@@ -2815,4 +2868,80 @@ onMounted(() => {
   justify-content: space-between;
   margin-top: 12px;
 }
+/* ---- 界面风格卡 ---- */
+.style-swatch {
+  height: 52px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.style-swatch .sw-side {
+  width: 26%;
+  border-right: 1px solid rgba(127, 127, 127, 0.16);
+}
+
+.style-swatch .sw-body {
+  flex: 1;
+  padding: 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.style-swatch .sw-line {
+  height: 4px;
+  border-radius: var(--radius-xs);
+  width: 62%;
+  opacity: 0.85;
+}
+
+.style-swatch .sw-line.short {
+  width: 38%;
+  opacity: 0.45;
+}
+
+.style-swatch.default {
+  background: #f3f4f8;
+}
+
+.style-swatch.default .sw-side {
+  background: #ffffff;
+}
+
+.style-swatch.default .sw-line {
+  background: #1677ff;
+}
+
+.style-swatch.quiet {
+  background: #f7f6f3;
+}
+
+.style-swatch.quiet .sw-side {
+  background: #fbfaf8;
+}
+
+.style-swatch.quiet .sw-line {
+  background: #1f2126;
+}
+
+.style-swatch.salon {
+  background: #ece5d8;
+}
+
+.style-swatch.salon .sw-side {
+  background: #f2ecdf;
+}
+
+.style-swatch.salon .sw-line {
+  background: #96691f;
+}
+
+/* 标题字体随风格（默认无衬线；书斋为宋体系） */
+.pane-title {
+  font-family: var(--font-display);
+}
+
 </style>

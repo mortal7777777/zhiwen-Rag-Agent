@@ -370,4 +370,17 @@ onBeforeUnmount(() => {
   background: var(--primary);
   color: var(--text-on-brand);
 }
+/* 阅读排版（书斋暖读启用）：正文行高更松，标题宋体系 */
+html[data-style='salon'] .markdown-body {
+  font-size: 15px;
+  line-height: 1.9;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  font-family: var(--font-display);
+}
+
 </style>

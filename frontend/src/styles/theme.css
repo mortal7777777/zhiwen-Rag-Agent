@@ -88,6 +88,9 @@
   --font-lg: 16px;
   --font-xl: 20px;
   --font-2xl: 24px;
+  /* 标题字体（界面风格可覆写：书斋 → 宋体系） */
+  --font-display: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial,
+    sans-serif;
 
   /* 动效 */
   --dur-fast: 120ms;
@@ -388,6 +391,136 @@ body {
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+/* ============================================================
+   界面风格（设置页可切换；data-style 挂在 <html> 上）
+   只覆写令牌：组件与 Element Plus 映射层自动跟随。
+   quiet=静奢雅致（暖中性灰阶，蓝只留动作）；salon=书斋暖读（纸色 + 墨与琥珀）。
+   ============================================================ */
+html[data-style="quiet"] {
+  --bg-app: #f7f6f3;
+  --bg-sidebar: #fbfaf8;
+  --bg-panel: #fbfaf8;
+  --bg-chat: #ffffff;
+  --bg-card: #f7f6f3;
+  --bg-card-2: #faf9f6;
+  --bg-hover: #f4f2ee;
+  --bg-active: #f1efe9;
+  --border: #eceae5;
+  --border-strong: #e0ddd6;
+  --text-1: #1f2126;
+  --text-2: #5c6169;
+  --text-3: #6e6a64;
+  --primary-soft: rgba(31, 33, 38, 0.06);
+  --user-bubble-bg: #f2f1ee;
+  --user-bubble-border: #e8e6e0;
+  --user-bubble-text: #1f2126;
+  --plan-bg: #faf9f6;
+  --plan-border: #eae7e0;
+  --web-tag-bg: #fdf6ea;
+  --shadow-soft: 0 1px 2px rgba(31, 33, 38, 0.03), 0 2px 8px rgba(31, 33, 38, 0.05);
+  --shadow-pop: 0 2px 10px rgba(31, 33, 38, 0.06), 0 8px 24px rgba(31, 33, 38, 0.10);
+  --shadow-modal: 0 12px 32px rgba(31, 33, 38, 0.14), 0 2px 8px rgba(31, 33, 38, 0.08);
+}
+
+html[data-style="quiet"].dark {
+  --bg-app: #141311;
+  --bg-sidebar: #1a1917;
+  --bg-panel: #191816;
+  --bg-chat: #1e1d1a;
+  --bg-card: #242320;
+  --bg-card-2: #211f1d;
+  --bg-hover: #282724;
+  --bg-active: #2b2a25;
+  --border: #2a2925;
+  --border-strong: #3a3833;
+  --text-1: #e9e7e2;
+  --text-2: #c3c0b9;
+  --text-3: #8e8b84;
+  --primary-soft: rgba(233, 231, 226, 0.08);
+  --user-bubble-bg: #2d2b26;
+  --user-bubble-border: #3a3830;
+  --user-bubble-text: #e9e7e2;
+  --plan-bg: #211f1c;
+  --plan-border: #3a3830;
+  --shadow-soft: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 2px 10px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(74, 148, 255, 0.12);
+  --shadow-modal: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+html[data-style="salon"] {
+  --bg-app: #ece5d8;
+  --bg-sidebar: #f2ecdf;
+  --bg-panel: #f2ecdf;
+  --bg-chat: #f8f4ea;
+  --bg-card: #f7f2e6;
+  --bg-card-2: #fdfaf2;
+  --bg-hover: #efe8d8;
+  --bg-active: #fdfaf2;
+  --border: #e3dbc8;
+  --border-strong: #d5c9ad;
+  --text-1: #33291c;
+  --text-2: #574d3b;
+  --text-3: #6f6450;
+  --primary: #96691f;
+  --primary-2: #b98a3f;
+  --primary-text: #8a5a14;
+  --accent: #b98a3f;
+  --primary-soft: rgba(150, 105, 31, 0.10);
+  --primary-grad: linear-gradient(135deg, #a3742a 0%, #8a5a14 100%);
+  --warning: #b98a3f;
+  --warning-text: #8a5a14;
+  --warning-bg: #faf0da;
+  --warning-border: #e8d9b4;
+  --user-bubble-bg: #fffdf6;
+  --user-bubble-border: #e5dcc4;
+  --user-bubble-text: #33291c;
+  --plan-bg: #faf5e8;
+  --plan-border: #e6dcc2;
+  --web-tag-bg: #f7ecd2;
+  --web-tag-text: #815418;
+  --shadow-soft: 0 1px 2px rgba(70, 55, 30, 0.05), 0 2px 8px rgba(70, 55, 30, 0.06);
+  --shadow-pop: 0 2px 10px rgba(70, 55, 30, 0.08), 0 8px 24px rgba(70, 55, 30, 0.12);
+  --shadow-modal: 0 12px 32px rgba(70, 55, 30, 0.18), 0 2px 8px rgba(70, 55, 30, 0.08);
+  --font-display: 'Songti SC', 'STSong', 'SimSun', 'Noto Serif SC', serif;
+}
+
+html[data-style="salon"].dark {
+  --bg-app: #1c1710;
+  --bg-sidebar: #221c13;
+  --bg-panel: #241e15;
+  --bg-chat: #272019;
+  --bg-card: #2c2418;
+  --bg-card-2: #2a2217;
+  --bg-hover: #30281a;
+  --bg-active: #332a1b;
+  --border: #382e1e;
+  --border-strong: #4a3c26;
+  --text-1: #ece4d4;
+  --text-2: #c7bca6;
+  --text-3: #a3967c;
+  --primary: #c08a3e;
+  --primary-2: #d8a75c;
+  --primary-text: #d0a052;
+  --accent: #c08a3e;
+  --primary-soft: rgba(192, 138, 62, 0.15);
+  --primary-grad: linear-gradient(135deg, #c08a3e 0%, #8f6420 100%);
+  --warning: #c08a3e;
+  --warning-text: #d8a75c;
+  --warning-bg: #3a2f1f;
+  --warning-border: #4a3a24;
+  --user-bubble-bg: #332a1a;
+  --user-bubble-border: #453722;
+  --user-bubble-text: #ece4d4;
+  --plan-bg: #2a2114;
+  --plan-border: #453722;
+  --web-tag-bg: #3a2f1f;
+  --web-tag-text: #e8a33d;
+  --shadow-soft: 0 2px 10px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 2px 10px rgba(0, 0, 0, 0.45), 0 8px 24px rgba(192, 138, 62, 0.10);
+  --shadow-modal: 0 12px 32px rgba(0, 0, 0, 0.55);
+  --font-display: 'Songti SC', 'STSong', 'SimSun', 'Noto Serif SC', serif;
 }
 
 /* 动效降级（系统"减少动态效果"） */

@@ -115,7 +115,7 @@ wo<template>
         <!-- 欢迎页 -->
         <div v-if="!messages.length && !loading" class="welcome">
           <div class="welcome-mark">
-            <el-icon :size="26"><MagicStick /></el-icon>
+            <span class="welcome-glyph">问</span>
           </div>
           <h2 class="welcome-title">有什么可以帮你？</h2>
           <p class="welcome-sub">支持知识库问答、联网搜索与多轮对话记忆</p>
@@ -2849,6 +2849,15 @@ onBeforeUnmount(() => {
   margin-bottom: 20px;
 }
 
+.welcome-glyph {
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  transform: translateY(-1px);
+}
+
 .welcome-title {
   font-size: var(--font-2xl);
   font-weight: 700;
@@ -2886,13 +2895,6 @@ onBeforeUnmount(() => {
   transition: border-color var(--dur-base) var(--ease-out),
     background var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out),
     transform var(--dur-base) var(--ease-out);
-}
-
-.suggestion:hover {
-  border-color: color-mix(in srgb, var(--primary) 30%, var(--border));
-  background: var(--bg-chat);
-  box-shadow: var(--shadow-soft);
-  transform: translateY(-1px);
 }
 
 .suggestion:hover {
@@ -4345,4 +4347,46 @@ onBeforeUnmount(() => {
     max-width: 100%;
   }
 }
+/* ============ 界面风格细节（设置页切换；令牌见 theme.css）============ */
+.welcome-title,
+.chat-title {
+  font-family: var(--font-display);
+}
+
+/* 静奢雅致：AI 头像去渐变（墨版），整体更静 */
+:global(html[data-style='quiet'] .avatar.assistant) {
+  background: var(--text-1);
+  box-shadow: none;
+}
+
+/* 书斋暖读：圆形头像 + 墨色印记 + 琥珀动作 */
+:global(html[data-style='salon'] .avatar) {
+  border-radius: 50%;
+}
+
+:global(html[data-style='salon'] .avatar.assistant) {
+  background: var(--text-1);
+  box-shadow: none;
+}
+
+:global(html[data-style='salon'] .welcome-mark) {
+  border-radius: 50%;
+  background: var(--text-1);
+  color: var(--bg-panel);
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--text-1) 26%, transparent);
+}
+
+:global(html[data-style='salon'] .welcome-mark .welcome-glyph) {
+  font-family: var(--font-display);
+}
+
+:global(html[data-style='salon'] .send-btn) {
+  background: var(--text-1);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--text-1) 25%, transparent);
+}
+
+:global(html[data-style='salon'] .send-btn:hover:not(.is-disabled)) {
+  background: var(--primary);
+}
+
 </style>
