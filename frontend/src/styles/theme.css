@@ -378,6 +378,18 @@ body {
   background: transparent;
 }
 
+/* 通用入场动效（全局关键帧；组件内 `animation: fade-up ...` 引用） */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* 动效降级（系统"减少动态效果"） */
 @media (prefers-reduced-motion: reduce) {
   *,

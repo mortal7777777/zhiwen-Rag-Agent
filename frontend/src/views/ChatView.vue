@@ -725,9 +725,16 @@ wo<template>
               {{ categoryLabel(m.category) }}
             </el-tag>
             <div class="memory-body">
-              <div class="memory-content">{{ m.content }}</div>
+              <div
+                class="memory-content"
+                :class="{ expanded: expandedMemoryIds.has(m.id) }"
+                @click="toggleMemoryExpand(m.id)"
+              >
+                {{ m.content }}
+              </div>
               <div class="memory-meta">
                 <span v-if="m.status === 'archived'" class="memory-archived-flag">已归档</span>
+                <span>录入 {{ fmtMemoryDate(m.created_at) }}</span>
                 <span v-if="m.hit_count">命中 {{ m.hit_count }} 次</span>
               </div>
             </div>
@@ -1185,6 +1192,19 @@ const memories = ref([])
 const memoryEditVisible = ref(false)
 const consolidating = ref(false)
 const memoryForm = ref({ id: null, content: '', category: 'profile' })
+// 长记忆折叠：默认两行截断，点击展开
+const expandedMemoryIds = ref(new Set())
+function toggleMemoryExpand(id) {
+  const next = new Set(expandedMemoryIds.value)
+  next.has(id) ? next.delete(id) : next.add(id)
+  expandedMemoryIds.value = next
+}
+function fmtMemoryDate(v) {
+  if (!v) return '未知'
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return '未知'
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
 // 是否连归档记忆一起显示（归档 = 停用但保留，不参与召回/导出）
 const showArchived = ref(false)
 
@@ -1438,6 +1458,8 @@ async function switchSession(session) {
   if (activeId.value != null) sessionMessagesCache[activeId.value] = messages.value
   activeId.value = session.id
   currentTitle.value = session.title
+  // 窄屏（<1024）会话栏为抽屉模式：选中会话后自动收起（媒体查询见样式末尾）
+  if (typeof window !== 'undefined' && window.innerWidth < 1024) sessionCollapsed.value = true
   restoringTemplate = true
   templateId.value = session.template_id || 0
   restoringTemplate = false
@@ -2550,6 +2572,8 @@ onMounted(() => {
   loadSessions()
   loadTemplates()
   loadSuggestions()
+  // 窄屏（<1024）默认收起会话栏（抽屉模式，见样式媒体查询）
+  if (window.innerWidth < 1024) sessionCollapsed.value = true
   window.addEventListener('keydown', onPermissionKeydown, true)
 })
 
@@ -2658,7 +2682,7 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   font-size: var(--font-2xs);
   color: var(--text-3);
-  background: var(--bg-hover);
+  background: var(--bg-card-2);
   border-radius: var(--radius-sm);
   padding: 1px 6px;
 }
@@ -2728,6 +2752,16 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   padding: 0 16px;
   border-bottom: 1px solid var(--border);
+}
+
+/* 顶部动作按钮：中性灰、悬浮升蓝（蓝色留给发送等主动作） */
+.chat-header :deep(.el-button.is-text) {
+  color: var(--text-2);
+}
+
+.chat-header :deep(.el-button.is-text:hover) {
+  color: var(--primary-text);
+  background: var(--bg-hover);
 }
 
 .header-left {
@@ -2849,7 +2883,16 @@ onBeforeUnmount(() => {
   font-size: var(--font-base);
   cursor: pointer;
   text-align: left;
-  transition: all 0.2s;
+  transition: border-color var(--dur-base) var(--ease-out),
+    background var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+
+.suggestion:hover {
+  border-color: color-mix(in srgb, var(--primary) 30%, var(--border));
+  background: var(--bg-chat);
+  box-shadow: var(--shadow-soft);
+  transform: translateY(-1px);
 }
 
 .suggestion:hover {
@@ -2871,6 +2914,11 @@ onBeforeUnmount(() => {
   background: var(--bg-active);
   color: var(--primary);
 }
+
+.suggestions {
+  animation: fade-up var(--dur-slow) var(--ease-out) both;
+}
+
 
 /* 消息 */
 .msg {
@@ -4172,6 +4220,10 @@ onBeforeUnmount(() => {
   opacity: 0.6;
 }
 
+.memory-item:hover {
+  border-color: color-mix(in srgb, var(--primary) 18%, var(--border));
+}
+
 .memory-main {
   flex: 1;
   min-width: 0;
@@ -4199,6 +4251,18 @@ onBeforeUnmount(() => {
   /* 长路径/URL 等无空格长串要能折行，否则会溢出顶住右侧的编辑/归档/删除按钮 */
   overflow-wrap: anywhere;
   word-break: break-word;
+  /* 默认两行截断、点击展开（条目多时保证列表可扫读） */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.memory-content.expanded {
+  -webkit-line-clamp: unset;
+  display: block;
+  overflow: visible;
 }
 
 .memory-meta {
@@ -4219,8 +4283,66 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
+/* 操作降权：默认灰字（悬浮才出提示色，删除悬浮才红） */
+.memory-ops :deep(.el-button.is-link) {
+  color: var(--text-3);
+}
+
+.memory-ops :deep(.el-button.is-link:hover) {
+  color: var(--primary-text);
+}
+
+.memory-ops :deep(.el-button--danger.is-link) {
+  color: var(--text-3);
+}
+
+.memory-ops :deep(.el-button--danger.is-link:hover) {
+  color: var(--danger-text);
+}
+
 .memory-archived-toggle {
   margin-right: 4px;
 }
 
+/* ============ 响应式（阶段4） ============ */
+@media (max-width: 1440px) {
+  .session-panel {
+    width: 208px;
+  }
+}
+
+@media (max-width: 1024px) {
+  /* 会话栏改抽屉：展开时浮层覆盖，收起时保持 56px 竖条 */
+  .session-panel:not(.collapsed) {
+    position: fixed;
+    left: 12px;
+    top: 12px;
+    bottom: 12px;
+    z-index: var(--z-overlay);
+    width: 258px;
+    box-shadow: var(--shadow-modal);
+  }
+
+  .chat-header {
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 768px) {
+  .chat-page {
+    height: calc(100vh - 16px);
+  }
+
+  .messages {
+    padding: 12px 10px;
+  }
+
+  .chat-header {
+    padding: 0 10px;
+  }
+
+  .msg {
+    max-width: 100%;
+  }
+}
 </style>

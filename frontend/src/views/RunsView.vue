@@ -785,4 +785,8 @@ onBeforeUnmount(() => {
   font-size: var(--font-xs);
   line-height: 1.6;
 }
+/* 入场动效（阶段4；关键帧在 theme.css 全局定义） */
+.runs-page {
+  animation: fade-up var(--dur-slow) var(--ease-out) both;
+}
 </style>
