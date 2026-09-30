@@ -726,6 +726,10 @@
                   <el-icon :size="14"><Refresh /></el-icon>
                   刷新
                 </el-button>
+                <el-button size="small" text @click="connectMcp(null)">
+                  <el-icon :size="14"><VideoPlay /></el-icon>
+                  全部启动
+                </el-button>
               </div>
               <div class="provider-hint">
                 MCP 工具会自动注册为 Agent 可用工具（stdio 本地进程 / HTTP 远程）。
@@ -750,6 +754,14 @@
                     @click="toggleMcpTools(s.id)"
                   >
                     工具 {{ mcpTools(s).length }}
+                  </el-button>
+                  <el-button
+                    v-if="s.enabled && mcpBadge(s).tone !== 'ok'"
+                    link
+                    size="small"
+                    @click="connectMcp(s)"
+                  >
+                    启动
                   </el-button>
                   <el-button link size="small" @click="openMcpDialog(s)">编辑</el-button>
                   <el-button link size="small" @click="testMcp(s)">测试</el-button>
@@ -1243,6 +1255,7 @@ import {
   Search,
   Setting,
   Refresh,
+  VideoPlay,
 } from '@element-plus/icons-vue'
 import {
   executeTool,
@@ -1251,6 +1264,7 @@ import {
   getSettings,
   listChatModels,
   listSkills,
+  connectMcpServers,
   listMcpServers,
   resetSkillPrefs,
   saveSettings,
@@ -1428,6 +1442,7 @@ const mcpStatus = ref({}) // GET /mcp 返回的运行时状态（连接/工具/�
 const mcpTested = ref({}) // 本地「测试」结果（服务器未启动时也给反馈）
 const mcpExpanded = ref(new Set()) // 展开工具列表的服务器 id
 const mcpEditingId = ref('')
+const mcpConnecting = ref(false)
 const mcpForm = ref({
   name: '',
   type: 'stdio',
@@ -1860,6 +1875,9 @@ function parseKvLines(text) {
 
 /** 状态徽标：运行时状态优先，其次最近一次测试结果。 */
 function mcpBadge(s) {
+  if (!s.enabled) {
+    return { tone: 'idle', text: '已停用', title: '该服务器已关闭，打开右侧开关后可用' }
+  }
   const st = mcpStatus.value[s.id]
   if (st) {
     if (st.connected) {
@@ -1969,7 +1987,8 @@ async function saveMcpDialog() {
 
 async function saveMcpList() {
   try {
-    await saveMcpServers(mcpServers.value)
+    const data = await saveMcpServers(mcpServers.value)
+    if (data && data.status) mcpStatus.value = data.status
   } catch (error) {
     ElMessage.error(error.response?.data?.detail || '保存 MCP 配置失败')
   }
@@ -2000,6 +2019,48 @@ async function testMcp(s) {
     }
   } catch (error) {
     ElMessage.error(error.response?.data?.detail || '测试失败')
+  }
+}
+
+/** 「启动」：让运行时管理器立即连接（后台），轮询状态直到出结果。 */
+async function connectMcp(s) {
+  const targets = (s ? [s] : mcpServers.value.filter((x) => x.enabled)).filter(
+    (x) => mcpBadge(x).tone !== 'ok',
+  )
+  const ids = targets.map((x) => x.id)
+  if (!ids.length) {
+    ElMessage.info('没有需要启动的服务器')
+    return
+  }
+  mcpConnecting.value = true
+  try {
+    const res = await connectMcpServers(ids)
+    if (res.status) mcpStatus.value = res.status
+    if (!res.ok) {
+      ElMessage.error(res.error || '启动失败')
+      return
+    }
+    // 后台轮询：直到全部出结果（连接成功/失败）或超时（约 100s）
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2500))
+      const data = await listMcpServers()
+      mcpStatus.value = data.status || {}
+      const settled = ids.every((id) => {
+        const st = mcpStatus.value[id]
+        return st && (st.connected || st.error)
+      })
+      if (settled) break
+    }
+    const okCount = ids.filter((id) => mcpStatus.value[id]?.connected).length
+    if (okCount === ids.length) ElMessage.success(`已启动 ${okCount} 个服务器`)
+    else ElMessage.warning(`${okCount}/${ids.length} 个已连接，详情看状态徽标`)
+  } catch (error) {
+    const detail = error.response?.data?.detail
+    ElMessage.error(
+      error.response?.status === 404 ? '后端未加载新接口，请重启后端' : detail || '启动失败',
+    )
+  } finally {
+    mcpConnecting.value = false
   }
 }
 

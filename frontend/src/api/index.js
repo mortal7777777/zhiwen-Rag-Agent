@@ -333,6 +333,8 @@ export const saveMcpServers = (servers) =>
   client.put('/mcp', { servers }).then((res) => res.data)
 export const testMcpServer = (cfg) =>
   client.post('/mcp/test', cfg).then((res) => res.data)
+export const connectMcpServers = (ids) =>
+  client.post('/mcp/connect', { ids }).then((res) => res.data)
 
 /** 文件型项目记忆（AGENTS.md） */
 export const getProjectMemory = () =>
