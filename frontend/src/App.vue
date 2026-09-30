@@ -722,6 +722,10 @@
                   <el-icon :size="13"><Plus /></el-icon>
                   添加服务器
                 </el-button>
+                <el-button size="small" text @click="loadMcp()">
+                  <el-icon :size="14"><Refresh /></el-icon>
+                  刷新
+                </el-button>
               </div>
               <div class="provider-hint">
                 MCP 工具会自动注册为 Agent 可用工具（stdio 本地进程 / HTTP 远程）。
@@ -735,20 +739,29 @@
                   <el-tag size="small" effect="plain" :type="s.type === 'http' ? 'success' : 'primary'">
                     {{ s.type === 'http' ? 'HTTP' : 'stdio' }}
                   </el-tag>
+                  <el-tooltip :content="mcpBadge(s).title || ' '" placement="top">
+                    <span :class="['mcp-badge', mcpBadge(s).tone]">{{ mcpBadge(s).text }}</span>
+                  </el-tooltip>
                   <span class="provider-flex"></span>
+                  <el-button
+                    v-if="mcpTools(s).length"
+                    link
+                    size="small"
+                    @click="toggleMcpTools(s.id)"
+                  >
+                    工具 {{ mcpTools(s).length }}
+                  </el-button>
+                  <el-button link size="small" @click="openMcpDialog(s)">编辑</el-button>
                   <el-button link size="small" @click="testMcp(s)">测试</el-button>
                   <el-switch v-model="s.enabled" size="small" @change="saveMcpList" />
                   <el-button link type="danger" size="small" @click="removeMcp(s)">删除</el-button>
                 </div>
-                <div class="provider-grid">
-                  <div class="field wide">
-                    <label>{{ s.type === 'http' ? 'URL' : '命令' }}</label>
-                    <el-input
-                      v-model="s.command"
-                      size="small"
-                      :placeholder="s.type === 'http' ? 'https://host/mcp' : 'npx -y @modelcontextprotocol/server-filesystem'"
-                    />
-                  </div>
+                <div class="mcp-cmd">
+                  {{ s.type === 'http' ? s.url : [s.command, ...(s.args || [])].join(' ') }}
+                </div>
+                <div v-if="mcpEnvSummary(s)" class="mcp-env">{{ mcpEnvSummary(s) }}</div>
+                <div v-if="mcpTools(s).length && mcpExpanded.has(s.id)" class="mcp-tools">
+                  <span v-for="t in mcpTools(s)" :key="t" class="mcp-tool-chip">{{ t }}</span>
                 </div>
               </div>
             </div>
@@ -1141,28 +1154,50 @@
     </el-dialog>
 
     <!-- 添加 MCP 服务器 -->
-    <el-dialog v-model="mcpDialogVisible" title="添加 MCP 服务器" width="480px" append-to-body>
+    <el-dialog
+      v-model="mcpDialogVisible"
+      :title="mcpEditingId ? '编辑 MCP 服务器' : '添加 MCP 服务器'"
+      width="520px"
+      append-to-body
+    >
       <el-form :model="mcpForm" label-position="top">
         <el-form-item label="名称">
-          <el-input v-model="mcpForm.name" placeholder="例如：filesystem / database" />
+          <el-input v-model="mcpForm.name" placeholder="例如：context7 / github" />
         </el-form-item>
         <el-form-item label="传输类型">
-          <el-radio-group v-model="mcpForm.type">
+          <el-radio-group v-model="mcpForm.type" :disabled="!!mcpEditingId">
             <el-radio-button value="stdio">stdio（本地进程）</el-radio-button>
             <el-radio-button value="http">HTTP（远程）</el-radio-button>
           </el-radio-group>
         </el-form-item>
-        <el-form-item v-if="mcpForm.type === 'stdio'" label="启动命令">
+        <el-form-item v-if="mcpForm.type === 'stdio'" label="启动命令（含参数，空格分隔）">
           <el-input v-model="mcpForm.command" placeholder="npx -y @modelcontextprotocol/server-filesystem" />
         </el-form-item>
         <el-form-item v-else label="URL">
           <el-input v-model="mcpForm.url" placeholder="https://host/mcp" />
         </el-form-item>
+        <el-form-item v-if="mcpForm.type === 'stdio'" label="环境变量（每行 KEY=VALUE，可选）">
+          <el-input
+            v-model="mcpForm.envText"
+            type="textarea"
+            :rows="3"
+            placeholder="FIRECRAWL_API_KEY=fc-xxxxxxxx"
+          />
+        </el-form-item>
+        <el-form-item v-else label="请求头（每行 KEY=VALUE，可选）">
+          <el-input
+            v-model="mcpForm.headersText"
+            type="textarea"
+            :rows="3"
+            placeholder="Authorization=Bearer gho_xxxxxxxx"
+          />
+        </el-form-item>
+        <div class="settings-tip">修改命令/凭据会触发该服务器重连；令牌等敏感值仅存本机数据库。</div>
       </el-form>
       <template #footer>
         <el-button @click="mcpDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="mcpTesting" @click="addMcpServer">
-          添加
+        <el-button type="primary" :loading="mcpTesting" @click="saveMcpDialog">
+          {{ mcpEditingId ? '保存' : '添加' }}
         </el-button>
       </template>
     </el-dialog>
@@ -1207,6 +1242,7 @@ import {
   Plus,
   Search,
   Setting,
+  Refresh,
 } from '@element-plus/icons-vue'
 import {
   executeTool,
@@ -1388,7 +1424,18 @@ const ALLOWLIST_SUGGESTIONS = [
 const mcpServers = ref([])
 const mcpDialogVisible = ref(false)
 const mcpTesting = ref(false)
-const mcpForm = ref({ name: '', type: 'stdio', command: '', url: '' })
+const mcpStatus = ref({}) // GET /mcp 返回的运行时状态（连接/工具/错误）
+const mcpTested = ref({}) // 本地「测试」结果（服务器未启动时也给反馈）
+const mcpExpanded = ref(new Set()) // 展开工具列表的服务器 id
+const mcpEditingId = ref('')
+const mcpForm = ref({
+  name: '',
+  type: 'stdio',
+  command: '',
+  url: '',
+  envText: '',
+  headersText: '',
+})
 
 // 项目记忆查看
 const memoryDialogVisible = ref(false)
@@ -1668,8 +1715,10 @@ async function loadMcp() {
   try {
     const data = await listMcpServers()
     mcpServers.value = data.servers || []
+    mcpStatus.value = data.status || {}
   } catch {
     mcpServers.value = []
+    mcpStatus.value = {}
   }
 }
 
@@ -1765,12 +1814,100 @@ async function testTool(type) {
   }
 }
 
-function openMcpDialog() {
-  mcpForm.value = { name: '', type: 'stdio', command: '', url: '' }
+function openMcpDialog(server) {
+  if (server) {
+    mcpEditingId.value = server.id
+    mcpForm.value = {
+      name: server.name || '',
+      type: server.type || 'stdio',
+      command: server.type === 'http' ? '' : [server.command, ...(server.args || [])].join(' '),
+      url: server.url || '',
+      envText: Object.entries(server.env || {})
+        .map(([k, v]) => `${k}=${v}`)
+        .join('\n'),
+      headersText: Object.entries(server.headers || {})
+        .map(([k, v]) => `${k}=${v}`)
+        .join('\n'),
+    }
+  } else {
+    mcpEditingId.value = ''
+    mcpForm.value = {
+      name: '',
+      type: 'stdio',
+      command: '',
+      url: '',
+      envText: '',
+      headersText: '',
+    }
+  }
   mcpDialogVisible.value = true
 }
 
-async function addMcpServer() {
+/** 解析「每行 KEY=VALUE」文本域为对象。 */
+function parseKvLines(text) {
+  const out = {}
+  for (const line of String(text || '').split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const idx = trimmed.indexOf('=')
+    if (idx <= 0) continue
+    const key = trimmed.slice(0, idx).trim()
+    const value = trimmed.slice(idx + 1).trim()
+    if (key) out[key] = value
+  }
+  return out
+}
+
+/** 状态徽标：运行时状态优先，其次最近一次测试结果。 */
+function mcpBadge(s) {
+  const st = mcpStatus.value[s.id]
+  if (st) {
+    if (st.connected) {
+      return { tone: 'ok', text: `已连接 · ${st.tool_count} 工具`, title: '运行时连接正常' }
+    }
+    if (st.connecting) return { tone: 'idle', text: '连接中…', title: '后台正在连接' }
+    if (st.cached) {
+      return { tone: 'warn', text: `离线 · 缓存 ${st.tool_count} 工具`, title: st.error || '连接失败，使用上次缓存' }
+    }
+    if (st.error) return { tone: 'bad', text: '连接失败', title: st.error }
+    return { tone: 'idle', text: '未连接', title: st.error || '等待连接' }
+  }
+  const tr = mcpTested.value[s.id]
+  if (tr) {
+    return tr.ok
+      ? {
+          tone: 'ok',
+          text: `测试通过 · ${tr.tools.length} 工具`,
+          title: `${tr.at} 连接正常（${tr.latency_ms}ms）`,
+        }
+      : { tone: 'bad', text: '测试失败', title: tr.error || '' }
+  }
+  return { tone: 'idle', text: '未启动', title: '尚未连接：点「测试」或发一条消息后显示' }
+}
+
+function mcpTools(s) {
+  const st = mcpStatus.value[s.id]
+  if (st && st.tools && st.tools.length) return st.tools
+  const tr = mcpTested.value[s.id]
+  return (tr && tr.tools) || []
+}
+
+function toggleMcpTools(id) {
+  const next = new Set(mcpExpanded.value)
+  next.has(id) ? next.delete(id) : next.add(id)
+  mcpExpanded.value = next
+}
+
+function mcpEnvSummary(s) {
+  const parts = []
+  const envKeys = Object.keys(s.env || {})
+  const headerKeys = Object.keys(s.headers || {})
+  if (envKeys.length) parts.push(`环境变量 ${envKeys.length} 项`)
+  if (headerKeys.length) parts.push(`请求头 ${headerKeys.length} 项`)
+  return parts.join(' · ')
+}
+
+async function saveMcpDialog() {
   const f = mcpForm.value
   if (!f.name.trim() || (f.type === 'stdio' ? !f.command.trim() : !f.url.trim())) {
     ElMessage.warning('名称和启动命令/URL 不能为空')
@@ -1778,21 +1915,53 @@ async function addMcpServer() {
   }
   mcpTesting.value = true
   try {
-    const cfg = {
-      id: `mcp_${Date.now()}`,
-      name: f.name.trim(),
-      type: f.type,
-      command: f.command.trim(),
-      args: [],
-      url: f.url.trim(),
-      enabled: true,
+    const env = parseKvLines(f.envText)
+    const headers = parseKvLines(f.headersText)
+    if (mcpEditingId.value) {
+      const target = mcpServers.value.find((x) => x.id === mcpEditingId.value)
+      if (target) {
+        target.name = f.name.trim()
+        if (f.type === 'stdio') {
+          const parts = f.command.trim().split(/\s+/)
+          target.command = parts[0]
+          target.args = parts.slice(1)
+          target.env = env
+        } else {
+          target.url = f.url.trim()
+          target.headers = headers
+        }
+      }
+      await saveMcpList()
+      mcpDialogVisible.value = false
+      ElMessage.success('已保存，命令/凭据变更会触发重连')
+    } else {
+      const cfg = {
+        id: `mcp_${Date.now()}`,
+        name: f.name.trim(),
+        type: f.type,
+        command: '',
+        args: [],
+        url: '',
+        enabled: true,
+        env: {},
+        headers: {},
+      }
+      if (f.type === 'stdio') {
+        const parts = f.command.trim().split(/\s+/)
+        cfg.command = parts[0]
+        cfg.args = parts.slice(1)
+        cfg.env = env
+      } else {
+        cfg.url = f.url.trim()
+        cfg.headers = headers
+      }
+      mcpServers.value.push(cfg)
+      await saveMcpList()
+      mcpDialogVisible.value = false
+      ElMessage.success('MCP 服务器已添加')
     }
-    mcpServers.value.push(cfg)
-    await saveMcpList()
-    mcpDialogVisible.value = false
-    ElMessage.success('MCP 服务器已添加')
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '添加失败')
+    ElMessage.error(error.response?.data?.detail || '保存失败')
   } finally {
     mcpTesting.value = false
   }
@@ -1809,9 +1978,20 @@ async function saveMcpList() {
 async function testMcp(s) {
   try {
     const result = await testMcpServer(s)
+    mcpTested.value = {
+      ...mcpTested.value,
+      [s.id]: {
+        ok: !!result.ok,
+        tools: result.tools || [],
+        latency_ms: result.latency_ms,
+        error: result.error,
+        at: new Date().toLocaleTimeString(),
+      },
+    }
     if (result.ok) {
+      const list = (result.tools || []).join(', ') || '（无）'
       ElMessageBox.alert(
-        `连接成功，工具：${(result.tools || []).join(', ') || '（无）'}`,
+        `连接成功（${result.latency_ms}ms）\n工具（${(result.tools || []).length}）：${list}`,
         'MCP 测试',
         { confirmButtonText: '知道了' },
       )
@@ -2965,6 +3145,62 @@ onMounted(() => {
 /* 标题字体随风格（默认无衬线；书斋为宋体系） */
 .pane-title {
   font-family: var(--font-display);
+}
+
+/* ---- MCP 面板增强 ---- */
+.mcp-badge {
+  flex-shrink: 0;
+  font-size: var(--font-2xs);
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.mcp-badge.ok {
+  color: var(--success-text, var(--success));
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+
+.mcp-badge.warn {
+  color: var(--warning-text, var(--warning));
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+}
+
+.mcp-badge.bad {
+  color: var(--danger-text, var(--danger));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.mcp-cmd {
+  margin-top: 6px;
+  font-family: Consolas, Monaco, monospace;
+  font-size: var(--font-xs);
+  color: var(--text-3);
+  word-break: break-all;
+}
+
+.mcp-env {
+  margin-top: 2px;
+  font-size: var(--font-2xs);
+  color: var(--text-3);
+}
+
+.mcp-tools {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mcp-tool-chip {
+  font-family: Consolas, Monaco, monospace;
+  font-size: var(--font-2xs);
+  color: var(--text-2);
+  background: var(--bg-hover);
+  border-radius: var(--radius-xs);
+  padding: 1px 6px;
 }
 
 </style>
