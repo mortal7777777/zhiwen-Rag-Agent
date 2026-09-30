@@ -109,6 +109,15 @@ class LangGraphAgentService(AgentService):
             logger.warning("MCP 工具配置失败：%s", exc)
             return []
 
+    def mcp_status(self) -> dict:
+        """MCP 服务器运行状态（设置页用；不触发连接）。"""
+        if self._mcp is None:
+            return {}
+        try:
+            return self._mcp.status()
+        except Exception:
+            return {}
+
     def extra_tools(
         self, project_dir: str | None = None, sandbox: str | None = None
     ) -> list:

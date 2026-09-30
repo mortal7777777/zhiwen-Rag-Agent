@@ -140,3 +140,44 @@ def test_disabled_server_has_no_tools(tmp_path, monkeypatch):
     )
     mgr = MCPManager(cache_dir=tmp_path)
     assert mgr.configure([dict(CFG, enabled=False)]) == []
+
+
+def test_server_signature_covers_env_and_headers():
+    """env/headers 参与签名：改了 env（如换 Key）必须重建会话。"""
+    base = dict(CFG)
+    with_env = dict(CFG, env={"FIRECRAWL_API_KEY": "fc-1"})
+    assert _server_signature(base) != _server_signature(with_env)
+
+    # 字典顺序无关（sort_keys）
+    a = dict(CFG, env={"A": "1", "B": "2"})
+    b = dict(CFG, env={"B": "2", "A": "1"})
+    assert _server_signature(a) == _server_signature(b)
+
+    h1 = dict(CFG, type="http", url="https://x/mcp", headers={"Authorization": "Bearer t1"})
+    h2 = dict(CFG, type="http", url="https://x/mcp", headers={"Authorization": "Bearer t2"})
+    assert _server_signature(h1) != _server_signature(h2)
+
+
+def test_manager_status_reports_sessions():
+    """status() 输出连接/缓存/工具信息，供设置页展示（不触发连接）。"""
+    mgr = MCPManager(cache_dir=None)
+    live = MCPServerSession(dict(CFG), cache_dir=None)
+    live.tools = [{"name": "a"}, {"name": "b"}]
+    live.connected = True
+    mgr._servers["demo"] = live
+
+    st = mgr.status()
+    assert st["demo"]["connected"] is True
+    assert st["demo"]["cached"] is False
+    assert st["demo"]["tool_count"] == 2
+    assert st["demo"]["tools"] == ["a", "b"]
+
+    dead = MCPServerSession(dict(CFG, id="demo2", name="缓存件"), cache_dir=None)
+    dead.cached_tools = [{"name": "c"}]
+    mgr._servers["demo2"] = dead
+
+    st = mgr.status()
+    assert st["demo2"]["connected"] is False
+    assert st["demo2"]["cached"] is True
+    assert st["demo2"]["tool_count"] == 1
+

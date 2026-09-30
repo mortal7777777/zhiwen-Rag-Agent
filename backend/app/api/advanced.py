@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -64,11 +65,14 @@ def save_todos(
 
 
 @router.get("/mcp")
-def list_mcp_servers(db: Session = Depends(get_db)) -> dict:
-    """MCP 服务器配置列表。"""
+def list_mcp_servers(
+    db: Session = Depends(get_db),
+    agent: LangGraphAgentService = Depends(get_agent_service),
+) -> dict:
+    """MCP 服务器配置列表 + 各服务器运行状态。"""
     raw = repo.get_meta(db, "mcp_servers")
     servers = json.loads(raw) if raw else []
-    return {"servers": servers}
+    return {"servers": servers, "status": agent.mcp_status()}
 
 
 @router.put("/mcp")
@@ -89,6 +93,16 @@ def save_mcp_servers(
                 "args": [str(a) for a in (s.get("args") or [])],
                 "url": str(s.get("url") or "").strip(),
                 "enabled": bool(s.get("enabled", True)),
+                "env": {
+                    str(k): str(v)
+                    for k, v in (s.get("env") or {}).items()
+                    if str(k).strip()
+                },
+                "headers": {
+                    str(k): str(v)
+                    for k, v in (s.get("headers") or {}).items()
+                    if str(k).strip()
+                },
             }
         )
     repo.set_meta(db, "mcp_servers", json.dumps(cleaned, ensure_ascii=False))
@@ -98,19 +112,21 @@ def save_mcp_servers(
 
 @router.post("/mcp/test")
 def test_mcp_server(payload: dict) -> dict:
-    """一次性测试 MCP 服务器连接（不保存）。"""
+    """一次性测试 MCP 服务器连接（不保存、独立进程）。"""
     from ..mcp_manager import MCPServerSession
 
     session = MCPServerSession(payload)
-    ok = session.start(timeout=15)
-    result = {
+    started = time.time()
+    ok = session.start(timeout=60)
+    return {
         "ok": ok,
         "server": session.name,
-        "tools": [t["name"] for t in session.tools],
+        "tools": [t["name"] for t in (session.tools or session.available_tools())],
         "error": session.error,
+        "latency_ms": int((time.time() - started) * 1000),
     }
-    session.close()
-    return result
+    # 说明：session 在测试进程内独立启动，结果不进入运行时管理器；
+    # 面板状态以 GET /mcp 的 status 为准（随 Agent 运行/重连更新）。
 
 
 # ---------------- 原生 checkpointer：时间旅行（快照审计） ----------------

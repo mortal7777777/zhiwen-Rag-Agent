@@ -129,3 +129,6 @@ docs/INTERVIEW_*
 
 backend/cmrc2018_dev.json
 backend/cmrc2018_eval_result.jsonl
+
+# 独立 venv 的 MCP server（本地运行时产物）
+backend/.mcp-servers/

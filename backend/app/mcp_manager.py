@@ -35,7 +35,7 @@ RECONNECT_COOLDOWN = 60.0
 
 
 def _server_signature(cfg: dict) -> str:
-    """服务器配置签名：同 id 但命令/参数变了也要重建会话。"""
+    """服务器配置签名：同 id 但命令/参数/环境变量/请求头变了也要重建会话。"""
     return json.dumps(
         [
             str(cfg.get("type") or "stdio"),
@@ -43,8 +43,11 @@ def _server_signature(cfg: dict) -> str:
             [str(a) for a in (cfg.get("args") or [])],
             str(cfg.get("url") or ""),
             str(cfg.get("name") or ""),
+            {str(k): str(v) for k, v in (cfg.get("env") or {}).items()},
+            {str(k): str(v) for k, v in (cfg.get("headers") or {}).items()},
         ],
         ensure_ascii=False,
+        sort_keys=True,
     )
 
 
@@ -139,6 +142,7 @@ class MCPServerSession:
         self._thread: threading.Thread | None = None
         self._session = None
         self._context = None
+        self._http_client = None
         self._lock = threading.Lock()
         self._connecting = False
         self._last_attempt = 0.0
@@ -262,14 +266,40 @@ class MCPServerSession:
                 if not url:
                     self.error = "缺少 URL"
                     return
-                self._context = streamable_http_client(url)
+                headers = {
+                    str(k): str(v)
+                    for k, v in (self.config.get("headers") or {}).items()
+                    if str(k).strip()
+                }
+                client = None
+                if headers:
+                    # 远程服务鉴权（如 GitHub MCP 的 Authorization 头）：
+                    # 自建带 headers 的 httpx 客户端，生命周期归本会话管理
+                    try:
+                        from mcp.shared._httpx_utils import create_mcp_http_client
+
+                        client = create_mcp_http_client(headers=headers)
+                        self._http_client = client
+                    except Exception as exc:
+                        logger.warning("MCP %s 自定义请求头不可用：%s", self.name, exc)
+                self._context = (
+                    streamable_http_client(url, http_client=client)
+                    if client is not None
+                    else streamable_http_client(url)
+                )
                 read, write = await self._context.__aenter__()
             else:
                 from mcp.client.stdio import StdioServerParameters, stdio_client
 
                 command = self.config.get("command") or ""
                 args = [str(a) for a in (self.config.get("args") or [])]
-                params = StdioServerParameters(command=command, args=args)
+                # 自定义环境变量合并进安全默认环境（SDK 语义：默认集 | 自定义）
+                env = {
+                    str(k): str(v)
+                    for k, v in (self.config.get("env") or {}).items()
+                    if str(k).strip()
+                }
+                params = StdioServerParameters(command=command, args=args, env=env or None)
                 self._context = stdio_client(params)
                 read, write = await self._context.__aenter__()
             self._session = ClientSession(read, write)
@@ -341,6 +371,11 @@ class MCPServerSession:
                             await self._context.__aexit__(None, None, None)
                         except Exception:
                             pass
+                    if self._http_client is not None:
+                        try:
+                            await self._http_client.aclose()
+                        except Exception:
+                            pass
 
                 asyncio.run_coroutine_threadsafe(_shutdown(), self._loop).result(timeout=5)
                 self._loop.call_soon_threadsafe(self._loop.stop)
@@ -348,6 +383,7 @@ class MCPServerSession:
                 pass
         self._session = None
         self._context = None
+        self._http_client = None
         self._loop = None
         self._thread = None
         self.connected = False
@@ -410,6 +446,25 @@ class MCPManager:
                         make_mcp_tool(server, cfg, t["name"], t["description"], t["inputSchema"])
                     )
             return tools
+
+    def status(self) -> dict[str, dict]:
+        """各已实例化服务器的运行状态（设置页展示用，绝不触发连接）。"""
+        with self._lock:
+            out: dict[str, dict] = {}
+            for sid, srv in self._servers.items():
+                tools = srv.tools if srv.connected else srv.available_tools()
+                out[sid] = {
+                    "id": sid,
+                    "name": srv.name,
+                    "connected": bool(srv.connected),
+                    "connecting": bool(getattr(srv, "_connecting", False)),
+                    "error": srv.error,
+                    "tool_count": len(tools),
+                    "tools": [str(t.get("name")) for t in tools],
+                    "cached": (not srv.connected) and bool(srv.cached_tools),
+                    "last_attempt": getattr(srv, "_last_attempt", None) or None,
+                }
+            return out
 
     def shutdown(self) -> None:
         with self._lock:
