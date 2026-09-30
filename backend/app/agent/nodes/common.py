@@ -117,37 +117,6 @@ def _failure_limit(state: AgentState, settings) -> int:
     return int(effective(settings, "agent_max_failures") or 3)
 
 
-def _generate_reasoning_summary(
-    service: "LangGraphAgentService",
-    state: AgentState,
-) -> str:
-    """生成"执行摘要"：基于计划+工具轨迹，用低温模型写一段简短的执行说明。
-
-    注意这是**事后叙述**，不是模型真实的推理过程（真实思考在
-    reasoning_content 里）。所以提示词里明确要求"只陈述实际做了什么"，
-    不要求它描述"如何分析、为什么这样回答"——那会诱导模型编造推理。
-    """
-    trace_lines = "\n".join(
-        f"- 调用 {t.get('name')}：{str(t.get('summary') or '')[:80]}"
-        for t in (state.get("tool_trace") or [])[:4]
-    )
-    prompt = (
-        "根据下面的执行过程，用第一人称写一段不超过 120 字的【执行摘要】。"
-        "只陈述实际做了什么（检索/搜索了什么、得到什么结论），"
-        "不要描述'我如何分析''我为什么这样回答'这类推理过程——那是编造。"
-        "只输出摘要本身，不要解释。\n\n"
-        f"问题：{state['question'][:300]}\n"
-        f"计划：{'；'.join(state.get('plan_steps') or [])}\n"
-        f"工具过程：\n{trace_lines or '（无工具调用）'}"
-    )
-    try:
-        resp = service.context._invoke([HumanMessage(content=prompt)])
-        return message_text(resp.content).strip()[:200]
-    except Exception as exc:
-        logger.warning("思考摘要生成失败：%s", exc)
-        return ""
-
-
 # ============================================================
 # 节点：prepare
 # ============================================================

@@ -217,7 +217,7 @@ class Settings:
     tool_permission_mode: str = "ask"     # ask=敏感操作人工确认；allow=自动批准（跳过确认）
     permission_timeout: int = 0           # 等待人工确认的超时（秒），0=无限等待（类 Claude Code 行为）
     skill_sandbox_enabled: bool = False   # 技能沙箱执行开关（默认关）
-    reasoning_summary_enabled: bool = False  # 最终作答前生成"思考摘要"（已深度思考折叠区）；默认关闭
+    reasoning_summary_enabled: bool = False  # 深度思考时流式展示原始思考链（仅展示，不额外调用模型）；默认关闭
     project_memory_file: str = ""         # 文件型项目记忆（AGENTS.md）路径；空=项目根/AGENTS.md
     # 单个项目记忆文件的注入上限（按行边界截断）：文件是"完整文档"，
     # 注入的是"节选"——记忆库再涨也不会让每次请求的上下文无限膨胀

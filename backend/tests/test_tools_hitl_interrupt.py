@@ -85,7 +85,6 @@ def _make_env(tool_names_and_calls):
         tools=tools,
         title_holder=[],
         title_thread=None,
-        reasoning=None,
     )
     return state, SimpleNamespace(context=deps), tools, bus
 

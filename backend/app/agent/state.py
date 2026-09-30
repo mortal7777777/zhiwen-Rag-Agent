@@ -59,8 +59,6 @@ class Deps:
     # 新会话标题：后台线程生成，写入 title_holder，finalize 读取后发 title 事件
     title_holder: list[str] = field(default_factory=list)
     title_thread: threading.Thread | None = None
-    # tools 节点预生成"思考摘要"的完成信号（agent 节点最多等 1s）
-    reasoning: dict | None = None
 
 
 def runtime_of(deps: "Deps") -> SimpleNamespace:

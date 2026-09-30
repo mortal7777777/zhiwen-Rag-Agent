@@ -50,3 +50,20 @@ def extract_thinking_blocks(content) -> list[dict]:
         }
         out.append(keep)
     return out
+
+
+def extract_thinking_text(content) -> str:
+    """流式 chunk 的思考增量文本（Anthropic 格式：content 里的 thinking 块）。
+
+    langchain-anthropic 流式下每个 chunk 的 content 是块列表，思考增量形如
+    [{"type": "thinking", "thinking": "片", "index": 0}]（实测 2026-09-30：
+    增量、无 signature）。OpenAI 格式的 reasoning_content 在
+    additional_kwargs 里，由调用方按前缀去重后处理。
+    """
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "thinking":
+            parts.append(str(item.get("thinking") or ""))
+    return "".join(parts)

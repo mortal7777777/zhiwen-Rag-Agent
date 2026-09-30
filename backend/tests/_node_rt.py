@@ -24,5 +24,4 @@ def runtime_from_state(state: dict) -> SimpleNamespace:
         tools=state.get("tools") or [],
         title_holder=state.get("title_holder") or [],
         title_thread=state.get("title_thread"),
-        reasoning=state.get("reasoning"),
     )

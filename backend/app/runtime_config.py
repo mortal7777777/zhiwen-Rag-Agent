@@ -49,7 +49,7 @@ EDITABLE_KEYS = {
     "searxng_engines",
     # 技能总开关
     "skills_enabled",
-    # 高级工具（P0：受控执行 / MCP / 技能沙箱 / 思考摘要）
+    # 高级工具（P0：受控执行 / MCP / 技能沙箱 / 思考过程展示）
     "advanced_tools_enabled",
     "agent_task_max_iterations",
     "agent_task_max_failures",

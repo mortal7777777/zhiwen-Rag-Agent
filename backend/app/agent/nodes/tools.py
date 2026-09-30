@@ -19,8 +19,7 @@ from ..tools import (
     PLAN_EXIT_TOOL_NAME,
     PLAN_MODE_SYSTEM_HINT,
 )
-from .common import (_failure_limit, _generate_reasoning_summary,
-                     _iteration_limit, _plan_hint)
+from .common import (_failure_limit, _iteration_limit, _plan_hint)
 from ..utils import (
     _CACHEABLE_TOOLS,
     _run_verify,
@@ -253,26 +252,6 @@ def _tools_node(state: AgentState, runtime) -> dict:
                     ),
                     "_duration_ms": None,
                 }
-
-    # ---- 预生成"思考摘要"（后台线程）：与工具执行并行 ----
-    # 放在决定收集之后：挂起恢复会整段重跑本节点，提前启动会重复开线程。
-    if effective(settings, "reasoning_summary_enabled", False):
-        try:
-            evt = {"summary": None, "done": threading.Event()}
-            deps.reasoning = evt
-
-            def _pre_generate():
-                try:
-                    text = _generate_reasoning_summary(service, state)
-                    evt["summary"] = (text or "")[:200]
-                except Exception:
-                    evt["summary"] = ""
-                finally:
-                    evt["done"].set()
-
-            threading.Thread(target=_pre_generate, daemon=True).start()
-        except Exception as exc:
-            logger.warning("启动思考摘要预生成失败：%s", exc)
 
     # 并行执行多个工具调用（检索类内部已有 GPU 锁；API 类并发安全），保持返回顺序
     tool_cache: dict = rt.setdefault("tool_cache", {})

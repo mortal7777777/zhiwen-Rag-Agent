@@ -9,7 +9,7 @@ import time
 
 
 from ...config import Settings
-from ...llm_text import extract_thinking_blocks, message_text
+from ...llm_text import extract_thinking_blocks, extract_thinking_text, message_text
 from ...runtime_config import effective
 
 logger = logging.getLogger(__name__)
@@ -125,25 +125,6 @@ def _agent_node(state: AgentState, runtime) -> dict:
             )
         )
 
-    # 思考摘要前置：正文输出前先展示"已深度思考"（有工具调用历史时）
-    if (
-        state["tool_calls_used"] > 0
-        and effective(settings, "reasoning_summary_enabled", False)
-        and not rt.get("reasoning_emitted")
-    ):
-        rt["reasoning_emitted"] = True
-        summary = ""
-        evt = deps.reasoning
-        if evt is not None:
-            # 摘要已在工具执行期间后台预生成，最多等 1s；超时不阻塞正文
-            evt["done"].wait(timeout=1.0)
-            summary = evt.get("summary") or ""
-        if not summary:
-            # 预生成未就绪：直接开始正文（摘要缺失不影响回答，避免额外延迟）
-            summary = ""
-        if summary:
-            bus.emit("reasoning", {"summary": summary})
-
     bus.emit("status", {"phase": "thinking", "text": "正在思考并生成回答…"})
 
     # LLM 调用并发上限（生成阶段不占 GPU 锁）
@@ -220,6 +201,12 @@ def _agent_node(state: AgentState, runtime) -> dict:
         emit_buf: list[str] = []
         emit_len = 0
         emit_last = time.perf_counter()
+        # 思考链展示缓冲（仅展示，不进历史/缓存前缀）：开关控制，默认关
+        show_thinking = effective(settings, "reasoning_summary_enabled", False)
+        think_buf: list[str] = []
+        think_len = 0
+        think_last = time.perf_counter()
+        think_prev_rc = ""  # OpenAI 格式 reasoning_content 去重（兼容增量/累计形状）
         while True:
             if stopped():
                 rt["status"] = "stopped"
@@ -236,6 +223,32 @@ def _agent_node(state: AgentState, runtime) -> dict:
                 break
             chunk = item
             chunks.append(chunk)
+            if show_thinking:
+                # Anthropic 格式：content 里的 thinking 块（增量、无 signature）；
+                # OpenAI 格式：additional_kwargs.reasoning_content（前缀去重，
+                # 兼容增量/累计两种形状）。只推展示，不落库、不影响请求链路。
+                piece = extract_thinking_text(getattr(chunk, "content", None))
+                if not piece:
+                    rc = (getattr(chunk, "additional_kwargs", None) or {}).get(
+                        "reasoning_content"
+                    )
+                    if rc:
+                        rc = str(rc)
+                        piece = (
+                            rc[len(think_prev_rc):]
+                            if rc.startswith(think_prev_rc)
+                            else rc
+                        )
+                        think_prev_rc = rc
+                if piece:
+                    think_buf.append(piece)
+                    think_len += len(piece)
+                    now = time.perf_counter()
+                    if think_len >= 120 or now - think_last >= 0.06:
+                        bus.emit("reasoning_delta", "".join(think_buf))
+                        think_buf.clear()
+                        think_len = 0
+                        think_last = now
             delta = message_text(getattr(chunk, "content", None))
             if delta:
                 # TTFT 打点：首个内容 chunk 到达（含工具轮过渡文本，即 API 首字）
@@ -469,6 +482,10 @@ def _agent_node(state: AgentState, runtime) -> dict:
     if buf_parts and emit_buf:
         bus.emit("stream_delta", "".join(emit_buf))
         emit_buf.clear()
+    if think_buf:
+        # 思考链残留（与正文无关，任何轮次结束都补发）
+        bus.emit("reasoning_delta", "".join(think_buf))
+        think_buf.clear()
     if buf_parts and is_tool_round:
         # 工具轮的过渡思考文本已随流增量推送：整轮撤回（不展示、不入历史）
         bus.emit("stream_end", {"keep": False})
