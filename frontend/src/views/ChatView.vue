@@ -3922,13 +3922,7 @@ onBeforeUnmount(() => {
   gap: 14px;
 }
 
-.toolbar-group .el-switch {
-  --el-switch-on-color: #1677ff;
-}
-
-.auto-switch {
-  --el-switch-on-color: #6f5bff !important;
-}
+/* 开关配色由 theme.css 的 EP 映射层统一（--el-color-primary），不再就地打补丁 */
 
 .auto-switch :deep(.el-switch__label) {
   font-weight: 600;

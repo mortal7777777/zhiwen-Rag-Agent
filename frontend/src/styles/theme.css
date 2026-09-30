@@ -1,7 +1,11 @@
 /* ============================================================
    设计令牌：浅色 / 深色主题统一变量。
-   界面层次约定（由深到浅）：
-   应用底色 -> 全局导航 -> 会话侧栏 -> 聊天主区 -> 消息卡片
+   重构于 2026-09-30（前端改造方案阶段 1）：
+   - 文本色对比度修正（全部 ≥ WCAG AA 4.5:1，详见注释）；
+   - 补尺度类令牌：radius / space / font / motion / z-index / focus-ring；
+   - Element Plus 映射层（下文"EP 映射"段）：组件库调色板统一指向项目令牌。
+   界面层次约定（由深到浅）：应用底色 -> 全局导航 -> 会话侧栏 -> 聊天主区 -> 消息卡片
+   语义色成对使用：--x 用于图形/边框，--x-text 用于文字（文字档对比度达标）。
    ============================================================ */
 
 :root {
@@ -19,23 +23,31 @@
   --border: #e8ebf1;
   --border-strong: #dde1ea;
 
-  /* 文本 */
+  /* 文本（对比度修正：text-3 #8b909b(白底 3.20) → #6b7280(白底 4.83)） */
   --text-1: #23262d;
   --text-2: #4c515b;
-  --text-3: #8b909b;
+  --text-3: #6b7280;
 
   /* 品牌色 */
   --primary: #1677ff;
   --primary-2: #4f8dff;
+  --primary-text: #0958d9;     /* 蓝文字/链接专用（白底 6.16；按钮底仍用 --primary） */
   --accent: #6f5bff;
   --primary-soft: rgba(22, 119, 255, 0.08);
   --primary-grad: linear-gradient(135deg, #1677ff 0%, #6f5bff 100%);
 
-  /* 语义色 */
+  /* 语义色（--x=图形/边框；--x-text=文字，对比度达标） */
   --danger: #f56c6c;
+  --danger-text: #d4380d;      /* 白底 4.80（原 #f56c6c 仅 2.90） */
   --danger-bg: #fef0f0;
   --danger-border: #fde2e2;
   --success: #2eb872;
+  --success-text: #0f7a4a;     /* 白底 5.38（原 #2eb872 仅 2.56） */
+  --warning: #e8912d;
+  --warning-text: #8a5210;     /* 浅橙底 5.82 */
+  --warning-bg: #fff7e8;
+  --warning-border: #f0d9b8;
+  --info: #6b7280;
 
   /* 对话气泡 */
   --user-bubble-bg: #e8f1ff;
@@ -44,11 +56,53 @@
   --plan-bg: #f7f9ff;
   --plan-border: #e3ecff;
   --web-tag-bg: #fff3e2;
-  --web-tag-text: #e8912d;
+  --web-tag-text: #8a5210;     /* 对比度修正：2.25 → 5.82 */
 
-  /* 阴影 */
-  --shadow-soft: 0 2px 10px rgba(31, 35, 41, 0.05);
-  --shadow-pop: 0 8px 24px rgba(22, 119, 255, 0.16);
+  /* 阴影三档 */
+  --shadow-soft: 0 1px 2px rgba(31, 35, 41, 0.04), 0 2px 8px rgba(31, 35, 41, 0.05);
+  --shadow-pop: 0 2px 10px rgba(31, 35, 41, 0.06), 0 8px 24px rgba(22, 119, 255, 0.14);
+  --shadow-modal: 0 12px 32px rgba(31, 35, 41, 0.16), 0 2px 8px rgba(31, 35, 41, 0.08);
+
+  /* 尺度：圆角（归并自 15 种散值 → 4/8/12/16/pill 五档） */
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  /* 尺度：间距 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* 尺度：字号（收敛 14 种含 .5 档 → 7 档） */
+  --font-2xs: 11px;
+  --font-xs: 12px;
+  --font-sm: 13px;
+  --font-base: 14px;
+  --font-lg: 16px;
+  --font-xl: 20px;
+  --font-2xl: 24px;
+
+  /* 动效 */
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
+
+  /* 层级（与 EP dialog/drawer 默认 2000+ 对齐） */
+  --z-dropdown: 1000;
+  --z-sticky: 1100;
+  --z-overlay: 1500;
+  --z-modal: 2100;
+  --z-toast: 3000;
+
+  /* 焦点环 */
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--primary) 22%, transparent);
 }
 
 html.dark {
@@ -66,7 +120,7 @@ html.dark {
   --border: #262b34;
   --border-strong: #313845;
 
-  /* 文本 */
+  /* 文本（深色下三档均已达标：4.59~14.75） */
   --text-1: #e6e8ec;
   --text-2: #c4c9d2;
   --text-3: #858c98;
@@ -74,15 +128,23 @@ html.dark {
   /* 品牌色 */
   --primary: #4a94ff;
   --primary-2: #6aa7ff;
+  --primary-text: #4a94ff;     /* 深底 5.60 */
   --accent: #8b7bff;
   --primary-soft: rgba(74, 148, 255, 0.14);
   --primary-grad: linear-gradient(135deg, #4a94ff 0%, #8b7bff 100%);
 
-  /* 语义色 */
+  /* 语义色（深色图形档本身已达文字对比度） */
   --danger: #f78989;
+  --danger-text: #f78989;      /* 深底 7.14 */
   --danger-bg: #3a2326;
   --danger-border: #4a2b2f;
   --success: #4bd08a;
+  --success-text: #4bd08a;     /* 深底 8.58 */
+  --warning: #e8a33d;
+  --warning-text: #e8a33d;
+  --warning-bg: #3a2f1f;
+  --warning-border: #4a3a24;
+  --info: #858c98;
 
   /* 对话气泡 */
   --user-bubble-bg: #1e3a5f;
@@ -91,11 +153,179 @@ html.dark {
   --plan-bg: #1b2233;
   --plan-border: #24405f;
   --web-tag-bg: #3a2f1f;
-  --web-tag-text: #e8a33d;
+  --web-tag-text: #e8a33d;     /* 深底 6.06 */
 
   /* 阴影 */
   --shadow-soft: 0 2px 10px rgba(0, 0, 0, 0.35);
-  --shadow-pop: 0 8px 24px rgba(74, 148, 255, 0.22);
+  --shadow-pop: 0 2px 10px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(74, 148, 255, 0.16);
+  --shadow-modal: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+/* ============================================================
+   Element Plus 变量映射层（浅色）
+   目的：消灭"组件库默认调色板 vs 项目令牌"两套色并存——EP 的
+   主色/语义色/中性族（文字/边框/填充/背景）全部指向项目令牌；
+   light-3/5/7/8/9、dark-2 派生色按 EP 约定用 color-mix 生成。
+   ============================================================ */
+:root {
+  /* 主色 + 派生（color-mix 需 Chrome 111+；本地/Electron 环境均满足） */
+  --el-color-primary: var(--primary);
+  --el-color-primary-light-3: color-mix(in srgb, var(--primary) 70%, #ffffff);
+  --el-color-primary-light-5: color-mix(in srgb, var(--primary) 50%, #ffffff);
+  --el-color-primary-light-7: color-mix(in srgb, var(--primary) 30%, #ffffff);
+  --el-color-primary-light-8: color-mix(in srgb, var(--primary) 20%, #ffffff);
+  --el-color-primary-light-9: color-mix(in srgb, var(--primary) 10%, #ffffff);
+  --el-color-primary-dark-2: color-mix(in srgb, var(--primary) 80%, #000000);
+
+  --el-color-success: var(--success);
+  --el-color-success-light-3: color-mix(in srgb, var(--success) 70%, #ffffff);
+  --el-color-success-light-5: color-mix(in srgb, var(--success) 50%, #ffffff);
+  --el-color-success-light-7: color-mix(in srgb, var(--success) 30%, #ffffff);
+  --el-color-success-light-8: color-mix(in srgb, var(--success) 20%, #ffffff);
+  --el-color-success-light-9: color-mix(in srgb, var(--success) 10%, #ffffff);
+  --el-color-success-dark-2: color-mix(in srgb, var(--success) 80%, #000000);
+
+  --el-color-warning: var(--warning);
+  --el-color-warning-light-3: color-mix(in srgb, var(--warning) 70%, #ffffff);
+  --el-color-warning-light-5: color-mix(in srgb, var(--warning) 50%, #ffffff);
+  --el-color-warning-light-7: color-mix(in srgb, var(--warning) 30%, #ffffff);
+  --el-color-warning-light-8: color-mix(in srgb, var(--warning) 20%, #ffffff);
+  --el-color-warning-light-9: color-mix(in srgb, var(--warning) 10%, #ffffff);
+  --el-color-warning-dark-2: color-mix(in srgb, var(--warning) 80%, #000000);
+
+  --el-color-danger: var(--danger);
+  --el-color-danger-light-3: color-mix(in srgb, var(--danger) 70%, #ffffff);
+  --el-color-danger-light-5: color-mix(in srgb, var(--danger) 50%, #ffffff);
+  --el-color-danger-light-7: color-mix(in srgb, var(--danger) 30%, #ffffff);
+  --el-color-danger-light-8: color-mix(in srgb, var(--danger) 20%, #ffffff);
+  --el-color-danger-light-9: color-mix(in srgb, var(--danger) 10%, #ffffff);
+  --el-color-danger-dark-2: color-mix(in srgb, var(--danger) 80%, #000000);
+
+  /* EP4 表单/提示使用 --el-color-error，与 danger 保持同源 */
+  --el-color-error: var(--danger);
+  --el-color-error-light-3: color-mix(in srgb, var(--danger) 70%, #ffffff);
+  --el-color-error-light-5: color-mix(in srgb, var(--danger) 50%, #ffffff);
+  --el-color-error-light-7: color-mix(in srgb, var(--danger) 30%, #ffffff);
+  --el-color-error-light-8: color-mix(in srgb, var(--danger) 20%, #ffffff);
+  --el-color-error-light-9: color-mix(in srgb, var(--danger) 10%, #ffffff);
+  --el-color-error-dark-2: color-mix(in srgb, var(--danger) 80%, #000000);
+
+  --el-color-info: var(--info);
+  --el-color-info-light-3: color-mix(in srgb, var(--info) 70%, #ffffff);
+  --el-color-info-light-5: color-mix(in srgb, var(--info) 50%, #ffffff);
+  --el-color-info-light-7: color-mix(in srgb, var(--info) 30%, #ffffff);
+  --el-color-info-light-8: color-mix(in srgb, var(--info) 20%, #ffffff);
+  --el-color-info-light-9: color-mix(in srgb, var(--info) 10%, #ffffff);
+  --el-color-info-dark-2: color-mix(in srgb, var(--info) 80%, #000000);
+
+  /* 中性族：文字 / 边框 / 填充 / 背景 / 遮罩 */
+  --el-text-color-primary: var(--text-1);
+  --el-text-color-regular: var(--text-2);
+  --el-text-color-secondary: var(--text-3);
+  --el-text-color-placeholder: color-mix(in srgb, var(--text-3) 70%, transparent);
+  --el-text-color-disabled: color-mix(in srgb, var(--text-3) 55%, transparent);
+
+  --el-border-color: var(--border-strong);
+  --el-border-color-light: var(--border);
+  --el-border-color-lighter: var(--border);
+  --el-border-color-extra-light: var(--border);
+  --el-border-color-hover: color-mix(in srgb, var(--primary) 40%, var(--border-strong));
+
+  --el-fill-color: var(--bg-card);
+  --el-fill-color-light: var(--bg-hover);
+  --el-fill-color-lighter: var(--bg-card-2);
+  --el-fill-color-blank: var(--bg-chat);
+
+  --el-bg-color: var(--bg-chat);
+  --el-bg-color-page: var(--bg-app);
+  --el-bg-color-overlay: var(--bg-panel);
+  --el-mask-color: rgba(35, 38, 45, 0.5);
+
+  --el-box-shadow: var(--shadow-pop);
+  --el-box-shadow-light: var(--shadow-soft);
+
+  /* 圆角与动效对齐项目尺度 */
+  --el-border-radius-base: var(--radius-sm);
+  --el-border-radius-small: var(--radius-xs);
+  --el-border-radius-round: var(--radius-pill);
+  --el-transition-duration: var(--dur-base);
+  --el-transition-duration-fast: var(--dur-fast);
+}
+
+/* EP 映射（深色）：派生色改为与深色底混合；中性族指向深色令牌 */
+html.dark {
+  --el-color-primary: var(--primary);
+  --el-color-primary-light-3: color-mix(in srgb, var(--primary) 70%, var(--bg-sidebar));
+  --el-color-primary-light-5: color-mix(in srgb, var(--primary) 50%, var(--bg-sidebar));
+  --el-color-primary-light-7: color-mix(in srgb, var(--primary) 30%, var(--bg-sidebar));
+  --el-color-primary-light-8: color-mix(in srgb, var(--primary) 20%, var(--bg-sidebar));
+  --el-color-primary-light-9: color-mix(in srgb, var(--primary) 10%, var(--bg-sidebar));
+  --el-color-primary-dark-2: color-mix(in srgb, var(--primary) 80%, #000000);
+
+  --el-color-success: var(--success);
+  --el-color-success-light-3: color-mix(in srgb, var(--success) 70%, var(--bg-sidebar));
+  --el-color-success-light-5: color-mix(in srgb, var(--success) 50%, var(--bg-sidebar));
+  --el-color-success-light-7: color-mix(in srgb, var(--success) 30%, var(--bg-sidebar));
+  --el-color-success-light-8: color-mix(in srgb, var(--success) 20%, var(--bg-sidebar));
+  --el-color-success-light-9: color-mix(in srgb, var(--success) 10%, var(--bg-sidebar));
+  --el-color-success-dark-2: color-mix(in srgb, var(--success) 80%, #000000);
+
+  --el-color-warning: var(--warning);
+  --el-color-warning-light-3: color-mix(in srgb, var(--warning) 70%, var(--bg-sidebar));
+  --el-color-warning-light-5: color-mix(in srgb, var(--warning) 50%, var(--bg-sidebar));
+  --el-color-warning-light-7: color-mix(in srgb, var(--warning) 30%, var(--bg-sidebar));
+  --el-color-warning-light-8: color-mix(in srgb, var(--warning) 20%, var(--bg-sidebar));
+  --el-color-warning-light-9: color-mix(in srgb, var(--warning) 10%, var(--bg-sidebar));
+  --el-color-warning-dark-2: color-mix(in srgb, var(--warning) 80%, #000000);
+
+  --el-color-danger: var(--danger);
+  --el-color-danger-light-3: color-mix(in srgb, var(--danger) 70%, var(--bg-sidebar));
+  --el-color-danger-light-5: color-mix(in srgb, var(--danger) 50%, var(--bg-sidebar));
+  --el-color-danger-light-7: color-mix(in srgb, var(--danger) 30%, var(--bg-sidebar));
+  --el-color-danger-light-8: color-mix(in srgb, var(--danger) 20%, var(--bg-sidebar));
+  --el-color-danger-light-9: color-mix(in srgb, var(--danger) 10%, var(--bg-sidebar));
+  --el-color-danger-dark-2: color-mix(in srgb, var(--danger) 80%, #000000);
+
+  --el-color-error: var(--danger);
+  --el-color-error-light-3: color-mix(in srgb, var(--danger) 70%, var(--bg-sidebar));
+  --el-color-error-light-5: color-mix(in srgb, var(--danger) 50%, var(--bg-sidebar));
+  --el-color-error-light-7: color-mix(in srgb, var(--danger) 30%, var(--bg-sidebar));
+  --el-color-error-light-8: color-mix(in srgb, var(--danger) 20%, var(--bg-sidebar));
+  --el-color-error-light-9: color-mix(in srgb, var(--danger) 10%, var(--bg-sidebar));
+  --el-color-error-dark-2: color-mix(in srgb, var(--danger) 80%, #000000);
+
+  --el-color-info: var(--info);
+  --el-color-info-light-3: color-mix(in srgb, var(--info) 70%, var(--bg-sidebar));
+  --el-color-info-light-5: color-mix(in srgb, var(--info) 50%, var(--bg-sidebar));
+  --el-color-info-light-7: color-mix(in srgb, var(--info) 30%, var(--bg-sidebar));
+  --el-color-info-light-8: color-mix(in srgb, var(--info) 20%, var(--bg-sidebar));
+  --el-color-info-light-9: color-mix(in srgb, var(--info) 10%, var(--bg-sidebar));
+  --el-color-info-dark-2: color-mix(in srgb, var(--info) 80%, #000000);
+
+  --el-text-color-primary: var(--text-1);
+  --el-text-color-regular: var(--text-2);
+  --el-text-color-secondary: var(--text-3);
+  --el-text-color-placeholder: color-mix(in srgb, var(--text-3) 60%, transparent);
+  --el-text-color-disabled: color-mix(in srgb, var(--text-3) 45%, transparent);
+
+  --el-border-color: var(--border-strong);
+  --el-border-color-light: var(--border);
+  --el-border-color-lighter: var(--border);
+  --el-border-color-extra-light: var(--border);
+  --el-border-color-hover: color-mix(in srgb, var(--primary) 45%, var(--border-strong));
+
+  --el-fill-color: var(--bg-card);
+  --el-fill-color-light: var(--bg-hover);
+  --el-fill-color-lighter: var(--bg-card-2);
+  --el-fill-color-blank: var(--bg-chat);
+
+  --el-bg-color: var(--bg-chat);
+  --el-bg-color-page: var(--bg-app);
+  --el-bg-color-overlay: var(--bg-panel);
+  --el-mask-color: rgba(0, 0, 0, 0.6);
+
+  --el-box-shadow: var(--shadow-pop);
+  --el-box-shadow-light: var(--shadow-soft);
 }
 
 /* 全局基础 */
@@ -112,11 +342,17 @@ body {
   background: var(--bg-app);
   color: var(--text-1);
   -webkit-font-smoothing: antialiased;
-  transition: background 0.25s, color 0.25s;
+  transition: background var(--dur-base), color var(--dur-base);
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* 键盘可见焦点（鼠标点击不触发；EP 组件保留自身焦点样式） */
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
 /* 滚动条 */
@@ -138,18 +374,13 @@ body {
   background: transparent;
 }
 
-/* Element Plus 组件在深色下的补充微调 */
-html.dark .el-drawer,
-html.dark .el-dialog {
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-}
-
-html.dark .el-drawer__header,
-html.dark .el-dialog__header {
-  color: var(--text-1);
-}
-
-html.dark .el-card {
-  background: var(--bg-panel);
+/* 动效降级（系统"减少动态效果"） */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
