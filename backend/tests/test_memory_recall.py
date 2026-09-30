@@ -61,7 +61,9 @@ def _memories(n: int = 5) -> list[dict]:
 
 
 def test_recall_zero_hit_uses_recent_fallback(monkeypatch):
-    monkeypatch.setattr(context_mod.repo, "list_memories", lambda db, limit=500: _memories())
+    monkeypatch.setattr(
+        context_mod.repo, "list_memories", lambda db, limit=500, **kw: _memories()
+    )
     service = ContextService(FakeSettings(), chat=None)
     emb = FakeEmbeddings()  # 全部正交 → 零命中
 
@@ -71,7 +73,9 @@ def test_recall_zero_hit_uses_recent_fallback(monkeypatch):
 
 def test_recall_with_hits_does_not_pad_to_top_k(monkeypatch):
     """有命中时不再用最近记忆补满 top_k（旧行为会补齐 3 条）。"""
-    monkeypatch.setattr(context_mod.repo, "list_memories", lambda db, limit=500: _memories())
+    monkeypatch.setattr(
+        context_mod.repo, "list_memories", lambda db, limit=500, **kw: _memories()
+    )
     service = ContextService(FakeSettings(), chat=None)
     emb = FakeEmbeddings({"记忆内容 3": [0.0, 1.0]})  # 只有第 3 条与问题同向
 
@@ -84,7 +88,7 @@ def test_recall_respects_token_budget(monkeypatch):
     monkeypatch.setattr(
         context_mod.repo,
         "list_memories",
-        lambda db, limit=500: [{"id": 1, "content": "很长" * 200}],
+        lambda db, limit=500, **kw: [{"id": 1, "content": "很长" * 200}],
     )
     settings = FakeSettings()
     settings.memory_max_tokens = 50  # 预算很小 → 超预算的内容被裁掉
@@ -95,7 +99,9 @@ def test_recall_respects_token_budget(monkeypatch):
 
 def test_recall_counts_hits_for_kept_memories(monkeypatch):
     """被注入的记忆要累加命中计数（衰减与整合归档的依据）。"""
-    monkeypatch.setattr(context_mod.repo, "list_memories", lambda db, limit=500: _memories())
+    monkeypatch.setattr(
+        context_mod.repo, "list_memories", lambda db, limit=500, **kw: _memories()
+    )
     calls: list[list[int]] = []
     monkeypatch.setattr(context_mod.repo, "bump_memory_hits", lambda db, ids: calls.append(list(ids)))
     service = ContextService(FakeSettings(), chat=None)
@@ -114,7 +120,9 @@ def test_recall_counts_hits_for_kept_memories(monkeypatch):
 
 def test_recall_reuses_cached_vectors(monkeypatch):
     """第二轮召回不应重新向量化整库（缓存按 id+updated_at 命中）。"""
-    monkeypatch.setattr(context_mod.repo, "list_memories", lambda db, limit=500: _memories())
+    monkeypatch.setattr(
+        context_mod.repo, "list_memories", lambda db, limit=500, **kw: _memories()
+    )
     monkeypatch.setattr(context_mod.repo, "bump_memory_hits", lambda db, ids: None)
     service = ContextService(FakeSettings(), chat=None)
 
@@ -142,7 +150,7 @@ def test_recall_finds_semantic_match_without_keyword_overlap(monkeypatch):
         {"id": 8, "content": "用户住在成都", "category": "profile",
          "updated_at": "2026-09-21T10:00:01"},
     ]
-    monkeypatch.setattr(context_mod.repo, "list_memories", lambda db, limit=500: memories)
+    monkeypatch.setattr(context_mod.repo, "list_memories", lambda db, limit=500, **kw: memories)
     monkeypatch.setattr(context_mod.repo, "bump_memory_hits", lambda db, ids: None)
     # 假向量：把"IDE 用什么好"与 PyCharm 那条映射到同一方向
     emb = FakeEmbeddings({
@@ -166,7 +174,7 @@ def test_recall_drops_near_duplicate_slices(monkeypatch):
         {"id": 99, "content": "用户住在成都", "category": "profile",
          "created_at": "2026-09-21T10:00:00"}
     )
-    monkeypatch.setattr(context_mod.repo, "list_memories", lambda db, limit=500: memories)
+    monkeypatch.setattr(context_mod.repo, "list_memories", lambda db, limit=500, **kw: memories)
     monkeypatch.setattr(context_mod.repo, "bump_memory_hits", lambda db, ids: None)
     question = "对比整理进度"
     # 4 条近似切片同向（互相余弦 1.0 → 去重只剩最相关一条）；
@@ -180,6 +188,26 @@ def test_recall_drops_near_duplicate_slices(monkeypatch):
     hits = service.retrieve_memories(object(), emb, question)
     assert len(hits) == 2, hits  # 4 条同义切片合并成 1 条，不占满 3 个名额
     assert any("成都" in h for h in hits)
+
+
+def test_recall_asks_for_creation_order(monkeypatch):
+    """兜底取的是"最近录入的事实"，因此必须按 created 排序取列表。
+
+    用 updated_at 会取到"最近被编辑过的"（且并列时顺序不确定），
+    实测恢复后兜底给出的是两条随机旧记忆。
+    """
+    seen: dict = {}
+
+    def _list(db, limit=500, **kw):
+        seen.update(kw)
+        return _memories()
+
+    monkeypatch.setattr(context_mod.repo, "list_memories", _list)
+    monkeypatch.setattr(context_mod.repo, "bump_memory_hits", lambda db, ids: None)
+    service = ContextService(FakeSettings(), chat=None)
+
+    service.retrieve_memories(None, FakeEmbeddings(), "完全不相关的问题")
+    assert seen.get("order") == "created"
 
 
 def test_is_duplicate_detects_match_beyond_recent_window():

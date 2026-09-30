@@ -676,12 +676,24 @@ def list_memories(
     limit: int = 500,
     category: str | None = None,
     status: str = "active",
+    order: str = "updated",
 ) -> list[dict]:
+    """按状态列出记忆。
+
+    order="updated"（默认）：内容最近修改在前——记忆面板、AGENTS.md 导出用；
+    order="created"：录入时间最新在前——召回兜底要的是"最近的事实"，而不是
+      "最近被编辑过的"（updated_at 只反映内容编辑，与事实新旧无关）。
+
+    两种排序都以 id 降序兜底：updated_at 可能大量并列（批量恢复、合并会把多行
+    写成同一时间戳），没有 tiebreaker 时返回顺序不确定，"取前 N 条"会取到任意
+    条目（实测 46 条里 44 条并列，兜底取到的是两条随机的旧记忆）。
+    """
+    key = Memory.created_at if order == "created" else Memory.updated_at
     rows = (
         db.execute(
             select(Memory)
             .where(Memory.status == status)
-            .order_by(Memory.updated_at.desc())
+            .order_by(key.desc(), Memory.id.desc())
             .limit(limit)
         )
         .scalars()
@@ -748,9 +760,12 @@ def update_memory(
 ) -> Memory | None:
     """编辑记忆内容/分类/状态。
 
-    updated_at 在这里**显式**写入（模型列已去掉 onupdate）：只有真正的编辑/合并
-    才刷新"内容最后修改时间"，命中计数累加（bump_memory_hits）不刷新——否则
-    "最后被召回"会被当成"最后被陈述"，整合的新旧判定与 AGENTS.md 排序都会失真。
+    updated_at 只由**内容/分类**变化刷新（模型列已去掉 onupdate）：
+    - 命中计数累加（bump_memory_hits）不刷新——否则"最后被召回"会被当成
+      "最后被陈述"，整合的新旧判定与导出排序双双失真；
+    - 状态变更（归档/恢复）也不刷新——那是管理动作，不是内容编辑；否则归档一次
+      就会把旧记忆顶到"最近"的位置（历史事故：批量恢复把 44 行写成同一时间戳，
+      与召回分一起让排序彻底失去区分度）。
     """
     m = db.get(Memory, memory_id)
     if m is None:
@@ -764,7 +779,7 @@ def update_memory(
         changed = True
     if status is not None and status != m.status:
         m.status = status
-        changed = True
+        # 状态不算内容编辑：不置 changed，不刷新 updated_at
     if changed:
         m.updated_at = datetime.now()
     db.commit()
@@ -782,9 +797,17 @@ def delete_memory(db: Session, memory_id: int) -> bool:
 
 
 def list_all_memories(db: Session, limit: int = 2000) -> list[dict]:
-    """全部记忆（含已归档），供整合整理使用。"""
+    """全部记忆（含已归档），供整合整理使用。
+
+    排序带 id 降序兜底：整合会按 created_at 自行重排，但 limit 截断发生在排序
+    之后，updated_at 并列时若不确定，截断掉的可能是任意的条目。
+    """
     rows = (
-        db.execute(select(Memory).order_by(Memory.updated_at.desc()).limit(limit))
+        db.execute(
+            select(Memory)
+            .order_by(Memory.updated_at.desc(), Memory.id.desc())
+            .limit(limit)
+        )
         .scalars()
         .all()
     )

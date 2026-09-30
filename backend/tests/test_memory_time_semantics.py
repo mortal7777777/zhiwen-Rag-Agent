@@ -68,12 +68,61 @@ def test_update_memory_refreshes_updated_at_only_on_real_change(db):
     assert m.created_at == OLD         # 首次入库时间永不变（新旧判定的依据）
 
 
-def test_status_change_refreshes_updated_at_but_not_created_at(db):
+def test_status_change_does_not_refresh_updated_at(db):
+    """归档/恢复是管理动作，不是内容编辑：不得把旧记忆顶到"最近"位置。"""
     repo.update_memory(db, 1, status="archived")
     m = db.get(Memory, 1)
     assert m.status == "archived"
-    assert m.updated_at > OLD
+    assert m.updated_at == OLD
     assert m.created_at == OLD
+
+
+TIE = datetime(2026, 9, 30, 9, 39, 53)
+
+
+def test_list_memories_ordering_is_deterministic_under_ties(db):
+    """updated_at 全并列时（批量恢复/合并的产物）排序必须仍然确定。
+
+    历史事故：44 行 updated_at 相同，list_memories 返回顺序由 DB 决定，
+    "最近记忆兜底"取到的是两条随机的旧记忆。
+    """
+    for mid, created in [(2, datetime(2026, 8, 1)), (3, datetime(2026, 9, 20)),
+                         (4, datetime(2026, 9, 10))]:
+        db.add(
+            Memory(
+                id=mid,
+                content=f"事实 {mid}",
+                category="other",
+                status="active",
+                hit_count=0,
+                created_at=created,
+                updated_at=TIE,          # 三行时间戳完全相同
+            )
+        )
+    db.commit()
+
+    # 默认（updated）：并列时按 id 降序兜底 → 确定性，不再是任意顺序
+    assert [m["id"] for m in repo.list_memories(db)][:3] == [4, 3, 2]
+
+    # order="created"：按录入时间降序，与 updated_at 无关（"最近的事实"语义）
+    # 09-20(#3) > 09-10(#4) > 08-18(#1，夹具行) > 08-01(#2)
+    created_order = [m["id"] for m in repo.list_memories(db, order="created")]
+    assert created_order[:3] == [3, 4, 1]
+    assert created_order[3] == 2
+
+
+def test_list_all_memories_has_id_tiebreaker(db):
+    """整合取全量时同样不能靠并列时间戳决定谁被 limit 截断。"""
+    for mid in (5, 6):
+        db.add(
+            Memory(
+                id=mid, content=f"事实 {mid}", category="other", status="archived",
+                hit_count=0, created_at=datetime(2026, 9, 1), updated_at=TIE,
+            )
+        )
+    db.commit()
+    ids = [m["id"] for m in repo.list_all_memories(db)]
+    assert ids[:3] == [6, 5, 1]           # TIE 组内按 id 降序，然后才是 08-18 那条
 
 
 def test_update_memory_returns_none_for_missing_row(db):

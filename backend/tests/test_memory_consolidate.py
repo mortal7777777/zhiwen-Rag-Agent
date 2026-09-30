@@ -213,6 +213,34 @@ def test_normal_dedup_does_not_warn(env, caplog):
     assert not any("疑似过度删除" in r.message for r in caplog.records)
 
 
+def test_archived_count_ignores_ids_that_were_not_active(env):
+    """模型给出不存在/已归档的 id 时不虚报。
+
+    审计记录与"过度删除"告警都依赖这个数字；把请求集合当成结果会让
+    这两件"让问题可见"的东西失真。
+    """
+    env["memories"] = [
+        _mem(1, "事实一", "project", datetime(2026, 9, 1)),
+        _mem(2, "事实二", "project", datetime(2026, 9, 2)),
+    ]
+    _stub_structured(
+        env,
+        ConsolidateOutput(facts=[], archived_ids=[2, 999], summary=""),
+    )
+
+    result = env["service"].consolidate_memories(object())
+    assert result["archived"] == 1                      # 999 从未生效，不计入
+    assert [u["id"] for u in env["updates"] if u["status"] == "archived"] == [2]
+
+    record = json.loads(
+        next((env["tmp_path"] / "memory_audit").glob("*.jsonl"))
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    assert record["archived_ids"] == [2]
+    assert record["active_after"] == 1
+
+
 def test_no_active_memories_is_a_noop(env, monkeypatch):
     env["memories"] = []
     result = env["service"].consolidate_memories(object())

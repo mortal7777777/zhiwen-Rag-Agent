@@ -478,7 +478,9 @@ class ContextService:
         if not self.settings.memory_enabled:
             return []
         scan_limit = int(getattr(self.settings, "memory_recall_scan_limit", 500) or 500)
-        memories = repo.list_memories(db, limit=scan_limit)
+        # order="created"：兜底要的是"最近录入的事实"，而不是"最近被编辑过的"
+        # （updated_at 只反映内容编辑；且并列时若无 tiebreaker，取前 N 条是任意的）
+        memories = repo.list_memories(db, limit=scan_limit, order="created")
         if not memories:
             return []
         try:
@@ -817,12 +819,16 @@ class ContextService:
 
             active_by_id = {int(m["id"]): m for m in active_sorted}
             archived_ids = set(int(x) for x in (data.get("archived_ids") or []))
+            # 只记"真正被翻转的那几行"：模型可能给出已归档/不存在的 id，
+            # 若把请求集合直接当成结果，返回的 archived 数会虚报，
+            # 审计记录与下面的"过度删除"告警也会跟着失真。
+            actually_archived: set[int] = set()
             for m in active:
                 if m["id"] in archived_ids:
                     repo.update_memory(db, m["id"], status="archived")
+                    actually_archived.add(int(m["id"]))
 
             merged_count = 0
-            actually_archived = set(archived_ids)
             merged_sources: set[int] = set()
             for fact in data.get("facts") or []:
                 source_ids = [int(x) for x in (fact.get("source_ids") or [])]

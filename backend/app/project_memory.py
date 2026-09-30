@@ -189,7 +189,12 @@ def export_project_memory(settings, db) -> dict:
         picked: list[dict] = []
         for category in categories:
             picked.extend(by_category.get(category, []))
-        picked.sort(key=lambda m: str(m.get("updated_at") or ""), reverse=True)
+        # 排序带 id 兜底：updated_at 大量并列时（批量恢复/合并写同一时间戳），
+        # 没有 tiebreaker 会让"取前 N 条"取到任意条目，文件内容随机漂移。
+        picked.sort(
+            key=lambda m: (str(m.get("updated_at") or ""), int(m.get("id") or 0)),
+            reverse=True,
+        )
         picked = picked[:quota]
         parts += ["", f"## {title}"]
         if not picked:

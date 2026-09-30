@@ -108,10 +108,10 @@ def main() -> int:
         with open(audit_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        now = datetime.now()
         for m in archived:
             m.status = "active"
-            m.updated_at = now  # 状态变更 = 一次显式编辑
+            # 不写 updated_at：恢复是管理动作，不是内容编辑。写上会让 44 行并列
+            # 同一时间戳，排序失去区分度（updated_at 的语义见 Memory 模型注释）。
         db.commit()
 
         active_after = db.execute(
