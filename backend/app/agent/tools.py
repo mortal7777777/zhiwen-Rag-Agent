@@ -508,6 +508,114 @@ def make_skill_lookup_tool(
     return skill_lookup
 
 
+# ---------------- 技能创作（把重复流程沉淀为可复用 SKILL.md）----------------
+
+WRITE_SKILL_TOOL_NAME = "write_skill"
+
+
+class _WriteSkillArgs(BaseModel):
+    name: str = Field(
+        description="技能名称（小写连字符，如 book-topic-compare）；同名技能会被覆盖"
+    )
+    description: str = Field(
+        description="一句话描述技能用途（将写入 SKILL.md frontmatter 的 description）"
+    )
+    content: str = Field(
+        description=(
+            "SKILL.md 正文（不含 frontmatter）。"
+            "用 markdown 写：何时用、前置条件、步骤、注意事项。"
+            "正文开头会自动加上 frontmatter，你只需写 body。"
+        )
+    )
+    category: str = Field(
+        default="other",
+        description="分类目录名（如 research/writing/coding/other），默认 other",
+    )
+
+
+def make_write_skill_tool() -> BaseTool:
+    """技能创作工具：把重复执行的流程沉淀成 SKILL.md，下次 skill_lookup 即可取回。
+
+    写入 ~/.hermes/skills/<category>/<name>/SKILL.md（Hermes 个人技能层，
+    scan_skills 最高优先级），写完 force 刷新扫描缓存使新技能立即可见。
+    属敏感操作（写文件），走 HITL 人工确认。
+    """
+
+    @tool
+    def write_skill(
+        name: str,
+        description: str,
+        content: str,
+        category: str = "other",
+    ) -> dict:
+        """把一个可复用的任务流程写成技能文件（SKILL.md），下次同类任务可直接用 skill_lookup 取回执行。
+        适合：某个多步流程你刚走通且以后还会重复（如"从一本书提取议题对比表"、"部署前端项目"）；
+        不适合：一次性任务、简单的 1-2 步操作。
+        参数 name 为技能名（小写连字符），description 为一句话说明，content 为正文 markdown（不含 frontmatter），category 为分类目录（默认 other）。"""
+        try:
+            import os
+            import re
+
+            # 名称规范化：小写、连字符、只保留字母数字
+            clean_name = re.sub(r"[^a-z0-9-]", "-", name.lower().strip())
+            clean_name = re.sub(r"-+", "-", clean_name).strip("-")
+            if not clean_name or len(clean_name) < 2:
+                return {
+                    "summary": "技能名称无效（至少 2 个字母数字字符）",
+                    "error": "invalid name",
+                }
+            clean_cat = re.sub(
+                r"[^a-z0-9-]", "-", (category or "other").lower().strip()
+            ).strip("-") or "other"
+
+            skills_root = os.path.expanduser("~/.hermes/skills")
+            skill_dir = os.path.join(skills_root, clean_cat, clean_name)
+            skill_md_path = os.path.join(skill_dir, "SKILL.md")
+
+            # 检查是否已存在（覆盖前告知）
+            existed = os.path.exists(skill_md_path)
+
+            # 组装 frontmatter + body
+            desc_clean = description.strip().replace('"', "'")[:200]
+            frontmatter = (
+                "---\n"
+                f"name: {clean_name}\n"
+                f'description: "{desc_clean}"\n'
+                "---\n\n"
+            )
+            full_content = frontmatter + content.strip() + "\n"
+
+            os.makedirs(skill_dir, exist_ok=True)
+            with open(skill_md_path, "w", encoding="utf-8") as f:
+                f.write(full_content)
+
+            # force 刷新 scan_skills 缓存，使新技能在下一次 skill_lookup 时可见
+            try:
+                from ..skills import scan_skills
+
+                scan_skills(force=True)
+            except Exception:
+                pass  # 缓存刷新失败不影响写入成功
+
+            return {
+                "summary": (
+                    f"技能 {clean_name} 已{'覆盖' if existed else '创建'}"
+                    f"（~/.hermes/skills/{clean_cat}/{clean_name}/SKILL.md，"
+                    f"{len(full_content)} 字符）。"
+                    "下次同类任务可先用 skill_lookup 检索该技能直接按步骤执行。"
+                    "如需在设置页启用/停用，去设置 → 技能。"
+                ),
+                "name": clean_name,
+                "path": skill_md_path,
+                "category": clean_cat,
+                "overwritten": existed,
+            }
+        except Exception as exc:
+            return {"summary": f"技能创建失败：{exc}", "error": str(exc)}
+
+    return write_skill
+
+
 def build_tools(
     rag_service,
     use_web_search: bool,
@@ -566,6 +674,8 @@ def build_tools(
                         enabled_ids=skill_enabled_ids,
                     )
                 )
+                # 技能创作工具：让 agent 把重复流程沉淀为 SKILL.md（敏感操作走 HITL）
+                tools.append(make_write_skill_tool())
         except Exception as exc:
             logger.warning("技能工具注册失败：%s", exc)
     return tools
