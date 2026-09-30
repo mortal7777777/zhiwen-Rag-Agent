@@ -18,11 +18,19 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# 自创技能目录：知问 Agent 通过 write_skill 写入（与 Hermes 个人层隔离）。
+# 用户可在技能页按技能选择"共享"——复制到 Hermes 个人层供 Hermes 使用。
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+AGENT_SKILLS_DIR = Path(os.environ.get("DATA_DIR") or (_PROJECT_ROOT / "data")) / "agent_skills"
+HERMES_SKILLS_DIR = Path(os.path.expanduser("~/.hermes/skills"))
+AGENT_SOURCE = "agent"
 
 def _expand_plugin_skill_root(rel_glob: str) -> str | None:
     """把 ~/.claude/plugins/cache/<glob> 展开为实际存在的技能根目录。
@@ -39,6 +47,8 @@ def _expand_plugin_skill_root(rel_glob: str) -> str | None:
 
 # (来源标签, 根目录, 目录布局: flat=一级目录 / nested=分类/技能 两级)
 DEFAULT_ROOTS = [
+    # 知问自创技能（write_skill 写入；用户可共享到 Hermes 个人层）
+    (AGENT_SOURCE, str(AGENT_SKILLS_DIR), "nested"),
     ("codex", os.path.expanduser("~/.codex/skills"), "flat"),
     ("claude", os.path.expanduser("~/.claude/skills"), "flat"),
     # Claude Code 插件市场的技能（ecc=Everything Claude Code 等，装成插件时
@@ -48,13 +58,13 @@ DEFAULT_ROOTS = [
     ("claude", _expand_plugin_skill_root("anthropic-agent-skills/*/*/skills"), "flat"),
     # Hermes 个人技能层（~/.hermes/skills）：用户 skill_manage 创建的技能，
     # 放发行版层之前，同名时个人版优先（用户显式创建/安装的内容覆盖官方版）
-    ("hermes", os.path.expanduser("~/.hermes/skills"), "nested"),
+    ("hermes", str(HERMES_SKILLS_DIR), "nested"),
     ("hermes", r"D:\agents\hermes\skills", "nested"),
     # Hermes 的可选技能与主技能统一归为 "hermes" 来源，避免界面出现两个 Hermes 选项
     ("hermes", r"D:\agents\hermes\optional-skills", "nested"),
 ]
 
-_SOURCE_PRIORITY = {"codex": 0, "hermes": 1, "claude": 3}
+_SOURCE_PRIORITY = {"codex": 0, "agent": 0.5, "hermes": 1, "claude": 3}
 
 # 与本助手无关/元技能：直接不进入目录
 SKIP_NAMES = {
@@ -257,11 +267,12 @@ def _iter_skill_dirs(root: Path, layout: str):
                     yield skill_dir, cat.name
 
 
-def _parse_frontmatter(text: str) -> tuple[str, str, list[str]]:
-    """从 SKILL.md 里解析 name/description/tags（YAML frontmatter 或首行）。"""
+def _parse_frontmatter(text: str) -> tuple[str, str, list[str], dict]:
+    """解析 SKILL.md 的 name/description/tags + 扩展字段（origin/created_at）。"""
     name = ""
     description = ""
     tags: list[str] = []
+    extra: dict[str, str] = {}
     if text.startswith("---"):
         end = text.find("\n---", 3)
         if end != -1:
@@ -275,6 +286,8 @@ def _parse_frontmatter(text: str) -> tuple[str, str, list[str]]:
                         name = value
                     elif key in ("description", "desc") and not description:
                         description = value
+                    elif key in ("origin", "created_at") and value:
+                        extra[key] = value
             tag_match = re.search(r"tags:\s*\[([^\]]*)\]", block)
             if tag_match:
                 tags = [
@@ -283,12 +296,12 @@ def _parse_frontmatter(text: str) -> tuple[str, str, list[str]]:
                     if t.strip()
                 ][:8]
             if name or description:
-                return name, description, tags
+                return name, description, tags, extra
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if lines:
         name = lines[0].lstrip("# ").strip()
         description = " ".join(lines[1:3])[:200]
-    return name, description, tags
+    return name, description, tags, extra
 
 
 def _norm_name(name: str) -> str:
@@ -297,6 +310,9 @@ def _norm_name(name: str) -> str:
 
 def _visible(skill: dict) -> bool:
     """技能是否进入目录（屏蔽元技能/无关技能）。"""
+    # 自创技能始终可见：由用户/知问 Agent 创建，在技能页"自创"板块集中管理
+    if skill.get("source") == AGENT_SOURCE:
+        return True
     if skill["name"] in SKIP_NAMES or skill["dir_name"] in SKIP_NAMES:
         return False
     if skill["category"] in SKIP_CATEGORIES:
@@ -324,7 +340,7 @@ def scan_skills(force: bool = False) -> list[dict]:
                     continue
                 try:
                     text = skill_md.read_text(encoding="utf-8", errors="ignore")[:4000]
-                    name, description, tags = _parse_frontmatter(text)
+                    name, description, tags, extra = _parse_frontmatter(text)
                     name = name or skill_dir.name
                     item = {
                         "name": name,
@@ -336,11 +352,22 @@ def scan_skills(force: bool = False) -> list[dict]:
                         "path": str(skill_md),
                         "excerpt": text[:1500],
                         "tags": tags,
+                        "origin": extra.get("origin", ""),
+                        "created_at": extra.get("created_at", ""),
                         "sources": [source],
                         "has_commands": bool(
                             re.search(r"```(?:bash|sh|powershell|cmd)", text)
                         ),
+                        "shared": False,
                     }
+                    if source == AGENT_SOURCE:
+                        # 共享状态：Hermes 个人层里是否存在同名副本
+                        item["shared"] = (
+                            HERMES_SKILLS_DIR
+                            / (category or source)
+                            / skill_dir.name
+                            / "SKILL.md"
+                        ).exists()
                     if not _visible(item):
                         continue
                     item["group"] = _group_for(item)
@@ -355,7 +382,7 @@ def scan_skills(force: bool = False) -> list[dict]:
                         if source not in prev["sources"]:
                             prev["sources"].append(source)
                             prev["source"] = " + ".join(
-                                s for s in ["codex", "hermes", "claude"]
+                                s for s in ["codex", "agent", "hermes", "claude"]
                                 if s in prev["sources"]
                             )
                 except Exception as exc:
@@ -474,6 +501,110 @@ def reset_prefs(db) -> dict:
 # ============================================================
 # 检索
 # ============================================================
+
+
+# ============================================================
+# 自创技能管理：定位 / 共享（复制给 Hermes）/ 取消共享 / 删除
+# ============================================================
+
+_SAFE_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,80}")
+
+
+def _resolve_agent_skill(dir_name: str, category: str | None = None) -> Path | None:
+    """定位自创技能目录并防路径穿越；返回绝对路径或 None。"""
+    dir_name = (dir_name or "").strip()
+    if not _SAFE_NAME_RE.fullmatch(dir_name):
+        return None
+    cat = (category or "").strip()
+    if cat and not _SAFE_NAME_RE.fullmatch(cat):
+        cat = ""
+    root = Path(AGENT_SKILLS_DIR)
+    if not root.is_dir():
+        return None
+    candidates: list[Path] = (
+        [root / cat / dir_name] if cat else sorted(root.glob(f"*/{dir_name}"))
+    )
+    for cand in candidates:
+        try:
+            resolved = cand.resolve()
+            resolved.relative_to(root.resolve())
+        except (ValueError, OSError):
+            continue
+        if (resolved / "SKILL.md").is_file():
+            return resolved
+    return None
+
+
+def _read_skill_origin(skill_dir: Path) -> str:
+    """读取技能 frontmatter 的 origin 字段（判断是否为本助手创建/共享）。"""
+    try:
+        text = (skill_dir / "SKILL.md").read_text(encoding="utf-8", errors="ignore")[:800]
+    except OSError:
+        return ""
+    _, _, _, extra = _parse_frontmatter(text)
+    return str(extra.get("origin") or "")
+
+
+def share_agent_skill(dir_name: str, category: str | None = None) -> dict:
+    """把自创技能复制到 Hermes 个人技能层（共享给 Hermes 使用）。"""
+    src = _resolve_agent_skill(dir_name, category)
+    if src is None:
+        raise FileNotFoundError(f"未找到自创技能 {dir_name}")
+    rel = src.relative_to(Path(AGENT_SKILLS_DIR).resolve())
+    dst = HERMES_SKILLS_DIR / rel
+    updated = (dst / "SKILL.md").exists()
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+    scan_skills(force=True)
+    return {"ok": True, "updated": updated, "target": str(dst)}
+
+
+def unshare_agent_skill(dir_name: str, category: str | None = None) -> dict:
+    """取消共享：删除 Hermes 个人层里的副本（仅限 origin=agent 的目录）。"""
+    src = _resolve_agent_skill(dir_name, category)
+    if src is None:
+        raise FileNotFoundError(f"未找到自创技能 {dir_name}")
+    rel = src.relative_to(Path(AGENT_SKILLS_DIR).resolve())
+    dst = HERMES_SKILLS_DIR / rel
+    if not (dst / "SKILL.md").is_file():
+        return {"ok": True, "updated": False}
+    if _read_skill_origin(dst) != AGENT_SOURCE:
+        raise PermissionError("该目录不是本助手共享的副本，拒绝删除")
+    shutil.rmtree(dst)
+    scan_skills(force=True)
+    return {"ok": True, "updated": True, "target": str(dst)}
+
+
+def delete_agent_skill(dir_name: str, category: str | None = None) -> dict:
+    """删除自创技能；已共享的副本一并清理（仅限 origin=agent 的目录）。"""
+    src = _resolve_agent_skill(dir_name, category)
+    if src is None:
+        raise FileNotFoundError(f"未找到自创技能 {dir_name}")
+    rel = src.relative_to(Path(AGENT_SKILLS_DIR).resolve())
+    dst = HERMES_SKILLS_DIR / rel
+    removed_shared = False
+    if (dst / "SKILL.md").is_file() and _read_skill_origin(dst) == AGENT_SOURCE:
+        shutil.rmtree(dst)
+        removed_shared = True
+    shutil.rmtree(src)
+    scan_skills(force=True)
+    return {"ok": True, "removed_shared": removed_shared}
+
+
+def agent_skill_content(
+    dir_name: str, category: str | None = None, limit: int = 20000
+) -> dict:
+    """读取自创技能 SKILL.md 全文（预览用）。"""
+    src = _resolve_agent_skill(dir_name, category)
+    if src is None:
+        raise FileNotFoundError(f"未找到自创技能 {dir_name}")
+    text = (src / "SKILL.md").read_text(encoding="utf-8", errors="ignore")
+    return {
+        "ok": True,
+        "name": dir_name,
+        "content": text[:limit],
+        "truncated": len(text) > limit,
+    }
 
 
 def search_skills(

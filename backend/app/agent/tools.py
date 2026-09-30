@@ -536,9 +536,9 @@ class _WriteSkillArgs(BaseModel):
 def make_write_skill_tool() -> BaseTool:
     """技能创作工具：把重复执行的流程沉淀成 SKILL.md，下次 skill_lookup 即可取回。
 
-    写入 ~/.hermes/skills/<category>/<name>/SKILL.md（Hermes 个人技能层，
-    scan_skills 最高优先级），写完 force 刷新扫描缓存使新技能立即可见。
-    属敏感操作（写文件），走 HITL 人工确认。
+    写入自创技能库 data/agent_skills/<category>/<name>/SKILL.md（与 Hermes
+    个人技能层隔离；设置 → 技能 → 自创 里可启用 / 共享给 Hermes 使用）。
+    写完 force 刷新扫描缓存使新技能立即可见。属敏感操作（写文件），走 HITL 人工确认。
     """
 
     @tool
@@ -555,6 +555,7 @@ def make_write_skill_tool() -> BaseTool:
         try:
             import os
             import re
+            from datetime import date
 
             # 名称规范化：小写、连字符、只保留字母数字
             clean_name = re.sub(r"[^a-z0-9-]", "-", name.lower().strip())
@@ -568,7 +569,10 @@ def make_write_skill_tool() -> BaseTool:
                 r"[^a-z0-9-]", "-", (category or "other").lower().strip()
             ).strip("-") or "other"
 
-            skills_root = os.path.expanduser("~/.hermes/skills")
+            # 自创技能落点：data/agent_skills（与 Hermes 个人层隔离，按需共享）
+            from ..skills import AGENT_SKILLS_DIR
+
+            skills_root = str(AGENT_SKILLS_DIR)
             skill_dir = os.path.join(skills_root, clean_cat, clean_name)
             skill_md_path = os.path.join(skill_dir, "SKILL.md")
 
@@ -581,6 +585,8 @@ def make_write_skill_tool() -> BaseTool:
                 "---\n"
                 f"name: {clean_name}\n"
                 f'description: "{desc_clean}"\n'
+                "origin: agent\n"
+                f"created_at: {date.today().isoformat()}\n"
                 "---\n\n"
             )
             full_content = frontmatter + content.strip() + "\n"
@@ -600,10 +606,10 @@ def make_write_skill_tool() -> BaseTool:
             return {
                 "summary": (
                     f"技能 {clean_name} 已{'覆盖' if existed else '创建'}"
-                    f"（~/.hermes/skills/{clean_cat}/{clean_name}/SKILL.md，"
-                    f"{len(full_content)} 字符）。"
-                    "下次同类任务可先用 skill_lookup 检索该技能直接按步骤执行。"
-                    "如需在设置页启用/停用，去设置 → 技能。"
+                    f"（自创技能库 {clean_cat}/{clean_name}/SKILL.md，"
+                    f"{len(full_content)} 字符，当前为待启用状态）。"
+                    "在 设置 → 技能 → 自创 里可启用（启用后 skill_lookup 才能检索到）；"
+                    "如需给 Hermes 使用，可在同一处点「共享」。"
                 ),
                 "name": clean_name,
                 "path": skill_md_path,
