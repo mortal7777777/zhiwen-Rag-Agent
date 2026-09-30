@@ -399,6 +399,9 @@ cd ..\frontend
 npm run dev
 ```
 
+> Windows 一键启动：双击根目录 `start_all.bat`——自动检查/启动 MySQL、OpenSearch、
+> 后端、前端，就绪后打开浏览器；已在运行的组件自动跳过。
+
 ## Docker 一键启动（推荐，开箱即用）
 
 > 不需要本机装 Python / Node / OpenSearch / MySQL：五个服务（opensearch / mysql /
