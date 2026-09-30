@@ -746,16 +746,27 @@ def update_memory(
     category: str | None = None,
     status: str | None = None,
 ) -> Memory | None:
-    """编辑记忆内容/分类/状态。"""
+    """编辑记忆内容/分类/状态。
+
+    updated_at 在这里**显式**写入（模型列已去掉 onupdate）：只有真正的编辑/合并
+    才刷新"内容最后修改时间"，命中计数累加（bump_memory_hits）不刷新——否则
+    "最后被召回"会被当成"最后被陈述"，整合的新旧判定与 AGENTS.md 排序都会失真。
+    """
     m = db.get(Memory, memory_id)
     if m is None:
         return None
-    if content is not None:
+    changed = False
+    if content is not None and content != m.content:
         m.content = content
-    if category is not None:
+        changed = True
+    if category is not None and category != m.category:
         m.category = category
-    if status is not None:
+        changed = True
+    if status is not None and status != m.status:
         m.status = status
+        changed = True
+    if changed:
+        m.updated_at = datetime.now()
     db.commit()
     db.refresh(m)
     return m

@@ -76,7 +76,8 @@ def test_recall_with_hits_does_not_pad_to_top_k(monkeypatch):
     emb = FakeEmbeddings({"记忆内容 3": [0.0, 1.0]})  # 只有第 3 条与问题同向
 
     hits = service.retrieve_memories(None, emb, "记忆内容 3")
-    assert hits == ["记忆内容 3"]  # 1 条命中就是 1 条，不补位
+    # 1 条命中就是 1 条，不补位；注入时带 [分类|录入日期] 时效锚点
+    assert hits == ["[other|2026-09-21] 记忆内容 3"]
 
 
 def test_recall_respects_token_budget(monkeypatch):
@@ -101,7 +102,7 @@ def test_recall_counts_hits_for_kept_memories(monkeypatch):
     emb = FakeEmbeddings({"记忆内容 3": [0.0, 1.0]})
 
     hits = service.retrieve_memories(object(), emb, "记忆内容 3")
-    assert hits == ["记忆内容 3"]
+    assert hits == ["[other|2026-09-21] 记忆内容 3"]
     assert calls == [[3]]  # 只记真正注入的那条
 
     # 零命中兜底不算命中（不是"相关"，只是背景）
@@ -151,7 +152,34 @@ def test_recall_finds_semantic_match_without_keyword_overlap(monkeypatch):
     service = ContextService(FakeSettings(), chat=None)
 
     hits = service.retrieve_memories(object(), emb, "IDE 用什么好")
-    assert hits == ["用户习惯用 PyCharm 写 Python"]
+    assert hits == ["[preference|2026-09-21] 用户习惯用 PyCharm 写 Python"]
+
+
+def test_recall_drops_near_duplicate_slices(monkeypatch):
+    """同一主题的近似重复切片只注入最相关一条（否则 top_k 名额被一个话题吃光）。"""
+    memories = [
+        {"id": i + 1, "content": f"用户在做《与神对话》与《太傻天书》对比整理（版本 {i + 1}）",
+         "category": "project", "created_at": f"2026-09-2{i}T10:00:00"}
+        for i in range(4)
+    ]
+    memories.append(
+        {"id": 99, "content": "用户住在成都", "category": "profile",
+         "created_at": "2026-09-21T10:00:00"}
+    )
+    monkeypatch.setattr(context_mod.repo, "list_memories", lambda db, limit=500: memories)
+    monkeypatch.setattr(context_mod.repo, "bump_memory_hits", lambda db, ids: None)
+    question = "对比整理进度"
+    # 4 条近似切片同向（互相余弦 1.0 → 去重只剩最相关一条）；
+    # "成都"那条与问题余弦 0.8（过阈值、不同向 → 保留）
+    emb = FakeEmbeddings(
+        {"对比整理进度": [0.0, 1.0], "用户住在成都": [0.6, 0.8]}
+        | {f"用户在做《与神对话》与《太傻天书》对比整理（版本 {i + 1}）": [0.0, 1.0] for i in range(4)}
+    )
+    service = ContextService(FakeSettings(), chat=None)
+
+    hits = service.retrieve_memories(object(), emb, question)
+    assert len(hits) == 2, hits  # 4 条同义切片合并成 1 条，不占满 3 个名额
+    assert any("成都" in h for h in hits)
 
 
 def test_is_duplicate_detects_match_beyond_recent_window():

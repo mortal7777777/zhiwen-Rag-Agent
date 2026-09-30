@@ -159,6 +159,13 @@ class Memory(Base):
     category: profile(用户画像) / preference(喜好偏好) / project(工作项目)
               / decision(重要决定) / lesson(教训与应对) / other(其他)
     status:   active(生效) / archived(已归档，被新事实覆盖或过时)
+
+    时间字段语义（2026-09-30 修正，此前三者混淆导致冲突判定失效）：
+    - created_at：事实**首次入库**时间（语句发生的近似时间，用于判定新旧）；
+    - updated_at：**内容被编辑/合并**的时间（仅在 content/category/status 变化时更新，
+      不要用 onupdate——否则召回累加命中数也会刷新它，"最后被召回"会被误当成
+      "最后被陈述"，整合的"以较新的为准"和 AGENTS.md 的排序双双失真）；
+    - last_hit_at：最后一次被注入上下文的时间（衰减依据，与上面两者无关）。
     """
 
     __tablename__ = "memories"
@@ -173,10 +180,11 @@ class Memory(Base):
     hit_count = Column(Integer, default=0, nullable=False)
     last_hit_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
+    # 注意：不带 onupdate。内容变更由 repository.update_memory 显式写入，
+    # 命中计数（bump_memory_hits）不得改写它。
     updated_at = Column(
         DateTime,
         default=datetime.now,
-        onupdate=datetime.now,
         nullable=False,
     )
 

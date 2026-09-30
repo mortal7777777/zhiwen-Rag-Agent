@@ -98,6 +98,64 @@ def estimate_tokens(text: str) -> int:
     return max(1, int(cjk / 1.5 + other / 4))
 
 
+# 注入去重阈值：同一主题常被切成多条近似重复的记忆，若不过滤，top_k 名额会被
+# 一个话题的碎片吃光（整合前实测 5 条同义条目并存）。余弦超过该值只保留最相关一条。
+_MEMORY_DEDUP_SIM = 0.9
+
+
+def _cosine(a, b) -> float:
+    """余弦相似度（显式归一，不假设向量已单位化）。"""
+    try:
+        dot = sum(x * y for x, y in zip(a, b))
+        na = sum(x * x for x in a) ** 0.5
+        nb = sum(y * y for y in b) ** 0.5
+        if na and nb:
+            return dot / (na * nb)
+        return dot
+    except Exception:
+        return 0.0
+
+
+def _iso(value) -> str | None:
+    """datetime → ISO 字符串（审计快照用；None 原样返回）。"""
+    try:
+        return value.isoformat() if value is not None else None
+    except Exception:
+        return str(value)
+
+
+def _date_of(memory: dict) -> str:
+    """记忆的录入日期（YYYY-MM-DD）：提示词与注入前缀的时效锚点。
+
+    优先 created_at（事实首次入库时间）；老数据缺失时退回 updated_at。
+    """
+    text = _iso(memory.get("created_at") or memory.get("updated_at")) or ""
+    return text[:10] if len(text) >= 10 else "未知"
+
+
+def _write_memory_audit(settings, record: dict) -> str:
+    """把一次记忆整合的"变更前快照 + 结果"追加到 meta_dir/memory_audit/YYYY-MM-DD.jsonl。
+
+    整合是唯一批量改记忆状态的路径，此前只留一个时间戳——出了问题既无法回溯，
+    也无法区分"模型归档的"还是"用户手工归档的"。写失败不影响整合本身。
+    返回文件路径（失败时返回空串）。
+    """
+    try:
+        base = getattr(settings, "meta_dir", None)
+        if base is None:
+            return ""
+        audit_dir = base / "memory_audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        path = audit_dir / f"{datetime.now():%Y-%m-%d}.jsonl"
+        payload = {"ts": datetime.now().isoformat(), **record}
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        return str(path)
+    except Exception as exc:
+        logger.warning("记忆整合审计写入失败：%s", exc)
+        return ""
+
+
 def context_window_for(settings) -> int:
     """解析当前对话模型的上下文窗口（token）。
 
@@ -426,18 +484,43 @@ class ContextService:
         try:
             q_vec = embeddings.embed_query(question)
             vectors = self._memory_vectors(embeddings, memories)
-            scored: list[tuple[float, int, str]] = []
+            scored: list[dict] = []
             for memory, vec in zip(memories, vectors):
                 if vec is None:
                     continue
                 sim = sum(a * b for a, b in zip(q_vec, vec))
                 if sim >= self.settings.memory_min_score:
                     scored.append(
-                        (sim, int(memory["id"]), str(memory.get("content") or ""))
+                        {
+                            "sim": sim,
+                            "id": int(memory["id"]),
+                            "content": str(memory.get("content") or ""),
+                            "category": str(memory.get("category") or ""),
+                            "date": _date_of(memory),
+                            "vec": vec,
+                        }
                     )
-            scored.sort(key=lambda x: x[0], reverse=True)
-            top = scored[: self.settings.memory_top_k]
-            selected = [content for _, _, content in top]
+            scored.sort(key=lambda x: x["sim"], reverse=True)
+            # 贪心选取 + 近似去重：与已选条目近乎同向的候选跳过。同一主题常被切成
+            # 多条近似重复的记忆，不去重的话 3 个名额会被一个话题的碎片吃光，
+            # 模型拿到的只是重叠信息（整合前实测 5 条同义条目并存）。
+            picked: list[dict] = []
+            for cand in scored:
+                if len(picked) >= self.settings.memory_top_k:
+                    break
+                if any(
+                    _cosine(cand["vec"], p["vec"]) > _MEMORY_DEDUP_SIM for p in picked
+                ):
+                    continue
+                picked.append(cand)
+            # 注入时带 [分类|录入日期] 锚点：原来的裸句子既不标时效也不标类别，
+            # 模型无法判断"这条偏好是三个月前的还是今天的"，只能一律存疑。
+            selected = [
+                (f"[{p['category']}|{p['date']}] " if (p["category"] or p["date"]) else "")
+                + p["content"]
+                for p in picked
+            ]
+            top_ids = [p["id"] for p in picked]
             if not selected:
                 # 零命中才用最近记忆兜底（"介绍一下我"这类问候与具体事实
                 # 相似度低，需要一段背景撑底）；兜底不算"命中"
@@ -445,6 +528,7 @@ class ContextService:
                     str(m.get("content") or "")
                     for m in memories[: self.settings.memory_empty_fallback]
                 ]
+                top_ids = []
             # token 预算裁剪（从尾部去掉超预算的记忆）；被裁掉的不计命中
             total = 0
             kept: list[str] = []
@@ -454,8 +538,8 @@ class ContextService:
                 if total + tokens > self.settings.memory_max_tokens:
                     break
                 kept.append(content)
-                if idx < len(top):
-                    kept_ids.append(top[idx][1])
+                if idx < len(top_ids):
+                    kept_ids.append(top_ids[idx])
                 total += tokens
             if kept_ids and db is not None:
                 try:
@@ -652,31 +736,59 @@ class ContextService:
         return self.consolidate_memories(db)
 
     def consolidate_memories(self, db: Session) -> dict:
-        """整合整理：合并重复、新事实覆盖旧事实、归档过时项，并生成画像摘要。"""
+        """整合整理：合并重复、新事实覆盖旧事实，并生成画像摘要。
+
+        2026-09-30 收紧归档语义：这里的目标是**去重**，不是压缩总量。此前提示词含
+        "删除琐碎无用的"+ 按命中次数优先归档，实测把 46 条压成 2 条（44 条归档，
+        其中 33 条曾被召回），召回层只剩两个混着多主题的大块，反而更差。现在只允许
+        归档"被合并的重复项"与"被新事实明确覆盖的旧项"。
+        """
         with _consolidate_lock:
             memories = repo.list_all_memories(db, limit=2000)
             active = [m for m in memories if m["status"] == "active"]
             if not active:
                 return {"merged": 0, "archived": 0, "summary": None}
 
-            lines = "\n".join(
-                f"{m['id']}: [{m['category']}]（命中 {m.get('hit_count') or 0} 次）{m['content']}"
-                for m in active
+            # 按 created_at 升序交给模型：与提示词"旧记忆在前、新记忆在后"的前提一致。
+            # 此前用 list_all_memories 的 updated_at DESC（最新在前），前提是反的；
+            # 且 updated_at 当时会被召回刷新，连"最新"本身也不可信。
+            active_sorted = sorted(
+                active,
+                key=lambda m: (str(m.get("created_at") or ""), int(m.get("id") or 0)),
             )
-            prompt = f"""以下是系统长期记忆库中的全部活跃记忆（id: [分类]（命中次数）内容）。
-请做一次记忆整合整理：
-1. 合并内容重复或高度相似的多条记忆为一条；
-2. 当新记忆与旧记忆矛盾时（旧记忆在前、新记忆在后），以较新的内容为准，
-   把过时/被覆盖的旧记忆 id 放入 archived_ids；
-3. 保留仍有价值的分类与内容，删除琐碎无用的；
-4. 命中次数多的记忆是常被召回使用的，优先保留；长期零命中的琐碎条目
-   （一次性细节、可推导的项目事实）可放入 archived_ids；
-5. 生成一份不超过 150 字的"用户画像摘要"（第三人称概括用户身份、喜好、项目）。
+            before_snapshot = [
+                {
+                    "id": m["id"],
+                    "category": m.get("category"),
+                    "status": m.get("status"),
+                    "hit_count": m.get("hit_count") or 0,
+                    "created_at": _iso(m.get("created_at")),
+                    "content": m.get("content"),
+                }
+                for m in active_sorted
+            ]
+            lines = "\n".join(
+                f"{m['id']}: [{m['category']}]"
+                f"（录入 {_date_of(m)}，命中 {m.get('hit_count') or 0} 次）{m['content']}"
+                for m in active_sorted
+            )
+            prompt = f"""以下是系统长期记忆库中的全部活跃记忆，按录入时间**从旧到新**排列
+（格式：id: [分类]（录入日期，命中次数）内容）。
+
+请做一次记忆整合整理。**目标是去掉重复，不是压缩总量**：
+1. 合并内容重复或高度相似的多条记忆为一条（这是 archived_ids 的主要正当来源）；
+2. 仅当同一事实存在明确矛盾的多个版本时才覆盖：以**录入日期较新**的为准，
+   把被覆盖的旧版本 id 放入 archived_ids；
+3. **不要**因为"看起来琐碎""价值不高""可推导"就归档——活跃记忆过少会让召回退化成
+   少数几个混着多个主题的大块，语义匹配反而更不准（这是已经踩过的坑）；
+4. 命中次数仅供参考，**不作为归档依据**（旧记忆可能只是还没来得及被召回）；
+5. 不属于第 1、2 类的记忆一律原样保留：不要出现在 facts 里，也不要放进 archived_ids；
+6. 生成一份不超过 150 字的"用户画像摘要"（第三人称概括用户身份、喜好、项目）。
 
 输出 JSON（不要任何解释）：
 {{
   "facts": [{{"source_ids": [多个原id], "category": "profile", "content": "整合后内容"}}],
-  "archived_ids": [被归档的旧id],
+  "archived_ids": [被覆盖的旧id],
   "summary": "用户画像摘要"
 }}
 
@@ -703,6 +815,7 @@ class ContextService:
                     logger.warning("记忆整合失败：%s", exc)
                     return {"merged": 0, "archived": 0, "summary": None}
 
+            active_by_id = {int(m["id"]): m for m in active_sorted}
             archived_ids = set(int(x) for x in (data.get("archived_ids") or []))
             for m in active:
                 if m["id"] in archived_ids:
@@ -710,6 +823,7 @@ class ContextService:
 
             merged_count = 0
             actually_archived = set(archived_ids)
+            merged_sources: set[int] = set()
             for fact in data.get("facts") or []:
                 source_ids = [int(x) for x in (fact.get("source_ids") or [])]
                 if not source_ids:
@@ -722,19 +836,58 @@ class ContextService:
                 new_content = str(fact.get("content", "")).strip()
                 if not new_content:
                     continue
-                # 保留最新的那条作为主记录，其余归档
-                primary = max(source_ids)
+                # 主记录取"录入时间最新"的那条（此前用 max(id)：id 只是自增序，
+                # 合并后幸存行会保留最老的 created_at、拿到最新的 content）
+                primary = max(
+                    source_ids,
+                    key=lambda sid: (
+                        str((active_by_id.get(sid) or {}).get("created_at") or ""),
+                        sid,
+                    ),
+                )
                 repo.update_memory(db, primary, content=new_content, category=category)
                 for sid in source_ids:
                     if sid != primary:
                         repo.update_memory(db, sid, status="archived")
                         actually_archived.add(sid)
+                        merged_sources.add(sid)
                 merged_count += 1
 
             summary = str(data.get("summary", "")).strip()
             if summary:
                 repo.set_meta(db, "memory_summary", summary)
             repo.set_meta(db, "memory_last_consolidated_at", datetime.now().isoformat())
+
+            # 审计：整合是唯一会批量改状态的路径，此前只有一个时间戳、无从回溯。
+            # 快照落 JSONL（meta_dir/memory_audit/YYYY-MM-DD.jsonl），可回滚可复盘。
+            try:
+                active_after = len(repo.list_memories(db, limit=2000))
+            except Exception:
+                active_after = len(active_sorted) - len(actually_archived)
+            audit_path = _write_memory_audit(
+                self.settings,
+                {
+                    "merged": merged_count,
+                    "archived_ids": sorted(actually_archived),
+                    "merged_source_ids": sorted(merged_sources),
+                    "active_before": len(active_sorted),
+                    "active_after": active_after,
+                    "summary": summary or None,
+                    "before": before_snapshot,
+                },
+            )
+            # 只归档"非合并项"= 删除而非去重：给一个可观测的告警
+            # （历史事故：46 条压成 2 条，其中 33 条曾被召回）
+            deleted_like = actually_archived - merged_sources
+            if len(deleted_like) > max(2, len(active_sorted) // 2):
+                logger.warning(
+                    "记忆整合归档了 %d 条非合并项（活跃 %d → %d），疑似过度删除；"
+                    "明细见 %s，可在记忆面板恢复",
+                    len(deleted_like),
+                    len(active_sorted),
+                    active_after,
+                    audit_path,
+                )
             return {
                 "merged": merged_count,
                 "archived": len(actually_archived),

@@ -386,7 +386,8 @@ def _prepare_node(state: AgentState, runtime) -> dict:
         )
     if memory_hits:
         _append_if_changed(
-            "相关的长期记忆（历史信息、可能过时，仅供参考）：\n"
+            "相关的长期记忆（每条格式为 [分类|录入日期]，属历史信息："
+            "与当前对话内容冲突时以当前对话为准，不要用旧记忆否定用户刚说的话）：\n"
             + "\n".join(f"- {item}" for item in memory_hits)
         )
     if vision_descriptions:
