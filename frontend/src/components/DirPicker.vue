@@ -135,16 +135,16 @@ async function checkPath() {
 }
 
 .dirpicker-status {
-  font-size: 12px;
-  color: var(--text-2, #909399);
+  font-size: var(--font-xs);
+  color: var(--text-2);
 }
 
 .dirpicker-status.ok {
-  color: var(--el-color-success, #67c23a);
+  color: var(--success-text);
 }
 
 .dirpicker-status.err {
-  color: var(--el-color-danger, #f56c6c);
+  color: var(--danger-text);
 }
 
 .dirpicker-bar {
@@ -156,8 +156,8 @@ async function checkPath() {
 
 .dirpicker-path {
   flex: 1;
-  font-size: 12px;
-  color: var(--text-2, #909399);
+  font-size: var(--font-xs);
+  color: var(--text-2);
   word-break: break-all;
 }
 
@@ -166,8 +166,8 @@ async function checkPath() {
   flex-direction: column;
   max-height: 320px;
   overflow: auto;
-  border: 1px solid var(--border, #ebeef5);
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   padding: 4px;
 }
 
@@ -176,22 +176,22 @@ async function checkPath() {
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 
 .dirpicker-item:hover {
-  background: var(--el-fill-color-light, #f5f7fa);
+  background: var(--bg-hover);
 }
 
 .dirpicker-hint {
   padding: 8px;
-  font-size: 12px;
-  color: var(--text-2, #909399);
+  font-size: var(--font-xs);
+  color: var(--text-2);
 }
 
 .dirpicker-hint.err {
-  color: var(--el-color-danger, #f56c6c);
+  color: var(--danger-text);
 }
 </style>

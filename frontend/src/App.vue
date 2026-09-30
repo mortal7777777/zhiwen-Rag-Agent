@@ -2061,14 +2061,14 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
-  color: #fff;
+  border-radius: var(--radius-md);
+  color: var(--text-on-brand);
   background: var(--primary-grad);
   box-shadow: var(--shadow-pop);
 }
 
 .logo-text {
-  font-size: 16px;
+  font-size: var(--font-lg);
   font-weight: 700;
   letter-spacing: 0.5px;
   color: var(--text-1);
@@ -2089,7 +2089,7 @@ onMounted(() => {
 .app-menu .el-menu-item {
   height: 44px;
   margin-bottom: 4px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   color: var(--text-2);
 }
 
@@ -2139,7 +2139,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   color: var(--text-3);
   cursor: pointer;
   transition: all 0.2s;
@@ -2174,7 +2174,7 @@ onMounted(() => {
 }
 
 .settings-dialog {
-  border-radius: 18px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
   padding: 0;
   background: var(--bg-panel);
@@ -2221,13 +2221,13 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 9px;
-  color: #fff;
+  border-radius: var(--radius-sm);
+  color: var(--text-on-brand);
   background: var(--primary-grad);
 }
 
 .brand-title {
-  font-size: 15px;
+  font-size: var(--font-lg);
   font-weight: 700;
   color: var(--text-1);
 }
@@ -2244,7 +2244,7 @@ onMounted(() => {
   border: none;
   background: transparent;
   cursor: pointer;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
 }
 
 .settings-tab-inner {
@@ -2252,8 +2252,8 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   padding: 8px 16px;
-  border-radius: 10px;
-  font-size: 13.5px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-base);
   color: var(--text-2);
   transition: all 0.2s;
   user-select: none;
@@ -2267,7 +2267,7 @@ onMounted(() => {
 
 .settings-tab.active .settings-tab-inner {
   background: var(--primary-grad);
-  color: #fff;
+  color: var(--text-on-brand);
   font-weight: 600;
   box-shadow: var(--shadow-pop);
 }
@@ -2290,14 +2290,14 @@ onMounted(() => {
 }
 
 .pane-title {
-  font-size: 18px;
+  font-size: var(--font-xl);
   font-weight: 700;
   color: var(--text-1);
 }
 
 .pane-sub {
   margin-top: 3px;
-  font-size: 12.5px;
+  font-size: var(--font-sm);
   color: var(--text-3);
 }
 
@@ -2306,7 +2306,7 @@ onMounted(() => {
 }
 
 .settings-label {
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 600;
   color: var(--text-2);
   margin-bottom: 10px;
@@ -2325,7 +2325,7 @@ onMounted(() => {
 
 .settings-tip {
   margin-top: 10px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-3);
   line-height: 1.7;
 }
@@ -2341,7 +2341,7 @@ onMounted(() => {
 }
 
 .memory-path {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-3);
   margin-bottom: 10px;
   word-break: break-all;
@@ -2349,7 +2349,7 @@ onMounted(() => {
 
 .memory-textarea :deep(.el-textarea__inner) {
   font-family: Consolas, Monaco, monospace;
-  font-size: 12.5px;
+  font-size: var(--font-sm);
   line-height: 1.6;
 }
 
@@ -2362,7 +2362,7 @@ onMounted(() => {
 
 .theme-card {
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 10px;
   cursor: pointer;
   background: var(--bg-card-2);
@@ -2381,7 +2381,7 @@ onMounted(() => {
 
 .theme-preview {
   height: 52px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   display: flex;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -2416,7 +2416,7 @@ onMounted(() => {
 
 .preview-line {
   height: 4px;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   background: var(--primary);
   opacity: 0.75;
   width: 70%;
@@ -2431,7 +2431,7 @@ onMounted(() => {
   align-self: flex-end;
   width: 38%;
   height: 12px;
-  border-radius: 6px 6px 2px 6px;
+  border-radius: var(--radius-sm) var(--radius-sm) var(--radius-xs) var(--radius-sm);
   background: var(--accent);
   opacity: 0.7;
 }
@@ -2443,13 +2443,13 @@ onMounted(() => {
 }
 
 .theme-name {
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-1);
 }
 
 .theme-check {
   color: var(--primary);
-  font-size: 15px;
+  font-size: var(--font-lg);
 }
 
 .width-segmented {
@@ -2470,7 +2470,7 @@ onMounted(() => {
 .width-preview-track {
   flex: 1;
   height: 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--bg-hover);
   border: 1px solid var(--border);
   overflow: hidden;
@@ -2478,14 +2478,14 @@ onMounted(() => {
 
 .width-preview-bar {
   height: 100%;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--primary-grad);
   transition: width 0.25s ease;
 }
 
 .width-value {
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-3);
   min-width: 56px;
   text-align: right;
@@ -2495,16 +2495,16 @@ onMounted(() => {
 .provider-empty {
   padding: 18px 12px;
   text-align: center;
-  font-size: 12.5px;
+  font-size: var(--font-sm);
   color: var(--text-3);
   border: 1px dashed var(--border-strong);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--bg-card-2);
 }
 
 .provider-card {
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 12px;
   margin-bottom: 10px;
   background: var(--bg-card-2);
@@ -2527,13 +2527,13 @@ onMounted(() => {
 }
 
 .provider-radio :deep(.el-radio__label) {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-3);
   padding-left: 4px;
 }
 
 .provider-name {
-  font-size: 14px;
+  font-size: var(--font-base);
   font-weight: 600;
   color: var(--text-1);
 }
@@ -2563,7 +2563,7 @@ onMounted(() => {
 }
 
 .provider-grid .field label {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-3);
 }
 
@@ -2579,7 +2579,7 @@ onMounted(() => {
 
 .generic-form {
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 6px 12px;
   background: var(--bg-card-2);
 }
@@ -2601,13 +2601,13 @@ onMounted(() => {
   margin: 12px 0 2px;
   padding-bottom: 4px;
   border-bottom: 1px dashed var(--border);
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
-  color: var(--text-2, #666);
+  color: var(--text-2);
 }
 
 .generic-label {
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-2);
   flex-shrink: 0;
 }
@@ -2617,8 +2617,8 @@ onMounted(() => {
 }
 
 .generic-hint {
-  font-size: 12px;
-  color: var(--text-3, #999);
+  font-size: var(--font-xs);
+  color: var(--text-3);
   line-height: 1.4;
 }
 
@@ -2630,20 +2630,20 @@ onMounted(() => {
   gap: 12px;
   padding: 12px 14px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: var(--bg-card-2);
   margin-bottom: 14px;
 }
 
 .skill-master-title {
-  font-size: 14px;
+  font-size: var(--font-base);
   font-weight: 600;
   color: var(--text-1);
 }
 
 .skill-master-desc {
   margin-top: 3px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-3);
 }
 
@@ -2671,8 +2671,8 @@ onMounted(() => {
 
 .source-chip {
   padding: 4px 12px;
-  border-radius: 999px;
-  font-size: 12px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-xs);
   color: var(--text-2);
   background: var(--bg-card-2);
   border: 1px solid var(--border);
@@ -2700,7 +2700,7 @@ onMounted(() => {
 }
 
 .skill-summary-text {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-3);
 }
 
@@ -2709,7 +2709,7 @@ onMounted(() => {
   padding: 26px 0;
   text-align: center;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 
 .skill-list {
@@ -2724,7 +2724,7 @@ onMounted(() => {
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: var(--bg-card-2);
   transition: border-color 0.2s;
 }
@@ -2744,7 +2744,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   color: var(--primary);
   background: var(--bg-active);
 }
@@ -2763,13 +2763,13 @@ onMounted(() => {
 
 .skill-name {
   font-weight: 600;
-  font-size: 13.5px;
+  font-size: var(--font-base);
   color: var(--text-1);
 }
 
 .skill-desc {
   margin-top: 4px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-3);
   line-height: 1.5;
   overflow: hidden;
@@ -2806,7 +2806,7 @@ onMounted(() => {
 }
 
 .hidden-hint {
-  font-size: 11.5px;
+  font-size: var(--font-xs);
   color: var(--text-3);
 }
 

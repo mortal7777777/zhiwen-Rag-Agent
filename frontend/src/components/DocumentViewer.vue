@@ -210,8 +210,8 @@ defineExpose({ open })
 .dv-toc {
   width: 236px;
   flex: none;
-  border-right: 1px solid var(--border, #e8ebf1);
-  background: var(--bg-panel, #fbfcfe);
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -222,22 +222,22 @@ defineExpose({ open })
   align-items: center;
   justify-content: space-between;
   padding: 10px 12px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 600;
-  color: var(--text-1, #23262d);
-  border-bottom: 1px solid var(--border, #e8ebf1);
+  color: var(--text-1);
+  border-bottom: 1px solid var(--border);
   flex: none;
 }
 
 .dv-toc-toggle,
 .dv-toc-expand {
   cursor: pointer;
-  color: var(--text-3, #8b909b);
+  color: var(--text-3);
 }
 
 .dv-toc-toggle:hover,
 .dv-toc-expand:hover {
-  color: var(--primary, #1677ff);
+  color: var(--primary);
 }
 
 .dv-toc-list {
@@ -249,9 +249,9 @@ defineExpose({ open })
 .dv-toc-item {
   padding: 6px 10px;
   padding-right: 8px;
-  font-size: 12.5px;
+  font-size: var(--font-sm);
   line-height: 1.5;
-  color: var(--text-2, #4c515b);
+  color: var(--text-2);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
@@ -260,13 +260,13 @@ defineExpose({ open })
 }
 
 .dv-toc-item:hover {
-  color: var(--primary, #1677ff);
-  background: var(--bg-hover, #f1f4f9);
+  color: var(--primary);
+  background: var(--bg-hover);
 }
 
 .dv-toc-item.active {
-  color: var(--primary, #1677ff);
-  border-left-color: var(--primary, #1677ff);
+  color: var(--primary);
+  border-left-color: var(--primary);
   background: var(--primary-soft, rgba(22, 119, 255, 0.08));
 }
 
@@ -274,11 +274,11 @@ defineExpose({ open })
   flex: 1;
   min-width: 0;
   position: relative;
-  background: var(--bg-chat, #fff);
+  background: var(--bg-chat);
 }
 
 html.dark .dv-main {
-  background: var(--bg-chat, #1a1d24);
+  background: var(--bg-chat);
 }
 
 .dv-toc-expand {
@@ -287,10 +287,10 @@ html.dark .dv-main {
   top: 12px;
   z-index: 5;
   padding: 5px;
-  border-radius: 8px;
-  color: var(--text-2, #4c515b);
-  background: var(--bg-card, #f7f8fc);
-  border: 1px solid var(--border, #e8ebf1);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
   box-shadow: var(--shadow-soft, 0 2px 10px rgba(31, 35, 41, 0.05));
 }
 </style>

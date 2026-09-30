@@ -221,6 +221,7 @@ const tokensChartEl = ref(null)
 const costChartEl = ref(null)
 let tokensChart = null
 let costChart = null
+let themeObserver = null
 
 const PERIOD_LABELS = { today: '（今日）', '3d': '（近 3 天）', '7d': '（近 7 天）', all: '（全部）' }
 const periodLabel = computed(() => PERIOD_LABELS[period.value] || '')
@@ -233,6 +234,18 @@ function fmtTokens(n) {
 }
 
 // ---------- 图表（echarts，DeepSeek platform 用量页风格） ----------
+
+/** 图表配色取自设计令牌（主题切换时经 MutationObserver 重绘）。 */
+function chartPalette() {
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+  return {
+    primary: css('--primary') || '#1677ff',
+    success: css('--success') || '#2eb872',
+    warning: css('--warning') || '#e8912d',
+    danger: css('--danger') || '#f56c6c',
+    muted: css('--text-3') || '#6b7280',
+  }
+}
 
 function renderCharts() {
   if (!stats.value?.daily?.length) return
@@ -249,6 +262,7 @@ function renderCharts() {
   const runsPerDay = daily.map((d) => d.runs)
   const axis = { type: 'category', data: dates, axisLabel: { fontSize: 11 } }
   const tooltip = { trigger: 'axis' }
+  const C = chartPalette()
 
   if (tokensChartEl.value) {
     tokensChart = tokensChart || echarts.init(tokensChartEl.value)
@@ -268,22 +282,22 @@ function renderCharts() {
             type: 'bar',
             stack: 'total',
             data: input,
-            itemStyle: { color: '#5470c6', opacity: 0.85 },
+            itemStyle: { color: C.primary, opacity: 0.85 },
           },
           {
             name: '输出 tokens',
             type: 'bar',
             stack: 'total',
             data: output,
-            itemStyle: { color: '#91cc75', opacity: 0.9 },
+            itemStyle: { color: C.success, opacity: 0.9 },
           },
           {
             name: '总消耗',
             type: 'line',
             smooth: true,
             data: totalTok,
-            lineStyle: { width: 2, color: '#fac858' },
-            itemStyle: { color: '#fac858' },
+            lineStyle: { width: 2, color: C.warning },
+            itemStyle: { color: C.warning },
           },
         ],
       },
@@ -313,7 +327,7 @@ function renderCharts() {
             name: '估算成本（¥）',
             type: 'bar',
             data: cost,
-            itemStyle: { color: '#ee6666', opacity: 0.8 },
+            itemStyle: { color: C.danger, opacity: 0.8 },
             barMaxWidth: 22,
           },
           {
@@ -323,8 +337,8 @@ function renderCharts() {
             yAxisIndex: 1,
             connectNulls: true,
             data: hitRate,
-            lineStyle: { width: 2, color: '#3ba272' },
-            itemStyle: { color: '#3ba272' },
+            lineStyle: { width: 2, color: C.success },
+            itemStyle: { color: C.success },
           },
           {
             name: '运行次数',
@@ -333,8 +347,8 @@ function renderCharts() {
             yAxisIndex: 2,
             showSymbol: false,
             data: runsPerDay,
-            lineStyle: { width: 1.5, type: 'dashed', color: '#999' },
-            itemStyle: { color: '#999' },
+            lineStyle: { width: 1.5, type: 'dashed', color: C.muted },
+            itemStyle: { color: C.muted },
           },
         ],
       },
@@ -479,10 +493,14 @@ async function showDetail(row) {
 onMounted(() => {
   load()
   window.addEventListener('resize', onResize)
+  // 主题切换（html.dark 改变）时按新令牌重绘图表
+  themeObserver = new MutationObserver(() => renderCharts())
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
+  themeObserver?.disconnect()
   tokensChart?.dispose()
   costChart?.dispose()
   tokensChart = null
@@ -506,7 +524,7 @@ onBeforeUnmount(() => {
 }
 
 .runs-page :deep(.el-card) {
-  border-radius: 14px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border);
 }
 
@@ -526,8 +544,8 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 3px;
   padding: 10px 14px;
-  background: var(--bg-hover, rgba(128, 128, 128, 0.06));
-  border-radius: 12px;
+  background: var(--bg-hover);
+  border-radius: var(--radius-md);
 }
 
 .stat-main {
@@ -539,19 +557,19 @@ onBeforeUnmount(() => {
 }
 
 .stat-value {
-  font-size: 24px;
+  font-size: var(--font-2xl);
   font-weight: 700;
   color: var(--text-1);
   font-variant-numeric: tabular-nums;
 }
 
 .stat-label {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-3);
 }
 
 .stat-detail {
-  font-size: 11.5px;
+  font-size: var(--font-xs);
   color: var(--text-3);
   margin-top: 2px;
 }
@@ -575,7 +593,7 @@ onBeforeUnmount(() => {
 }
 
 .runs-card :deep(.el-card) {
-  border-radius: 14px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border);
 }
 
@@ -586,7 +604,7 @@ onBeforeUnmount(() => {
 }
 
 .card-title {
-  font-size: 16px;
+  font-size: var(--font-lg);
   font-weight: 600;
   color: var(--text-1);
 }
@@ -616,25 +634,25 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  background: var(--bg-hover, rgba(128, 128, 128, 0.06));
-  border-radius: 10px;
+  background: var(--bg-hover);
+  border-radius: var(--radius-md);
   padding: 8px 12px;
 }
 
 .usage-value {
-  font-size: 17px;
+  font-size: var(--font-lg);
   font-weight: 600;
   color: var(--text-1);
   font-variant-numeric: tabular-nums;
 }
 
 .usage-label {
-  font-size: 11.5px;
+  font-size: var(--font-xs);
   color: var(--text-3);
 }
 
 .usage-sub {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-3);
   margin-top: 4px;
 }
@@ -644,16 +662,16 @@ onBeforeUnmount(() => {
   grid-template-columns: 130px 1fr 64px 40px;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 
 .timing-name {
-  color: var(--text-3, #909399);
+  color: var(--text-3);
 }
 
 .timing-bar {
   height: 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: rgba(128, 128, 128, 0.12);
   overflow: hidden;
 }
@@ -661,31 +679,31 @@ onBeforeUnmount(() => {
 .timing-bar i {
   display: block;
   height: 100%;
-  border-radius: 4px;
-  background: linear-gradient(90deg, var(--el-color-primary, #409eff), #67c23a);
+  border-radius: var(--radius-xs);
+  background: linear-gradient(90deg, var(--primary), var(--success));
 }
 
 .timing-value {
   text-align: right;
   font-variant-numeric: tabular-nums;
-  color: var(--text-2, #606266);
+  color: var(--text-2);
 }
 
 .timing-pct {
   text-align: right;
-  color: var(--text-3, #909399);
-  font-size: 11px;
+  color: var(--text-3);
+  font-size: var(--font-2xs);
 }
 
 .detail-label {
-  font-size: 12.5px;
+  font-size: var(--font-sm);
   font-weight: 600;
   color: var(--text-3);
   margin: 12px 0 6px;
 }
 
 .detail-text {
-  font-size: 14px;
+  font-size: var(--font-base);
   color: var(--text-1);
   line-height: 1.7;
 }
@@ -696,22 +714,22 @@ onBeforeUnmount(() => {
 }
 
 .detail-steps li {
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-2);
   line-height: 1.8;
 }
 
 .detail-error {
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--danger);
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 8px 12px;
 }
 
 .detail-empty {
-  font-size: 12.5px;
+  font-size: var(--font-sm);
   color: var(--text-3);
   padding: 6px 0;
 }
@@ -722,9 +740,9 @@ onBeforeUnmount(() => {
   gap: 8px;
   padding: 7px 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   margin-bottom: 6px;
-  font-size: 12.5px;
+  font-size: var(--font-sm);
 }
 
 .dt-step {
@@ -734,11 +752,11 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg-active);
   color: var(--primary);
   font-weight: 600;
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 
 .dt-name {
@@ -759,12 +777,12 @@ onBeforeUnmount(() => {
 .dt-dur {
   flex-shrink: 0;
   color: var(--text-3);
-  font-size: 11.5px;
+  font-size: var(--font-xs);
 }
 
 .trace-textarea :deep(.el-textarea__inner) {
   font-family: Consolas, Monaco, monospace;
-  font-size: 12px;
+  font-size: var(--font-xs);
   line-height: 1.6;
 }
 </style>

@@ -25,4 +25,8 @@ if [ $RESULT -ne 0 ]; then
   echo "pytest 失败，提交已阻止。确实要跳过请用：git commit --no-verify" >&2
   exit 1
 fi
+
+# 前端裸 hex 防回退（阶段2）：超过基线即阻止提交
+"$PYTHON" "$ROOT/scripts/check_frontend_hex.py" || exit 1
+
 exit 0

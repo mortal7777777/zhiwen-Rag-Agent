@@ -455,8 +455,8 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
   align-items: center;
   gap: 4px;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--border, #e8ebf1);
-  background: var(--bg-panel, #fbfcfe);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
   flex: none;
 }
 
@@ -469,8 +469,8 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
 }
 
 .pv-page-indicator {
-  font-size: 13px;
-  color: var(--text-2, #606266);
+  font-size: var(--font-sm);
+  color: var(--text-2);
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -479,12 +479,12 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
 .pv-page-input {
   width: 44px;
   text-align: center;
-  border: 1px solid var(--border, #dcdfe6);
-  border-radius: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   padding: 2px 4px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   background: transparent;
-  color: var(--text-1, #303133);
+  color: var(--text-1);
 }
 
 .pv-scroll {
@@ -492,12 +492,7 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
   position: relative; /* offsetTop 相对本容器计算 */
   overflow-y: auto;
   padding: 20px;
-  background: #e9ecf1;
-}
-
-/* 深色主题下阅读舞台压暗（页面画布仍为白纸） */
-html.dark .pv-scroll {
-  background: #23262d;
+  background: var(--bg-hover);
 }
 
 .pv-page {
@@ -507,7 +502,7 @@ html.dark .pv-scroll {
   min-height: 200px;
   background: #fff;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.22);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   overflow: hidden;
 }
 
@@ -519,10 +514,10 @@ html.dark .pv-scroll {
   position: absolute;
   bottom: 4px;
   right: 8px;
-  font-size: 11px;
-  color: var(--text-3, #909399);
+  font-size: var(--font-2xs);
+  color: var(--text-3);
   background: rgba(127, 127, 127, 0.12);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 0 5px;
 }
 

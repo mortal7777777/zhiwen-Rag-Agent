@@ -35,6 +35,8 @@
   --accent: #6f5bff;
   --primary-soft: rgba(22, 119, 255, 0.08);
   --primary-grad: linear-gradient(135deg, #1677ff 0%, #6f5bff 100%);
+  --text-on-brand: #ffffff;    /* 品牌/彩色底上的文字（渐变按钮、徽标、头像） */
+  --user-avatar-grad: linear-gradient(135deg, #f7b955 0%, #ff9a5a 100%);
 
   /* 语义色（--x=图形/边框；--x-text=文字，对比度达标） */
   --danger: #f56c6c;
@@ -132,6 +134,8 @@ html.dark {
   --accent: #8b7bff;
   --primary-soft: rgba(74, 148, 255, 0.14);
   --primary-grad: linear-gradient(135deg, #4a94ff 0%, #8b7bff 100%);
+  --text-on-brand: #ffffff;
+  --user-avatar-grad: linear-gradient(135deg, #f7b955 0%, #ff9a5a 100%);
 
   /* 语义色（深色图形档本身已达文字对比度） */
   --danger: #f78989;

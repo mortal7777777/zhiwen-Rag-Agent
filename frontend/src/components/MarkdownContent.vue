@@ -164,7 +164,7 @@ onBeforeUnmount(() => {
 
 <style>
 .markdown-body {
-  font-size: 14px;
+  font-size: var(--font-base);
   line-height: 1.75;
   color: var(--text-1);
   word-break: break-word;
@@ -177,7 +177,7 @@ onBeforeUnmount(() => {
   white-space: pre-wrap;
   word-break: break-word;
   /* 与 markdown-body 完全一致，避免切换瞬间行高/字号变化造成跳动 */
-  font-size: 14px;
+  font-size: var(--font-base);
   line-height: 1.75;
 }
 
@@ -198,9 +198,9 @@ onBeforeUnmount(() => {
   line-height: 1.4;
 }
 
-.markdown-body h1 { font-size: 20px; }
-.markdown-body h2 { font-size: 17px; }
-.markdown-body h3 { font-size: 15px; }
+.markdown-body h1 { font-size: var(--font-xl); }
+.markdown-body h2 { font-size: var(--font-lg); }
+.markdown-body h3 { font-size: var(--font-base); }
 
 .markdown-body p {
   margin: 8px 0;
@@ -218,8 +218,8 @@ onBeforeUnmount(() => {
 
 .markdown-body code {
   padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 13px;
+  border-radius: var(--radius-xs);
+  font-size: var(--font-sm);
   font-family: Consolas, Monaco, 'Courier New', monospace;
   background: var(--bg-hover);
   color: #c7254e;
@@ -228,7 +228,7 @@ onBeforeUnmount(() => {
 .code-block {
   position: relative;
   margin: 12px 0;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   border: 1px solid #2a3140;
   overflow: hidden;
   background: #171c26;
@@ -251,7 +251,7 @@ onBeforeUnmount(() => {
 
 .code-lang {
   flex: 1;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: #8a93a6;
   text-transform: uppercase;
   letter-spacing: 0.4px;
@@ -261,16 +261,16 @@ onBeforeUnmount(() => {
   border: 1px solid #3a4356;
   background: transparent;
   color: #c4cad6;
-  font-size: 11.5px;
+  font-size: var(--font-xs);
   padding: 2px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .code-btn:hover {
   background: #2a3140;
-  color: #fff;
+  color: var(--text-on-brand);
 }
 
 .code-btn.exec {
@@ -295,15 +295,15 @@ onBeforeUnmount(() => {
   padding: 0;
   background: transparent;
   color: inherit;
-  font-size: 13px;
+  font-size: var(--font-sm);
   line-height: 1.6;
 }
 
 .markdown-body blockquote {
   margin: 10px 0;
   padding: 8px 14px;
-  border-left: 3px solid #1677ff;
-  border-radius: 0 8px 8px 0;
+  border-left: 3px solid var(--primary);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   background: var(--bg-card-2);
   color: var(--text-2);
 }
@@ -314,7 +314,7 @@ onBeforeUnmount(() => {
   overflow-x: auto;
   margin: 12px 0;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 
 .markdown-body th,
@@ -330,7 +330,7 @@ onBeforeUnmount(() => {
 }
 
 .markdown-body a {
-  color: #1677ff;
+  color: var(--primary-text);
   text-decoration: none;
 }
 
@@ -346,7 +346,7 @@ onBeforeUnmount(() => {
 
 .markdown-body img {
   max-width: 100%;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 .markdown-body strong {
@@ -357,10 +357,10 @@ onBeforeUnmount(() => {
   display: inline-block;
   margin: 0 2px;
   padding: 0 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-active);
   color: var(--primary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   line-height: 1.4;
   cursor: pointer;
   user-select: none;
@@ -368,6 +368,6 @@ onBeforeUnmount(() => {
 
 .markdown-body sup.cite:hover {
   background: var(--primary);
-  color: #fff;
+  color: var(--text-on-brand);
 }
 </style>

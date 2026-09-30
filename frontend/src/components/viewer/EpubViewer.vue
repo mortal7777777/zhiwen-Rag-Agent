@@ -194,10 +194,10 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
-  border-radius: 999px;
-  font-size: 12px;
-  color: var(--text-2, #606266);
-  background: var(--bg-card, #fff);
+  border-radius: var(--radius-pill);
+  font-size: var(--font-xs);
+  color: var(--text-2);
+  background: var(--bg-card);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 </style>

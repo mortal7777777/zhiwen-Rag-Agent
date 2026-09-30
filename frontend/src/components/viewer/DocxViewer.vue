@@ -163,7 +163,7 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
   flex: 1;
   position: relative; /* offsetTop 相对本容器计算 */
   overflow-y: auto;
-  background: var(--bg-app, #f3f4f8);
+  background: var(--bg-app);
 }
 
 /* docx-preview 输出 .docx-wrapper > section.docx（Word 分节 = 页），
@@ -186,7 +186,7 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
 
 .dx-container :deep(.viewer-flash) {
   background: rgba(255, 213, 79, 0.55);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   transition: background 1.2s ease;
 }
 </style>

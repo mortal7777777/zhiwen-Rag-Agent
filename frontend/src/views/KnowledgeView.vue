@@ -908,7 +908,7 @@ onMounted(() => {
 }
 
 .knowledge-page :deep(.el-card) {
-  border-radius: 14px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border);
 }
 
@@ -919,7 +919,7 @@ onMounted(() => {
 }
 
 .card-title {
-  font-size: 16px;
+  font-size: var(--font-lg);
   font-weight: 600;
 }
 
@@ -932,7 +932,7 @@ onMounted(() => {
 .data-dir {
   margin-top: 8px;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--font-xs);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -943,11 +943,11 @@ onMounted(() => {
 }
 
 .dir-hint {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-3);
   line-height: 1.6;
   background: var(--bg-hover, rgba(128, 128, 128, 0.06));
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 8px 10px;
   margin-top: 2px;
 }
@@ -967,7 +967,7 @@ onMounted(() => {
 }
 
 .doc-name {
-  color: var(--el-color-primary);
+  color: var(--primary-text);
   cursor: pointer;
 }
 
@@ -982,32 +982,32 @@ onMounted(() => {
 
 .no-category {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 
 .doc-tags {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 
 .meta-file {
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-2);
   word-break: break-all;
 }
 
 /* 版本管理 / 查重提示 */
 .versions-current {
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-2);
   background: var(--bg-hover, rgba(128, 128, 128, 0.06));
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 8px 10px;
   margin-bottom: 10px;
 }
 
 .conflict-file {
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-2);
   margin-bottom: 8px;
   word-break: break-all;
@@ -1021,7 +1021,7 @@ onMounted(() => {
 }
 
 .conflict-msg {
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-2);
   line-height: 1.6;
 }

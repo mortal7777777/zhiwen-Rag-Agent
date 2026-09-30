@@ -400,12 +400,12 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
   gap: 8px;
   padding: 7px 14px;
   margin: 10px 16px 0;
-  border-radius: 8px;
-  font-size: 12.5px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-sm);
   line-height: 1.5;
-  color: var(--text-2, #4c515b);
+  color: var(--text-2);
   background: var(--primary-soft, rgba(22, 119, 255, 0.08));
-  border: 1px solid var(--border, #e8ebf1);
+  border: 1px solid var(--border);
 }
 
 .tv-scroll {
@@ -422,14 +422,14 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
 }
 
 .doc-section {
-  font-size: 15px;
+  font-size: var(--font-lg);
   line-height: 1.85;
-  color: var(--text-1, #23262d);
+  color: var(--text-1);
 }
 
 .doc-section + .doc-section {
   margin-top: 28px;
-  border-top: 1px solid var(--border, #e8ebf1);
+  border-top: 1px solid var(--border);
   padding-top: 22px;
 }
 
@@ -443,17 +443,17 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 14.5px;
+  font-size: var(--font-base);
   line-height: 1.85;
   text-align: justify;
   font-family: Consolas, 'JetBrains Mono', monospace;
-  color: var(--text-1, #23262d);
+  color: var(--text-1);
 }
 
 /* 引用定位高亮 */
 .doc-section :deep(.viewer-flash) {
   background: rgba(255, 213, 79, 0.55);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   transition: background 1.2s ease;
 }
 </style>
