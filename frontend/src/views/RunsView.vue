@@ -202,7 +202,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import * as echarts from 'echarts'
 import { getRunTrace, getRunStats, listConversations, listRuns } from '../api'
@@ -210,6 +210,9 @@ import { getRunTrace, getRunStats, listConversations, listRuns } from '../api'
 defineOptions({ name: 'RunsView' })
 
 const runs = ref([])
+// 上次成功加载时间（初始视为刚加载，避免首次 onActivated 重复拉取）
+let lastLoadedAt = Date.now()
+
 const loading = ref(false)
 const stats = ref(null)
 const period = ref('7d')
@@ -441,6 +444,7 @@ async function loadStats() {
   try {
     const runStats = await getRunStats(7, period.value)
     stats.value = runStats
+    lastLoadedAt = Date.now()
     await nextTick()
     renderCharts()
   } catch (error) {
@@ -448,8 +452,8 @@ async function loadStats() {
   }
 }
 
-async function load() {
-  loading.value = true
+async function fetchAll({ silent = false } = {}) {
+  if (!silent) loading.value = true
   try {
     const [runList, convList, runStats] = await Promise.all([
       listRuns({ limit: 200 }),
@@ -463,13 +467,23 @@ async function load() {
       map[c.id] = c.title || `会话 ${c.id}`
     }
     convTitles.value = map
+    lastLoadedAt = Date.now()
     await nextTick()
     renderCharts()
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '加载失败')
+    if (!silent) ElMessage.error(error.response?.data?.detail || '加载失败')
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
+}
+
+function load() {
+  return fetchAll()
+}
+
+/** keep-alive 复用时的静默刷新：失败保留旧数据，不闪 loading。 */
+function refreshSilently() {
+  return fetchAll({ silent: true })
 }
 
 function convLabel(row) {
@@ -496,6 +510,16 @@ onMounted(() => {
   // 主题切换（html.dark 改变）时按新令牌重绘图表
   themeObserver = new MutationObserver(() => renderCharts())
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+})
+
+onActivated(() => {
+  // keep-alive 复用：先把图表尺寸恢复到当前容器（隐藏期间可能被后台 resize 过）
+  nextTick(() => {
+    tokensChart?.resize()
+    costChart?.resize()
+  })
+  // 数据超过 TTL 才静默刷新，避免每次切回都重新加载
+  if (Date.now() - lastLoadedAt > 60_000) refreshSilently()
 })
 
 onBeforeUnmount(() => {
@@ -785,8 +809,5 @@ onBeforeUnmount(() => {
   font-size: var(--font-xs);
   line-height: 1.6;
 }
-/* 入场动效（阶段4；关键帧在 theme.css 全局定义） */
-.runs-page {
-  animation: fade-up var(--dur-slow) var(--ease-out) both;
-}
+/* 入场动效由路由过渡统一提供（App.vue 的 page 过渡），避免双重动画 */
 </style>

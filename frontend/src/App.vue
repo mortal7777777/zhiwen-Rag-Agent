@@ -51,9 +51,11 @@
 
     <el-main class="app-main">
       <router-view v-slot="{ Component }">
-        <keep-alive include="ChatView">
-          <component :is="Component" />
-        </keep-alive>
+        <transition name="page" mode="out-in">
+          <keep-alive :include="keepAliveViews">
+            <component :is="Component" />
+          </keep-alive>
+        </transition>
       </router-view>
     </el-main>
 
@@ -1270,6 +1272,9 @@ const styleOptions = [
   { value: 'salon', label: '书斋暖读' },
 ]
 
+// 路由视图缓存：切回来不重新加载（数据由各视图 onActivated 静默刷新）
+const keepAliveViews = ['ChatView', 'RunsView', 'KnowledgeView']
+
 function applyStyle() {
   if (styleMode.value === 'default') {
     delete document.documentElement.dataset.style
@@ -2216,6 +2221,24 @@ onMounted(() => {
 
 .fade-enter-from,
 .fade-leave-to {
+  opacity: 0;
+}
+
+/* 路由切换过渡：短时长 + 仅合成层属性（GPU），避免切换卡顿 */
+.page-enter-active {
+  transition: opacity 0.16s ease, transform 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.page-leave-active {
+  transition: opacity 0.1s ease;
+}
+
+.page-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.page-leave-to {
   opacity: 0;
 }
 

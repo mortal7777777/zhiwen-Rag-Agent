@@ -345,7 +345,12 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onMounted, ref, watch } from 'vue'
+
+defineOptions({ name: 'KnowledgeView' })
+
+// 上次成功加载时间（初始视为刚加载，避免首次 onActivated 重复拉取）
+let lastLoadedAt = Date.now()
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled, Loading, ArrowDown } from '@element-plus/icons-vue'
 import DocumentViewer from '../components/DocumentViewer.vue'
@@ -446,15 +451,16 @@ function formatSize(size) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
-async function refresh() {
+async function refresh({ silent = false } = {}) {
   try {
     const [docs, indexStatus] = await Promise.all([listDocuments(), getIndexStatus()])
     documents.value = docs
     status.value = indexStatus
     // 分类选项 = 当前使用的分类（含"未分类"文档不列出）
     categories.value = [...new Set(docs.map((d) => d.category).filter(Boolean))]
+    lastLoadedAt = Date.now()
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '获取数据失败，请确认后端已启动')
+    if (!silent) ElMessage.error(error.response?.data?.detail || '获取数据失败，请确认后端已启动')
   }
 }
 
@@ -890,6 +896,11 @@ onMounted(() => {
     tableLoading.value = false
   })
 })
+
+onActivated(() => {
+  // keep-alive 复用：超过 TTL 才静默刷新，避免每次切回重新加载
+  if (Date.now() - lastLoadedAt > 60_000) refresh({ silent: true })
+})
 </script>
 
 <style scoped>
@@ -1025,8 +1036,5 @@ onMounted(() => {
   color: var(--text-2);
   line-height: 1.6;
 }
-/* 入场动效（阶段4；关键帧在 theme.css 全局定义） */
-.knowledge-page {
-  animation: fade-up var(--dur-slow) var(--ease-out) both;
-}
+/* 入场动效由路由过渡统一提供（App.vue 的 page 过渡），避免双重动画 */
 </style>
