@@ -476,6 +476,15 @@
               <div class="pane-sub">浏览本机 Skills，选择本助手要使用的能力</div>
             </div>
 
+            <div
+              v-if="agentPendingCount > 0"
+              class="agent-banner"
+              @click="switchSourceFilter('agent')"
+            >
+              <el-icon :size="14"><MagicStick /></el-icon>
+              Agent 新建了 {{ agentPendingCount }} 个自创技能待启用，点击查看
+            </div>
+
             <div class="skill-master">
               <div class="skill-master-text">
                 <div class="skill-master-title">启用技能工具</div>
@@ -543,6 +552,15 @@
                   <div class="skill-head">
                     <span class="skill-name">{{ s.name }}</span>
                     <el-tag size="small" :type="sourceTagType(s.source)">{{ sourceLabel(s.source) }}</el-tag>
+                    <el-tag
+                      v-if="s.shared && isAgentSkill(s)"
+                      size="small"
+                      type="success"
+                      effect="plain"
+                    >
+                      已共享
+                    </el-tag>
+                    <span v-if="s.created_at" class="skill-date">{{ s.created_at }}</span>
                     <el-tag v-if="s.group && s.group !== 'other'" size="small" type="info" effect="plain">
                       {{ groupLabel(s.group) }}
                     </el-tag>
@@ -551,6 +569,17 @@
                 </div>
                 <div class="skill-ops">
                   <el-switch v-model="s.enabled" size="small" @change="persistSkills" />
+                  <template v-if="isAgentSkill(s)">
+                    <el-button link type="primary" size="small" @click="viewAgentSkill(s)">
+                      查看
+                    </el-button>
+                    <el-button link size="small" @click="shareAgentSkill(s)">
+                      {{ s.shared ? '取消共享' : '共享' }}
+                    </el-button>
+                    <el-button link type="danger" size="small" @click="deleteAgentSkill(s)">
+                      删除
+                    </el-button>
+                  </template>
                   <el-tooltip content="从本助手移除（不影响其他 Agent 的文件）" placement="top">
                     <el-button link type="info" size="small" class="skill-remove" @click="hideSkill(s)">
                       <el-icon :size="13"><Hide /></el-icon>
@@ -1215,6 +1244,13 @@
     </el-dialog>
 
     <!-- 项目记忆查看 -->
+    <el-dialog v-model="agentPreviewVisible" title="自创技能内容" width="720px" append-to-body>
+      <pre class="agent-preview">{{ agentPreviewContent }}</pre>
+      <template #footer>
+        <el-button size="small" @click="agentPreviewVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="memoryDialogVisible" title="项目记忆（AGENTS.md）" width="640px" append-to-body>
       <div class="memory-path">{{ memoryPath }}</div>
       <el-input
@@ -1265,12 +1301,16 @@ import {
   listChatModels,
   listSkills,
   connectMcpServers,
+  deleteAgentSkill as deleteAgentSkillApi,
+  getAgentSkillContent as getAgentSkillContentApi,
   listMcpServers,
   resetSkillPrefs,
   saveSettings,
   saveSkillPrefs,
   saveMcpServers,
   searchSkills,
+  shareAgentSkill as shareAgentSkillApi,
+  unshareAgentSkill as unshareAgentSkillApi,
   testMcpServer,
 } from './api'
 import TagListInput from './components/TagListInput.vue'
@@ -2126,6 +2166,7 @@ const groupOptions = {
 
 const sourceFilters = [
   { value: 'all', label: '全部' },
+  { value: 'agent', label: '自创' },
   { value: 'codex', label: 'Codex' },
   { value: 'hermes', label: 'Hermes' },
   { value: 'claude', label: 'Claude' },
@@ -2183,6 +2224,71 @@ function switchSourceFilter(value) {
     onSkillSearch()
   } else {
     refreshSkills()
+  }
+}
+const agentPreviewVisible = ref(false)
+const agentPreviewContent = ref('')
+
+function isAgentSkill(s) {
+  return (s.source || '').split(' + ')[0] === 'agent'
+}
+
+const agentPendingCount = computed(
+  () => skills.value.filter((s) => isAgentSkill(s) && !s.enabled && !s.hidden).length,
+)
+
+/** 自创技能：共享 / 取消共享（复制或移除 Hermes 个人层副本）。 */
+async function shareAgentSkill(s) {
+  const action = s.shared ? '取消共享' : '共享'
+  try {
+    await ElMessageBox.confirm(
+      s.shared
+        ? `确定取消共享「${s.name}」吗？\n将删除 Hermes 技能池中的副本，自创技能库里的原技能保留。`
+        : `把「${s.name}」共享给 Hermes？\n将复制到 Hermes 个人技能层，Hermes 也能检索使用它。`,
+      '提示',
+      { type: 'info', confirmButtonText: action, cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    if (s.shared) await unshareAgentSkillApi(s.dir_name, s.category)
+    else await shareAgentSkillApi(s.dir_name, s.category)
+    await refreshSkills()
+    ElMessage.success(s.shared ? '已取消共享' : '已共享给 Hermes')
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || `${action}失败`)
+  }
+}
+
+async function deleteAgentSkill(s) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除自创技能「${s.name}」吗？删除后不可恢复。${
+        s.shared ? '\n该技能已共享给 Hermes，共享副本将一并删除。' : ''
+      }`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await deleteAgentSkillApi(s.dir_name, s.category)
+    await refreshSkills()
+    ElMessage.success('已删除自创技能')
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '删除失败')
+  }
+}
+
+async function viewAgentSkill(s) {
+  try {
+    const data = await getAgentSkillContentApi(s.dir_name, s.category)
+    agentPreviewContent.value = data.content || ''
+    agentPreviewVisible.value = true
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '读取技能内容失败')
   }
 }
 
@@ -2270,6 +2376,7 @@ function sourceLabel(source) {
   return (
     {
       codex: 'Codex',
+      agent: '自创',
       hermes: 'Hermes',
       claude: 'Claude',
     }[primary] || primary
@@ -2281,6 +2388,7 @@ function sourceTagType(source) {
   return (
     {
       codex: 'primary',
+      agent: 'warning',
       hermes: 'success',
       claude: 'info',
     }[primary] || 'info'
@@ -3022,6 +3130,40 @@ onMounted(() => {
 }
 
 .skills-loading,
+.agent-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--el-color-warning-light-5);
+  border-radius: 8px;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
+  font-size: 13px;
+  cursor: pointer;
+}
+.agent-banner:hover {
+  border-color: var(--el-color-warning-light-3);
+}
+.skill-date {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.agent-preview {
+  margin: 0;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .skills-empty {
   padding: 26px 0;
   text-align: center;

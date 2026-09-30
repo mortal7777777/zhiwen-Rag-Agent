@@ -313,6 +313,19 @@ export const saveSkillPrefs = (enabled, hidden) =>
 export const resetSkillPrefs = () =>
   client.post('/skills/reset').then((res) => res.data)
 
+export const shareAgentSkill = (dirName, category = '') =>
+  client.post('/skills/agent/share', { dir_name: dirName, category }).then((res) => res.data)
+export const unshareAgentSkill = (dirName, category = '') =>
+  client.post('/skills/agent/unshare', { dir_name: dirName, category }).then((res) => res.data)
+export const deleteAgentSkill = (dirName, category = '') =>
+  client
+    .delete(`/skills/agent/${encodeURIComponent(dirName)}`, { params: { category } })
+    .then((res) => res.data)
+export const getAgentSkillContent = (dirName, category = '') =>
+  client
+    .get('/skills/agent/content', { params: { dir_name: dirName, category } })
+    .then((res) => res.data)
+
 /** 每日建议（知识库 / 热点 / 通用） */
 export const getSuggestions = () =>
   client.get('/suggestions').then((res) => res.data)
