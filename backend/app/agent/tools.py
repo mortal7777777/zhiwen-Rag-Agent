@@ -305,15 +305,12 @@ def make_knowledge_base_tool(
 
     @tool
     def knowledge_base_search(query: str) -> dict:
-        """在用户的个人知识库中检索相关信息。知识库包含用户上传的全部文档（书籍、笔记、资料等），文档清单会列在系统提示中。
+        """在用户的个人知识库（书籍/笔记/资料，清单见系统提示）中检索。
 
-何时用：问题涉及任何书籍/文档内容时；不确定某本书是否在知识库中时（先查再决定要不要联网）。
-
-何时不用：纯常识问答、闲聊、与文档无关的写作或计算——这些直接回答，不要为了"确认一下"而空跑一次检索。
-
-参数：query 写成一个明确的检索意图（如"《与神对话》中关于创造的论述"），不要整句照搬用户原话；查一个点就调一次，不要在一次 query 里塞多个不相关的问题。
-
-返回：最相关的文本片段及来源（每条带 index 引用编号，回答时用 [n] 标注）。"""
+何时用：问题涉及书籍/文档内容；不确定库里有没有某本书时（先查再决定是否联网）。
+何时不用：纯常识问答、闲聊、与文档无关的写作或计算——直接回答，不要空跑检索。
+query 写成明确的检索意图（书名 + 主题），别整句照搬原话；查一个点调一次，
+不要在一次 query 里塞多个不相关问题。返回文本片段与来源（带 index，引用时用 [n] 标注）。"""
         # GPU 锁只覆盖检索段（embedding/rerank），生成阶段不占用，避免检索排队
         rag_service.acquire_gpu()
         try:
@@ -355,9 +352,8 @@ def make_add_document_tool(rag_service, settings) -> BaseTool:
 
     @tool
     def add_document(filename: str, content: str, source_note: str = "") -> dict:
-        """把一段文本保存为用户知识库的新文档（写入文件并更新索引）。
-        属敏感操作，系统会请求用户确认；filename 只能是不含路径的纯文件名，
-        支持 .txt/.md/.csv/.json；source_note 可选，用于记录来源说明。
+        """把一段文本保存为知识库新文档（写文件并更新索引）。敏感操作，需用户确认。
+        filename 只能是不含路径的纯文件名，支持 .txt/.md/.csv/.json；source_note 可选。
         """
         from pathlib import Path
 
@@ -412,7 +408,7 @@ def make_web_search_tool(
 
     @tool
     def web_search(query: str) -> dict:
-        """联网搜索互联网上的公开信息（新闻、百科、实时数据等）。当问题涉及时事、网络信息，或知识库检索确认无法覆盖时调用；知识库已有文档相关的问题请优先使用 knowledge_base_search。返回标题、链接和摘要（每条带 index 引用编号，回答引用时用 [n] 标注）。"""
+        """联网搜索公开信息（新闻/百科/实时数据）。涉及时事、网络信息，或知识库覆盖不足时调用；库内文档问题优先 knowledge_base_search。返回标题、链接、摘要（带 index，引用时用 [n] 标注）。"""
         result = execute_web_search(
             query,
             provider,
@@ -440,7 +436,7 @@ def make_vision_tool(vision) -> BaseTool:
 
     @tool
     def image_to_text(image_base64: str, question: str = "请详细描述这张图片的内容") -> dict:
-        """识别图片内容（OCR / 图表 / 照片理解）。当需要理解图片中的文字、表格或场景时调用。参数 image_base64 为图片的 base64 字符串（可含 data:image/...;base64, 前缀）。"""
+        """识别图片内容（OCR/图表/照片理解）。参数 image_base64 为 base64 字符串（可含 data:image/...;base64, 前缀）。"""
         try:
             description = vision.describe_images(
                 [image_base64],
@@ -548,10 +544,9 @@ def make_write_skill_tool() -> BaseTool:
         content: str,
         category: str = "other",
     ) -> dict:
-        """把一个可复用的任务流程写成技能文件（SKILL.md），下次同类任务可直接用 skill_lookup 取回执行。
-        适合：某个多步流程你刚走通且以后还会重复（如"从一本书提取议题对比表"、"部署前端项目"）；
-        不适合：一次性任务、简单的 1-2 步操作。
-        参数 name 为技能名（小写连字符），description 为一句话说明，content 为正文 markdown（不含 frontmatter），category 为分类目录（默认 other）。"""
+        """把一个可复用的任务流程写成技能文件（SKILL.md），下次同类任务用 skill_lookup 取回。
+        适合：刚走通、以后会重复的多步流程；不适合：一次性任务与 1-2 步操作。
+        name 小写连字符，description 一句话，content 为不含 frontmatter 的正文，category 默认 other。"""
         try:
             import os
             import re
@@ -702,18 +697,17 @@ PLAN_MODE_SYSTEM_HINT = (
 )
 
 _ENTER_PLAN_DESCRIPTION = (
-    "进入计划模式（只读）：先探索、出方案、等用户确认，再动手。\n"
-    "适合：涉及写文件/执行命令的多步任务；方案不确定、需要先与用户对齐的任务；"
-    "改动影响面大、不可逆的操作。\n"
-    "不适合：问答与检索类请求；一两步就能完成的小改动——那会白白多一轮确认。\n"
-    "进入后写文件/命令会被拦截，只能用只读手段；整理好计划后用 exit_plan_mode 提交，"
-    "用户确认后系统按同一计划执行。每个会话只允许进入一次。"
+    "进入计划模式（只读）：先探索、出方案、等用户确认再动手。\n"
+    "适合：写文件/执行命令的多步任务，方案不确定，或改动影响面大、不可逆。\n"
+    "不适合：问答检索、一两步的小改动（白多一轮确认）。\n"
+    "进入后写文件/命令被拦截；整理好计划用 exit_plan_mode 提交，"
+    "用户确认后按同一计划执行。每个会话只允许进入一次。"
 )
 
 _EXIT_PLAN_DESCRIPTION = (
     "提交结构化执行计划并结束本轮，等待用户确认。\n"
-    "steps 必须是可执行的步骤（动词开头、含具体对象/路径），用户会看到并可修改它们——"
-    "确认后系统将按这份清单逐步执行（清单也会成为任务列表）。"
+    "steps 必须可执行（动词开头、含具体对象/路径）；用户会看到并可修改，"
+    "确认后按此清单逐步执行（并成为任务列表）。"
 )
 
 

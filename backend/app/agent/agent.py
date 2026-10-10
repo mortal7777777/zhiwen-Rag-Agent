@@ -54,6 +54,13 @@ class AgentService:
 
     # ---------------- 模型 ----------------
 
+    def _chat_temperature(self, cfg: dict):
+        """主对话温度：供应商覆盖（含 0.0）> 全局设置。"""
+        override = cfg.get("temperature")
+        if override is None:
+            return effective(self.settings, "chat_temperature")
+        return override
+
     @property
     def chat(self) -> BaseChatModel:
         """主对话模型（按供应商 API 格式构建，支持工具调用）。"""
@@ -63,8 +70,11 @@ class AgentService:
                 raise RuntimeError("未配置对话模型 API Key，请在设置中配置供应商")
             self._chat = build_chat_model(
                 cfg,
-                temperature=effective(self.settings, "chat_temperature"),
+                temperature=self._chat_temperature(cfg),
                 timeout=180,
+                # 供应商级 max_tokens 只作用于主对话；辅助模型（标题/摘要）不参与，
+                # 防止把压缩摘要截断（供应商设低值属常见误配）
+                max_tokens=cfg.get("max_tokens") or None,
                 # 思考模式/强度：openai 格式走 extra_body，anthropic 格式走 thinking
                 thinking=thinking_param(cfg),
                 extra_body=thinking_extra_body(cfg),
@@ -87,8 +97,9 @@ class AgentService:
                 raise RuntimeError("未配置对话模型 API Key，请在设置中配置供应商")
             self._chat_plain = build_chat_model(
                 cfg,
-                temperature=effective(self.settings, "chat_temperature"),
+                temperature=self._chat_temperature(cfg),
                 timeout=180,
+                max_tokens=cfg.get("max_tokens") or None,
                 thinking={"type": "disabled"},
                 extra_body={"thinking": {"type": "disabled"}},
             )
@@ -119,6 +130,13 @@ class AgentService:
         self._title_chat = None
         self._context = None
         self._vision = None
+
+    def refresh_chat_only(self) -> None:
+        """只重置对话相关缓存（聊天页快捷切换供应商用）；保留视觉客户端等其余缓存。"""
+        self._chat = None
+        self._chat_plain = None
+        self._title_chat = None
+        self._context = None
 
     @property
     def context(self) -> ContextService:

@@ -18,8 +18,13 @@ router = APIRouter(tags=["chat"])
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest, service: RAGService = Depends(get_service)) -> ChatResponse:
-    """RAG 问答：检索知识库 -> 本地重排序 -> DeepSeek 生成回答。"""
-    service.acquire()  # 并发限制，保护 GPU
+    """RAG 问答：检索知识库 -> 本地重排序 -> 生成回答。
+
+    并发口径（2026-10-08 与 Agent 路径对齐）：GPU 许可只覆盖检索段
+    （`RAGService.ask` 内部走 `retrieve_locked`），生成段只受
+    `llm_max_concurrency` 约束。旧实现在这里 `acquire()` 把 GPU 许可握到
+    生成结束，会让一个 /api/chat 拖动整台机器的检索。
+    """
     try:
         result = service.ask(
             question=request.question,
@@ -31,8 +36,6 @@ def chat(request: ChatRequest, service: RAGService = Depends(get_service)) -> Ch
         raise HTTPException(status_code=500, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"问答失败：{exc}")
-    finally:
-        service.release()
 
 
 def _sse(payload: dict) -> str:
@@ -50,13 +53,12 @@ async def chat_stream(
     async def event_generator():
         history = [message.model_dump() for message in request.history]
         try:
-            # 并发许可在事件循环里获取会阻塞，放到线程池
-            await run_in_threadpool(service.acquire)
             metrics.inc("stream_requests")
 
-            # 检索（含查询扩展/重排）是同步重活，在线程池执行
+            # 检索（含查询扩展/重排）是同步重活，在线程池执行；
+            # GPU 许可由 retrieve_locked 在检索段内自持自放（生成段不持）
             docs = await run_in_threadpool(
-                service.retrieve,
+                service.retrieve_locked,
                 request.question,
                 history,
             )
@@ -73,20 +75,23 @@ async def chat_stream(
             ]
             yield _sse({"event": "sources", "data": sources})
 
-            # 流式生成：逐 token 推送
-            async for token in service.chat.astream(
-                request.question,
-                context,
-                history,
-            ):
-                yield _sse({"event": "token", "data": token})
+            # 流式生成：逐 token 推送；不占 GPU 锁，受 LLM 并发上限约束
+            chat_model = service.chat  # 未配置 API Key 时在这里就报错，不占许可
+            service.acquire_llm()
+            try:
+                async for token in chat_model.astream(
+                    request.question,
+                    context,
+                    history,
+                ):
+                    yield _sse({"event": "token", "data": token})
+            finally:
+                service.release_llm()
 
             yield _sse({"event": "done", "data": {"ok": True}})
         except Exception as exc:
             metrics.inc("stream_errors")
             yield _sse({"event": "error", "data": str(exc)})
-        finally:
-            service.release()
 
     return StreamingResponse(
         event_generator(),

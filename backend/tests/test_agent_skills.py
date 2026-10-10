@@ -22,10 +22,11 @@ def _mk_skill(root: Path, category: str, name: str, extra: str = "") -> Path:
 def _use_tmp_roots(monkeypatch, tmp_path: Path):
     agent_dir = tmp_path / "agent_skills"
     hermes_dir = tmp_path / "hermes_skills"
-    monkeypatch.setattr(S, "AGENT_SKILLS_DIR", agent_dir)
-    monkeypatch.setattr(S, "HERMES_SKILLS_DIR", hermes_dir)
+    # 包化后路径常量的唯一权威位置在 app.skills.scan（agent_skills 经 scan_mod 引用）
+    monkeypatch.setattr(S.scan, "AGENT_SKILLS_DIR", agent_dir)
+    monkeypatch.setattr(S.scan, "HERMES_SKILLS_DIR", hermes_dir)
     monkeypatch.setattr(
-        S,
+        S.scan,
         "DEFAULT_ROOTS",
         [
             (S.AGENT_SOURCE, str(agent_dir), "nested"),
@@ -39,8 +40,8 @@ def _use_tmp_roots(monkeypatch, tmp_path: Path):
 def _reset_scan_cache():
     """测试后清空扫描缓存，避免污染同进程内的其他用例。"""
     yield
-    S._cache = None
-    S._scanned_at = 0.0
+    S.scan._cache = None
+    S.scan._scanned_at = 0.0
 
 
 def test_parse_frontmatter_reads_origin_and_created_at():

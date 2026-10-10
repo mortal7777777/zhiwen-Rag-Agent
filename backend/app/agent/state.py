@@ -105,6 +105,8 @@ class AgentState(TypedDict, total=False):
     memory_hits: list[str]
     xml_retry_count: int
     empty_retry_count: int
+    # 空正文重试的"下一轮用无思考模型"标记（跨 superstep 传递，必须进检查点）
+    empty_retry_pending: bool
     memory_summary: str | None
     vision_descriptions: list[str]
     summary_text: str | None
@@ -120,6 +122,11 @@ class AgentState(TypedDict, total=False):
 
     # 本轮"问题之后"消息在链中的起点：finalize 据此落库（纯数据，续跑时要能读到）
     persist_start: int
+
+    # D 块版本账本（键 → 最后一次注入的内容哈希）：区分"A 就是最新版本"与
+    # "A 之上还注入过更新的 B"（A→B→A 状态回退时靠它决定重新注入）。
+    # 与消息同在一个检查点快照里，天然同生共死；丢失只会多注入一次，不会漏。
+    dblock_versions: dict[str, str]
 
 
 class EventBus:

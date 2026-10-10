@@ -1,32 +1,11 @@
 #!/bin/sh
-# 提交前自动运行后端测试；失败则阻止提交。
-# 安装：scripts/install-git-hooks.ps1
-# 注意：basetemp 用每次运行唯一的目录（.git/pytest-tmp-$$），
-# 避免 Windows 上 .git 目录 ACL 异常导致 pytest 无法清理旧 basetemp 而报 WinError 5。
-
-PYTHON="D:/conda_envs/pytorch_env/python.exe"
-BASETEMP=".git/pytest-tmp-$$"
-
-if [ ! -f "$PYTHON" ]; then
-  echo "未找到 $PYTHON，跳过测试钩子" >&2
-  exit 0
-fi
-
-ROOT="$(git rev-parse --show-toplevel)"
-cd "$ROOT" || exit 1
-
-"$PYTHON" -m pytest backend/tests -q -p no:cacheprovider --basetemp "$BASETEMP"
-RESULT=$?
-# 尝试清理本次临时目录（失败可忽略：Windows ACL 问题不影响提交结果）
-rm -rf "$BASETEMP" 2>/dev/null
-
-if [ $RESULT -ne 0 ]; then
-  echo "" >&2
-  echo "pytest 失败，提交已阻止。确实要跳过请用：git commit --no-verify" >&2
-  exit 1
-fi
-
-# 前端裸 hex 防回退（阶段2）：超过基线即阻止提交
-"$PYTHON" "$ROOT/scripts/check_frontend_hex.py" || exit 1
-
-exit 0
+# 兼容入口：真正的钩子已移到 scripts/githooks/pre-commit（随仓库版本化，
+# 解释器自动探测，不再硬编码本机路径）。保留本文件是为了兼容
+# 旧文档里"复制到 .git/hooks"的安装方式。
+# 注意：不用 dirname（外部命令，某些精简环境里 PATH 上没有）；
+# 用参数展开取脚本所在目录，POSIX sh 原生支持。
+case "$0" in
+  */*) hook_dir=${0%/*} ;;
+  *) hook_dir=. ;;
+esac
+exec "$hook_dir/githooks/pre-commit" "$@"

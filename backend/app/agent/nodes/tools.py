@@ -10,7 +10,7 @@ import time
 from sqlalchemy.orm import Session
 
 from ...config import Settings
-from ...runtime_config import effective
+from ...runtime_config import effective, effective_or
 
 logger = logging.getLogger(__name__)
 from ..state import AgentState, EventBus
@@ -19,7 +19,17 @@ from ..tools import (
     PLAN_EXIT_TOOL_NAME,
     PLAN_MODE_SYSTEM_HINT,
 )
-from .common import (_failure_limit, _iteration_limit, _plan_hint)
+from .common import (_bump_patch, _failure_limit, _iteration_limit, _plan_hint)
+from .prompts import (
+    budget_exhausted_notice,
+    failure_limit_notice,
+    hook_context_notice,
+    plan_confirmed_notice,
+    plan_progress_notice,
+    tool_failure_notice,
+    verify_fail_notice,
+    verify_pass_notice,
+)
 from ..utils import (
     _CACHEABLE_TOOLS,
     _run_verify,
@@ -37,6 +47,21 @@ if TYPE_CHECKING:
 from ..tools import extract_sources
 
 # ==== 函数体（原文）====
+def _should_force_final(
+    *,
+    current: int,
+    threshold: int,
+    forced_final: bool,
+    status: str | None,
+) -> bool:
+    """是否触发强制收尾：预算/失败数达阈值、未在收尾中、且未被手动停止。
+
+    iterations（tool_calls_used vs 迭代上限）与 failures（failure_count vs
+    失败上限）两个触发点共用同一形状的判定。
+    """
+    return current >= threshold and not forced_final and status != "stopped"
+
+
 def _remember_command_forever(db: Session | None, command: str, settings: Settings) -> None:
     """「永久记住」：把命令原文写入自动放行前缀（命令白名单，设置页可见）。"""
     if db is None or not command:
@@ -100,7 +125,7 @@ def _tools_node(state: AgentState, runtime) -> dict:
     # 写/编辑/删除/命令默认 ask；命令命中自动放行白名单或本会话已记住则无需确认；
     # permission_mode=allow 时全部自动批准（类 Claude Code --dangerously-skip-permissions）。
     ops: list[dict] = []
-    permission_mode = effective(settings, "tool_permission_mode", "ask")
+    permission_mode = effective_or(settings, "tool_permission_mode", "ask")
     if permission_mode == "ask":
         ops_by_command: dict[str, dict] = {}  # 同轮同命令去重：一次决定覆盖全部调用
         for tc in tool_calls:
@@ -234,13 +259,7 @@ def _tools_node(state: AgentState, runtime) -> dict:
                     "summary": f"计划已确认（{len(steps)} 步），开始执行",
                     "_duration_ms": None,
                 }
-                plan_confirm_text = (
-                    f"用户已确认执行计划（共 {len(steps)} 步），已退出计划模式并播种任务清单，"
-                    "请立即按顺序开始执行（不要重新规划）：\n"
-                    + "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
-                    + "\n每完成一步立即用 todo_update complete 标记；"
-                    "有未完成步骤时不要提前给出最终回答。"
-                )
+                plan_confirm_text = plan_confirmed_notice(steps)
             else:
                 reason = str(pd.get("reason") or "").strip()
                 plan_result[plan_request["call_id"]] = {
@@ -476,11 +495,7 @@ def _tools_node(state: AgentState, runtime) -> dict:
         messages.append(SystemMessage(content=plan_confirm_text))
 
     if hook_contexts:
-        messages.append(
-            SystemMessage(
-                content="PostToolUse hook 附加信息：\n" + "\n".join(hook_contexts)
-            )
-        )
+        messages.append(SystemMessage(content=hook_context_notice(hook_contexts)))
 
     # 失败的工具调用不消耗迭代预算（成功数才累计）：
     # 路径/权限/参数类错误多为可重试问题，烧掉预算会导致任务半途而废（如 run#55）
@@ -497,19 +512,7 @@ def _tools_node(state: AgentState, runtime) -> dict:
             if result.get("output"):
                 error = (error + "\n" + str(result.get("output"))[:240])[:420]
             messages.append(
-                SystemMessage(
-                    content=(
-                        f"工具 {name} 执行失败：{error}\n"
-                        "这是一次可重试的失败，不消耗你的工具调用预算。"
-                        "请换一种方式继续完成任务，不要就此停止：\n"
-                        "1. 先 list_dir / read_file / grep_search 确认路径与现状；\n"
-                        "2. 按错误信息修正参数（例如改用工作目录内的相对路径，或先创建父目录）；\n"
-                        "3. 若目标确实不可达（如在工作目录之外），向用户说明限制，"
-                        "并给出可落地的替代方案（写入工作目录内、修改工作目录等），"
-                        "询问用户后再继续。\n"
-                        "任务未完成前，请持续尝试合理的替代方法。"
-                    )
-                )
+                SystemMessage(content=tool_failure_notice(name, error))
             )
 
     # ---- 写后自动验证（verify）：按类型自动选命令或显式配置，失败可修复重试 ----
@@ -533,18 +536,11 @@ def _tools_node(state: AgentState, runtime) -> dict:
                 head = str(r.get("output") or "").strip() or r.get("error") or "（无输出）"
                 lines.append(f"### {r['path']}  ({r['command']})\n{head[:300]}")
             if not failed:
-                messages.append(
-                    SystemMessage(
-                        content=(
-                            "写后自动验证结果（全部通过）：\n"
-                            + "\n\n".join(lines)
-                            + "\n\n可以继续后续步骤。"
-                        )
-                    )
-                )
+                messages.append(SystemMessage(content=verify_pass_notice(lines)))
             else:
                 verify_fail_count = int(state.get("verify_fail_count") or 0) + 1
                 state["verify_fail_count"] = verify_fail_count
+                _bump_patch(rt, "verify_fail")
                 max_retries = max(
                     0, int(effective(settings, "verify_max_retries") or 1)
                 )
@@ -552,21 +548,13 @@ def _tools_node(state: AgentState, runtime) -> dict:
                     0,
                     max_retries + 1 - verify_fail_count,
                 )
-                msg = (
-                    f"写后自动验证失败（{len(failed)} 个文件，第 {verify_fail_count} 次失败）：\n"
-                    + "\n\n".join(lines)
+                messages.append(
+                    SystemMessage(
+                        content=verify_fail_notice(
+                            lines, len(failed), verify_fail_count, retries_left
+                        )
+                    )
                 )
-                if retries_left > 0:
-                    msg += (
-                        f"\n\n请根据上面的错误修复文件（edit_file/write_file）并等待复验，"
-                        f"还有 {retries_left} 次复验机会。"
-                    )
-                else:
-                    msg += (
-                        "\n\n已到验证重试上限。请停止继续修复，"
-                        "向用户如实说明验证未通过的原因、影响范围与建议。"
-                    )
-                messages.append(SystemMessage(content=msg))
                 bus.emit(
                     "status",
                     {
@@ -620,21 +608,7 @@ def _tools_node(state: AgentState, runtime) -> dict:
         bus.emit("todos", {"todos": todos})
 
     if total:
-        progress = [f"计划进度：已完成 {done}/{total} 步。"]
-        if remaining:
-            current = remaining[0]
-            progress.append(f"当前步骤：{current.get('text', '')}")
-            progress.append(
-                "剩余步骤："
-                + "；".join(str(t.get("text", "")) for t in remaining)
-            )
-            # 与 agent 节点的硬约束一致：有未完成步骤就提示（不再按关键词 hint 过滤）
-            progress.append(
-                "硬约束：剩余步骤尚未完成，请继续按顺序执行；不要提前输出最终回答。"
-            )
-        else:
-            progress.append("剩余：无，可以基于已获取的信息作答。")
-        progress_text = "\n".join(progress)
+        progress_text = plan_progress_notice(done, total, remaining)
         # 进度行只在内容变化时追加：tools 节点每轮 ReAct 循环都会走到这里，
         # 无变化时重复追加会在链上堆叠同值行（实测单 run 达 13 行），每行都是
         # 缓存 miss 且此后常驻历史。前端 progress 事件仍照发，不影响 UI。
@@ -664,56 +638,33 @@ def _tools_node(state: AgentState, runtime) -> dict:
         state["task_mode"] = True
 
     # 达到工具调用上限：强制收尾（下一轮 agent 不绑定工具）
-    if (
-        state["tool_calls_used"] >= _iteration_limit(state, settings)
-        and not state["forced_final"]
-        and rt.get("status") != "stopped"
+    if _should_force_final(
+        current=state["tool_calls_used"],
+        threshold=_iteration_limit(state, settings),
+        forced_final=bool(state["forced_final"]),
+        status=rt.get("status"),
     ):
         state["forced_final"] = True
+        _bump_patch(rt, "force_final_iterations")
         messages.append(
             SystemMessage(
-                content=(
-                    (
-                        "本轮项目任务的工具调用预算已用尽，但任务尚未完成。"
-                        "请给出【进度汇报】：已完成了哪些步骤、还有哪些未完成、"
-                        "下一步计划做什么；并明确告诉用户：回复“继续”即可接着做。"
-                        "不要假装任务已完成。"
-                    )
-                    if state.get("task_mode")
-                    else (
-                        "你已达到本轮允许的工具调用次数上限。"
-                        "请基于已经获取的信息直接给出最终回答；"
-                        "如果信息仍然不足，请明确告诉用户缺少什么，不要继续调用工具。"
-                    )
-                )
+                content=budget_exhausted_notice(bool(state.get("task_mode")))
             )
         )
 
     # 失败次数过多仍受阻：强制收尾并让模型向用户说明（避免无意义空转）
     max_failures = _failure_limit(state, settings)
-    if (
-        state.get("failure_count", 0) >= max_failures
-        and not state["forced_final"]
-        and rt.get("status") != "stopped"
+    if _should_force_final(
+        current=state.get("failure_count", 0),
+        threshold=max_failures,
+        forced_final=bool(state["forced_final"]),
+        status=rt.get("status"),
     ):
         state["forced_final"] = True
+        _bump_patch(rt, "force_final_failures")
         messages.append(
             SystemMessage(
-                content=(
-                    (
-                        "你已连续多次遇到工具执行失败（超过允许的失败重试上限）。"
-                        "请给出【进度汇报】：任务卡在哪一步、失败原因、用户需要做什么"
-                        "（例如修改工作目录、提供权限、确认替代路径）；"
-                        "并告诉用户回复“继续”即可接着做。不要再尝试调用工具。"
-                    )
-                    if state.get("task_mode")
-                    else (
-                        "你已连续多次遇到工具执行失败（超过允许的失败重试上限）。"
-                        "请基于已经获得的信息给出最终回答，向用户如实说明："
-                        "任务卡在哪一步、失败原因、以及用户需要做什么（例如修改工作目录、"
-                        "提供权限、确认替代路径）。不要再尝试调用工具。"
-                    )
-                )
+                content=failure_limit_notice(bool(state.get("task_mode")))
             )
         )
 
@@ -743,5 +694,3 @@ def _tools_node(state: AgentState, runtime) -> dict:
 # ============================================================
 # 节点：finalize（收尾）
 # ============================================================
-
-

@@ -23,7 +23,7 @@ import mimetypes
 from pathlib import Path
 from typing import Any
 
-from ..runtime_config import effective, vision_provider_config
+from ..runtime_config import effective_or, vision_provider_config
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class SenseNovaVision:
         from ..network import make_httpx_client
 
         with make_httpx_client(
-            timeout=timeout or effective(self.settings, "vision_timeout", 120)
+            timeout=timeout or effective_or(self.settings, "vision_timeout", 120)
         ) as client:
             resp = client.post(url, headers=self._headers(), json=payload)
         if resp.status_code != 200:
@@ -118,7 +118,9 @@ class SenseNovaVision:
         question: str,
     ) -> list[dict]:
         parts: list[dict] = []
-        max_images = int(effective(self.settings, "vision_max_images", 6))
+        max_images = int(
+            effective_or(self.settings, "vision_max_images", 6)
+        )
         for image in image_data_urls[:max_images]:
             parts.append(
                 {

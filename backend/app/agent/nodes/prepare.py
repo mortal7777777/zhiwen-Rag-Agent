@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from ...config import Settings
 from ...db import repository as repo
 from ...rag.service import RAGService
-from ...runtime_config import effective
+from ...runtime_config import effective_or
 from ..context import trim_history_for_budget
 from ..prompts import compose_system_prompt
 
@@ -23,9 +23,11 @@ from .common import _plan_hint, _is_project_task
 from ..utils import (
     _rows_to_history,
     _tools_prefix_hash,
+    _tools_prefix_size,
     _chain_fingerprints,
     _chain_preview,
-    _window_has_same,
+    _dblock_needs_injection,
+    _dblock_version,
 )
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -196,7 +198,7 @@ def _prepare_node(state: AgentState, runtime) -> dict:
     # 模型认为需要某技能时主动调用 skill_lookup 工具加载全文。
     # 不再每轮自动注入匹配技能的全文——避免每轮内容变化破坏缓存前缀。
     skill_enabled_ids = None
-    skills_on = effective(settings, "skills_enabled", True)
+    skills_on = effective_or(settings, "skills_enabled", True)
     if db is not None:
         try:
             from ...skills import load_prefs
@@ -222,7 +224,7 @@ def _prepare_node(state: AgentState, runtime) -> dict:
     # 静态核心（模板+工具规则）放消息最前、跨轮字节级稳定，命中 DeepSeek 等
     # 提供商的自动前缀缓存；动态部分（任务清单/文档清单/技能目录）放历史之后。
     template_content = service._get_template_content(db, template_id, system_prompt)
-    advanced_tools_on = effective(settings, "advanced_tools_enabled", True)
+    advanced_tools_on = effective_or(settings, "advanced_tools_enabled", True)
     system_prompt_core = compose_system_prompt(
         template_content,
         use_knowledge_base=use_knowledge_base,
@@ -358,49 +360,68 @@ def _prepare_node(state: AgentState, runtime) -> dict:
     messages.extend(history_messages)
     persist_start = len(messages)
     # ---- D 块：变化才追加 ----
-    # D 块每轮重新渲染；若与窗口内已有副本逐字相同则不重复注入——
-    # 否则每轮制造一份副本（进历史占上下文）且内容必然 miss（前缀缓存
-    # 失效）。被压缩掉（窗口内查不到）或内容确实变化时才追加，
-    # 链仍是"上一轮 + 新增"的纯追加形态。
-    def _append_if_changed(content: str) -> None:
-        if not content or _window_has_same(window_rows, content):
+    # D 块每轮重新渲染；若"该键最后一个版本就是当前版本、且它仍在窗口内"
+    # 则不重复注入——否则每轮制造一份副本（进历史占上下文）且内容必然
+    # miss（前缀缓存失效）。判据是**版本账本 + 窗口存在性**两条（见
+    # utils._dblock_needs_injection）：只看窗口内有没有同内容，会在
+    # A→B→A 状态回退时保留过期的 B（旧实现的实际缺陷）。
+    # 账本放 state（随检查点持久化），返回值必须带出去——节点内直接改
+    # state 的字段不生效（历史大坑）。
+    ledger: dict[str, str] = dict(state.get("dblock_versions") or {})
+
+    def _append_if_changed(key: str, content: str) -> None:
+        if not _dblock_needs_injection(key, content, ledger, window_rows):
             return
         messages.append(SystemMessage(content=content))
+        version = _dblock_version(content)
+        if ledger.get(key) and ledger[key] != version:
+            # 状态回退/内容变化导致重新注入：留痕便于排查"为什么这里没命中缓存"
+            logger.info(
+                "D 块重新注入：%s（%s → %s）", key, ledger[key], version
+            )
+        ledger[key] = version
 
     if project_memory_text:
         _append_if_changed(
+            "project_memory",
             "项目记忆（AGENTS.md）：\n"
             "（以下为历史记录，可能过时；与当前代码/文件/文档冲突时以现状为准）\n"
-            + project_memory_text
+            + project_memory_text,
         )
-    _append_if_changed(todos_prompt_text or "")
+    _append_if_changed("todos", todos_prompt_text or "")
     if trajectory_summary:
-        _append_if_changed("最近任务过程摘要：\n" + trajectory_summary)
+        _append_if_changed(
+            "trajectory", "最近任务过程摘要：\n" + trajectory_summary
+        )
     if summary_text:
         _append_if_changed(
-            "以下是对本会话早期内容的摘要（供参考）：\n" + summary_text
+            "summary",
+            "以下是对本会话早期内容的摘要（供参考）：\n" + summary_text,
         )
     if memory_summary:
         _append_if_changed(
-            "关于用户（长期记忆摘要，通常应作为默认背景）：\n" + memory_summary
+            "memory_profile",
+            "关于用户（长期记忆摘要，通常应作为默认背景）：\n" + memory_summary,
         )
     if memory_hits:
         _append_if_changed(
+            "memory_hits",
             "相关的长期记忆（每条格式为 [分类|录入日期]，属历史信息："
             "与当前对话内容冲突时以当前对话为准，不要用旧记忆否定用户刚说的话）：\n"
-            + "\n".join(f"- {item}" for item in memory_hits)
+            + "\n".join(f"- {item}" for item in memory_hits),
         )
     if vision_descriptions:
         _append_if_changed(
+            "vision",
             "用户上传了图片。以下是视觉模型对图片的理解，请据此回答：\n"
             + "\n".join(
                 f"- 图片{i + 1}：{text}"
                 for i, text in enumerate(vision_descriptions)
-            )
+            ),
         )
     # 时间戳是纯背景信息（无指令约束力），放链尾避免破坏前缀缓存；
     # 精度到分钟，同一分钟内的多轮请求字节相同（被上面的去重跳过）
-    _append_if_changed(time_context)
+    _append_if_changed("time", time_context)
     messages.append(HumanMessage(content=question))
 
     # ---- 按开关组装工具 ----
@@ -419,6 +440,8 @@ def _prepare_node(state: AgentState, runtime) -> dict:
     # 记录到 run 的 token_usage.tools_hash，并与上一 run 对比告警。
     tools_hash = _tools_prefix_hash(tools)
     rt["tools_hash"] = tools_hash
+    # 工具面体积：缓存命中时它仍在输入里计费，记入运行记录才能验收"工具瘦身"
+    rt["tools_chars"] = _tools_prefix_size(tools)
     if db is not None and conv_id is not None:
         try:
             prev_runs = repo.list_agent_runs(db, limit=1, conversation_id=conv_id)
@@ -488,6 +511,8 @@ def _prepare_node(state: AgentState, runtime) -> dict:
     return {
         "messages": messages,
         "persist_start": persist_start,
+        # D 块版本账本：随检查点跨轮保留（丢失只会多注入一次，不会漏）
+        "dblock_versions": ledger,
         "plan_steps": plan_steps,
         "plan_map": plan_map,
         "kb_documents": kb_documents,
@@ -524,6 +549,3 @@ def _prepare_node(state: AgentState, runtime) -> dict:
 # ============================================================
 # 子代理并行（Send fan-out / fan-in，类 Claude Code 的 Task）
 # ============================================================
-
-
-

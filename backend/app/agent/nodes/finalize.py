@@ -21,7 +21,7 @@ from ...runtime_config import effective
 
 logger = logging.getLogger(__name__)
 from ..state import AgentState, EventBus
-from .common import _plan_hint
+from .common import _bump_patch, _plan_hint
 from ..utils import _strip_xml_tool_tags
 
 from typing import TYPE_CHECKING
@@ -55,6 +55,7 @@ def _finalize_node(state: AgentState, runtime) -> dict:
     # 这里降级为明确错误并推送 error 事件。
     if not final_text and rt.get("status") == "ok":
         rt["status"] = "error"
+        _bump_patch(rt, "empty_answer")
         rt["error"] = rt.get("error") or (
             "本轮未产出正文（输出预算可能被思考耗尽，或上游流中断）。请重试；"
             "若反复出现，检查供应商状态或调高 max_tokens。"
@@ -243,6 +244,11 @@ def _finalize_node(state: AgentState, runtime) -> dict:
                     # 工具定义哈希（缓存前缀监测）：与上一 run 对比，
                     # 变化说明前缀被破坏，命中率可能下降
                     "tools_hash": rt.get("tools_hash"),
+                    # 工具面体积（字符数）：每次调用都在输入里（缓存命中时也计费），
+                    # 用于验收"工具瘦身"并防止无意识膨胀
+                    "tools_chars": rt.get("tools_chars"),
+                    # 轮内纠偏补丁触发次数（P1-3）：按数据淘汰补丁，而不是只增不减
+                    "patches": dict(rt.get("patches") or {}),
                     # 消息链指纹（缓存前缀监测）：下一轮与本轮做前缀比对，
                     # 首个分歧位置即前缀命中断点
                     "chain_len": rt.get("chain_len"),

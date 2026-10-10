@@ -326,18 +326,16 @@ def _tool_detail(result: dict, limit: int = 3500) -> str:
         return str(result)[:limit]
 
 
-def _tools_prefix_hash(tools) -> str:
-    """计算工具定义的稳定哈希（供缓存前缀监测）。
+def _tool_definition_parts(tools) -> list[str]:
+    """工具定义的规范化片段列表（名称+描述+schema），按名称排序。
 
-    bind_tools 发给模型的工具定义（名称/描述/参数 schema）构成缓存前缀的
-    一部分，前缀字节变化会让 DeepSeek 自动缓存整体失效（命中率骤降）。
-    会话内工具定义应保持稳定；变化时记录日志便于定位元凶（用户自写工具、
-    技能注入、MCP 服务器变更等）。
+    bind_tools 发给模型的正是这三样，构成缓存前缀的一部分：顺序/内容变化会让
+    provider 自动前缀缓存整体失效（实测命中率 90% → 29%）。哈希与体积统计
+    共用本函数，保证"监测口径"与"体积口径"一致。
     """
-    import hashlib as _hashlib
     import json as _json
 
-    parts = []
+    parts: list[str] = []
     for t in sorted(tools, key=lambda x: getattr(x, "name", "") or ""):
         name = getattr(t, "name", "") or ""
         desc = getattr(t, "description", "") or ""
@@ -353,7 +351,26 @@ def _tools_prefix_hash(tools) -> str:
             except Exception:
                 schema = str(args_schema)
         parts.append(f"{name}\u0000{desc}\u0000{schema}")
-    return _hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()[:12]
+    return parts
+
+
+def _tools_prefix_hash(tools) -> str:
+    """计算工具定义的稳定哈希（供缓存前缀监测）。"""
+    import hashlib as _hashlib
+
+    return _hashlib.md5(
+        "\n".join(_tool_definition_parts(tools)).encode("utf-8")
+    ).hexdigest()[:12]
+
+
+def _tools_prefix_size(tools) -> int:
+    """工具面体积（字符数）：名称+描述+schema。
+
+    这是每次 LLM 调用都要带的 payload，也是缓存命中时仍在计费的输入部分；
+    把它记进运行记录（tools_chars）并用测试设预算，才能验收"工具瘦身"
+    且防止日后无意识膨胀。
+    """
+    return len("\n".join(_tool_definition_parts(tools)))
 
 
 def _window_has_same(rows: list[dict], content: str, role: str = "system") -> bool:
@@ -368,6 +385,44 @@ def _window_has_same(rows: list[dict], content: str, role: str = "system") -> bo
         if row.get("role") == role and str(row.get("content") or "") == content:
             return True
     return False
+
+
+def _dblock_version(content: str) -> str:
+    """D 块内容版本号（sha1 前 12 位）。
+
+    只用于"这个键的当前版本有没有注入过"的判重与日志，**不进消息内容**——
+    D 块字节保持不变，前缀缓存不变量不受影响（对比：在消息里写版本标记会
+    改变前缀字节，等于主动断一次缓存）。
+    """
+    import hashlib as _hashlib
+
+    return _hashlib.sha1(str(content or "").encode("utf-8")).hexdigest()[:12]
+
+
+def _dblock_needs_injection(
+    key: str,
+    content: str,
+    ledger: dict | None,
+    rows: list[dict] | None,
+    role: str = "system",
+) -> bool:
+    """D 块是否需要追加（双判据；纯函数，便于单测）。
+
+    只问"窗口里有没有同内容"会漏掉状态回退：A → B → A 时窗口里仍有旧的
+    A 副本，跳过注入后链上最后一条仍是 B——模型会一直带着过期状态回答，
+    直到该行被压缩出窗口才自愈。所以两条同时成立才跳过：
+    1. 该键**最后一次注入的版本**就是当前版本（`ledger[key] == 当前版本`）；
+    2. 该版本仍在发送窗口里（压缩 / 时间线回滚会把它踢出去）。
+
+    ledger 可能因内存版 checkpointer 重启或删线程而缺失：那种情况下判据
+    退化为"窗口内查不到就注入"，最坏只是重复注入一次相同内容（无害），
+    **不会**放过陈旧版本。
+    """
+    if not content:
+        return False
+    if not ledger or ledger.get(key) != _dblock_version(content):
+        return True
+    return not _window_has_same(rows or [], content, role)
 
 
 def _chain_fingerprints(messages: list) -> list[str]:

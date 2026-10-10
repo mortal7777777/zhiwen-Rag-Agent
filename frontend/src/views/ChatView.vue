@@ -1,62 +1,16 @@
-wo<template>
+<template>
   <div class="chat-page">
     <!-- 左侧：会话列表（可折叠） -->
-    <aside :class="['session-panel', { collapsed: sessionCollapsed }]">
-      <div class="session-head">
-        <el-button
-          v-if="!sessionCollapsed"
-          type="primary"
-          class="new-chat-btn"
-          :disabled="loading"
-          @click="startNewChat"
-        >
-          <el-icon><Plus /></el-icon>
-          新建对话
-        </el-button>
-        <el-tooltip v-else content="新建对话" placement="right">
-          <el-button circle type="primary" plain :disabled="loading" @click="startNewChat">
-            <el-icon><Plus /></el-icon>
-          </el-button>
-        </el-tooltip>
-      </div>
-
-      <template v-if="!sessionCollapsed">
-        <div v-if="!sessions.length" class="session-empty">暂无历史会话</div>
-        <div class="session-list">
-          <div
-            v-for="session in sessions"
-            :key="session.id"
-            :class="['session-item', { active: session.id === activeId }]"
-            @click="switchSession(session)"
-          >
-            <div class="session-info">
-              <span class="session-title">{{ session.title }}</span>
-              <span v-if="session.message_count" class="session-count">
-                {{ session.message_count }}
-              </span>
-            </div>
-            <div class="session-actions" @click.stop>
-              <el-icon @click="handleRename(session)"><EditPen /></el-icon>
-              <el-icon @click="handleDelete(session)"><Delete /></el-icon>
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <div class="session-foot">
-        <el-tooltip
-          :content="sessionCollapsed ? '展开会话列表' : '收起会话列表'"
-          placement="right"
-        >
-          <div class="panel-toggle" @click="sessionCollapsed = !sessionCollapsed">
-            <el-icon :size="17">
-              <Expand v-if="sessionCollapsed" />
-              <Fold v-else />
-            </el-icon>
-          </div>
-        </el-tooltip>
-      </div>
-    </aside>
+    <SessionList
+      v-model:collapsed="sessionCollapsed"
+      :sessions="sessions"
+      :active-id="activeId"
+      :loading="loading"
+      @new-chat="startNewChat"
+      @switch="switchSession"
+      @rename="handleRename"
+      @delete="handleDelete"
+    />
 
     <!-- 右侧：对话主区 -->
     <main class="chat-main">
@@ -72,6 +26,30 @@ wo<template>
           </el-tooltip>
           <span class="chat-title">{{ currentTitle }}</span>
         </div>
+        <!-- 供应商快捷切换（只切供应商；管理入口跳设置页模型面板） -->
+        <el-dropdown
+          trigger="click"
+          :disabled="loading || quickBusy"
+          @command="onQuickSwitch"
+        >
+          <span :class="['model-switch-chip', { busy: quickBusy }]">
+            {{ quickActiveName || '未配置供应商' }}
+            <span v-if="quickModel" class="model-switch-model">{{ quickModel }}</span>
+          </span>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item
+                v-for="p in quickProviders"
+                :key="p.id"
+                :command="p.id"
+                :disabled="p.id === quickActiveId"
+              >
+                {{ p.name }} · {{ p.model || '未设模型' }}
+              </el-dropdown-item>
+              <el-dropdown-item divided command="__manage__">管理供应商…</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-button text type="primary" @click="openTemplateManager">
           <el-icon><Operation /></el-icon>
           提示词模板
@@ -174,100 +152,24 @@ wo<template>
             </div>
 
             <template v-else>
-              <div
+              <TodoPanel
                 v-if="(msg.plan && msg.plan.length) || (msg.todos && msg.todos.length)"
-                class="plan-box"
-              >
-                <div class="plan-head">
-                  <el-icon :size="14"><List /></el-icon>
-                  {{ msg.plan && msg.plan.length ? '执行计划' : '任务清单' }}
-                  <span v-if="msg.planDone != null" class="plan-progress">
-                    {{ msg.planDone }}/{{
-                      msg.planTotal != null ? msg.planTotal : msg.plan.length
-                    }}
-                  </span>
-                </div>
-                <div v-if="msg.todos && msg.todos.length" class="plan-todos">
-                  <div
-                    v-for="(t, i) in msg.todos"
-                    :key="t.id"
-                    :class="['plan-todo', { done: todoDone(msg, t, i) }]"
-                  >
-                    <el-icon v-if="todoDone(msg, t, i)" :size="13" class="plan-todo-check">
-                      <CircleCheck />
-                    </el-icon>
-                    <span v-else class="plan-todo-box"></span>
-                    <span class="plan-todo-text">{{ t.text }}</span>
-                  </div>
-                </div>
-                <ol v-else class="plan-steps">
-                  <li
-                    v-for="(step, i) in msg.plan"
-                    :key="i"
-                    :class="[
-                      'plan-step',
-                      i < msg.planDone ? 'done' : '',
-                      i === msg.planDone && currentTool ? 'running' : '',
-                    ]"
-                  >
-                    <span class="plan-step-icon">
-                      <el-icon v-if="i < msg.planDone" :size="12"><CircleCheck /></el-icon>
-                      <span v-else-if="i === msg.planDone && currentTool" class="plan-step-dot"></span>
-                      <span v-else class="plan-step-num">{{ i + 1 }}</span>
-                    </span>
-                    <span class="plan-step-text">{{ step }}</span>
-                  </li>
-                </ol>
-              </div>
+                :plan="msg.plan"
+                :todos="msg.todos"
+                :plan-done="msg.planDone"
+                :plan-total="msg.planTotal"
+                :show-running="!!currentTool"
+              />
 
               <!-- 计划审批卡：模型进入计划模式后提交的结构化计划 -->
-              <div
+              <PlanApprovalCard
                 v-if="msg.planApproval && msg.planApproval.state !== 'cancelled'"
-                class="plan-approval-box"
-                :data-plan-state="msg.planApproval.state"
-                tabindex="0"
+                :approval="msg.planApproval"
+                :loading="loading"
+                @confirm="confirmPlan(msg)"
+                @cancel="cancelPlan(msg)"
                 @keydown="onPlanCardKeydown(msg, $event)"
-              >
-                <div class="plan-head">
-                  <el-icon :size="14"><List /></el-icon>
-                  计划已就绪，确认后开始执行
-                </div>
-                <div v-if="msg.planApproval.summary" class="plan-approval-summary">
-                  {{ msg.planApproval.summary }}
-                </div>
-                <template v-if="msg.planApproval.state === 'pending'">
-                  <el-input
-                    v-model="msg.planApproval.text"
-                    type="textarea"
-                    :autosize="{ minRows: 3, maxRows: 10 }"
-                    class="plan-approval-input"
-                  />
-                  <div class="plan-approval-hint">
-                    直接编辑上面的步骤（一行一步）；<b>Enter 或 Ctrl+Enter 确认执行</b>，Esc 取消。
-                  </div>
-                  <div class="plan-approval-actions">
-                    <el-button
-                      type="primary"
-                      size="small"
-                      :disabled="loading"
-                      @click="confirmPlan(msg)"
-                    >
-                      确认执行
-                    </el-button>
-                    <el-button size="small" :disabled="loading" @click="cancelPlan(msg)">
-                      取消
-                    </el-button>
-                  </div>
-                </template>
-                <div v-else class="plan-approval-done">
-                  <ol class="plan-steps">
-                    <li v-for="(s, i) in msg.planApproval.steps" :key="i" class="plan-step">
-                      <span class="plan-step-icon">{{ i + 1 }}</span>
-                      <span class="plan-step-text">{{ s }}</span>
-                    </li>
-                  </ol>
-                </div>
-              </div>
+              />
               <!-- 中断未跑完：给「继续执行 / 丢弃这一轮」入口（刷新/切换会话恢复用） -->
               <div v-if="msg._unfinishedBar" class="suspension-bar interrupted-bar">
                 <span class="suspension-text">上一轮执行被中断（后台退出或异常），可以继续跑完</span>
@@ -318,195 +220,29 @@ wo<template>
             </template>
 
             <!-- 工具调用轨迹：有完整输出（detail）时可点击展开 -->
-            <div v-if="msg.tool_trace && msg.tool_trace.length" class="tool-trace">
-              <template v-for="(t, i) in msg.tool_trace" :key="i">
-                <div v-if="t.kind === 'thinking'" class="think-block">
-                  <div class="think-head" @click="t.done && (t._open = !t._open)">
-                    <el-icon :size="13"><MagicStick /></el-icon>
-                    <span>{{ t.done ? `已深度思考 · ${t.duration}s` : '深度思考中…' }}</span>
-                    <el-icon v-if="t.done" :size="12" class="arrow" :class="{ open: t._open }">
-                      <ArrowDown />
-                    </el-icon>
-                  </div>
-                  <div v-if="!t.done" class="think-body live">{{ t.text }}</div>
-                  <div v-else-if="t._open" class="think-body">{{ t.text }}</div>
-                </div>
-                <div v-else class="tool-item">
-                  <div
-                    :class="['tool-chip', { expandable: !!t.detail }]"
-                    @click="t.detail && (t._open = !t._open)"
-                  >
-                    <el-icon :size="13"><component :is="toolIcon(t.name)" /></el-icon>
-                    <span class="tool-name">{{ toolName(t.name) }}</span>
-                    <span class="tool-summary">
-                      {{ t.summary || (t.arguments && t.arguments.query) || '执行中…' }}
-                    </span>
-                    <el-icon v-if="t.detail" :size="12" class="tool-expand-icon">
-                      <ArrowDown :class="{ open: t._open }" />
-                    </el-icon>
-                  </div>
-                  <pre v-if="t._open && t.detail" class="tool-detail">{{ t.detail }}</pre>
-                </div>
-              </template>
-            </div>
+            <ToolTraceList
+              v-if="msg.tool_trace && msg.tool_trace.length"
+              :items="msg.tool_trace"
+              :tool-name="toolName"
+            />
 
             <!-- 人工确认（HITL）：等待用户批准/拒绝敏感操作 -->
-            <div v-if="msg.permissions && msg.permissions.length" class="permission-box">
-              <div
-                v-for="p in msg.permissions"
-                :key="p.id"
-                :data-perm-id="p.id"
-              >
-                <div v-if="p.status === 'pending'" class="permission-card pending">
-                  <div class="permission-head">
-                    <el-icon :size="14"><Lock /></el-icon>
-                    <span class="permission-title">等待人工确认</span>
-                    <span class="permission-tool">{{ toolName(p.tool) }}</span>
-                  </div>
-                  <div class="permission-body">
-                    <div class="permission-summary">{{ p.summary }}</div>
-                    <div
-                      v-if="p.tool === 'edit_file' && p.args?.diff_lines?.length"
-                      class="perm-diff"
-                    >
-                      <div class="perm-diff-head">变更预览（红删绿增）</div>
-                      <div
-                        v-for="(d, di) in p.args.diff_lines"
-                        :key="di"
-                        :class="[
-                          'perm-diff-line',
-                          d.op === '-' ? 'del' : d.op === '+' ? 'add' : '',
-                        ]"
-                      >
-                        <span class="perm-diff-sign">{{ d.op === '-' ? '−' : d.op === '+' ? '+' : '·' }}</span>
-                        <span class="perm-diff-text">{{ d.text }}</span>
-                      </div>
-                    </div>
-                    <div
-                      v-else-if="p.tool === 'edit_file' && p.args?.old_string != null"
-                      class="perm-diff"
-                    >
-                      <div class="perm-diff-head">变更预览（红删绿增）</div>
-                      <div class="perm-diff-line del">
-                        <span class="perm-diff-sign">−</span>
-                        <span class="perm-diff-text">{{ p.args.old_string }}</span>
-                      </div>
-                      <div class="perm-diff-line add">
-                        <span class="perm-diff-sign">+</span>
-                        <span class="perm-diff-text">{{ p.args.new_string }}</span>
-                      </div>
-                    </div>
-                    <pre v-else-if="p.args_text" class="permission-args">{{ p.args_text }}</pre>
-                  </div>
-                  <div class="permission-actions">
-                    <el-input
-                      v-model="p.reason"
-                      placeholder="备注（可选）"
-                      size="small"
-                      class="permission-reason"
-                      @keyup.enter="decidePermission(p, p._focusIndex ?? 0)"
-                    />
-                    <div class="permission-opts" tabindex="0">
-                      <button
-                        type="button"
-                        class="perm-opt primary"
-                        :class="{ active: p._focusIndex === 0 }"
-                        @click="decidePermission(p, 0)"
-                        @mouseenter="p._focusIndex = 0"
-                      >
-                        <span class="perm-num">1</span>批准
-                      </button>
-                      <button
-                        type="button"
-                        class="perm-opt danger"
-                        :class="{ active: p._focusIndex === 1 }"
-                        @click="decidePermission(p, 1)"
-                        @mouseenter="p._focusIndex = 1"
-                      >
-                        <span class="perm-num">2</span>拒绝
-                      </button>
-                      <button
-                        v-if="p.rememberable"
-                        type="button"
-                        class="perm-opt"
-                        :class="{ active: p._focusIndex === 2 }"
-                        @click="decidePermission(p, 2)"
-                        @mouseenter="p._focusIndex = 2"
-                      >
-                        <span class="perm-num">3</span>批准并记住
-                      </button>
-                    </div>
-                    <span class="perm-key-hint">↑↓ 切换 · Enter 确认 · Esc 返回输入</span>
-                  </div>
-                </div>
-                <!-- 处理后折叠为一行状态条，不占空间 -->
-                <div v-else :class="['permission-resolved-chip', p.status]">
-                  <el-icon :size="13">
-                    <CircleCheck v-if="p.status === 'approved'" />
-                    <Close v-else />
-                  </el-icon>
-                  <span class="prc-label">{{ p.status === 'approved' ? '已批准' : '已拒绝' }}</span>
-                  <span class="prc-tool">{{ toolName(p.tool) }}</span>
-                  <span class="prc-summary">{{ p.summary }}</span>
-                  <span v-if="p.reason" class="prc-reason">（{{ p.reason }}）</span>
-                </div>
-              </div>
-              <div
-                v-if="msg.permissions.some((p) => p._suspended && !p._decision)"
-                class="suspension-bar"
-              >
-                <span class="suspension-text">等待你的决定：全部处理后将自动继续执行</span>
-                <el-button size="small" :disabled="loading" @click="stopSuspended">
-                  全部拒绝并停止
-                </el-button>
-              </div>
-            </div>
+            <PermissionCard
+              v-if="msg.permissions && msg.permissions.length"
+              :permissions="msg.permissions"
+              :loading="loading"
+              :tool-name="toolName"
+              @decide="decidePermission"
+              @stop="stopSuspended"
+            />
 
             <!-- 引用来源 -->
-            <div v-if="msg.sources && msg.sources.length" class="sources">
-              <div class="sources-head" @click="msg._sourcesOpen = !msg._sourcesOpen">
-                <el-icon :size="13"><Link /></el-icon>
-                引用来源（{{ msg.sources.length }}）
-                <el-icon :size="12" class="arrow" :class="{ open: msg._sourcesOpen }">
-                  <ArrowDown />
-                </el-icon>
-              </div>
-              <div v-if="msg._sourcesOpen" class="sources-body">
-                <div v-for="(src, i) in msg.sources" :key="i" class="source-item">
-                  <template v-if="src.type === 'web'">
-                    <div class="source-meta">
-                      <span class="source-no">{{ src.index || i + 1 }}</span>
-                      <span class="source-tag web">联网</span>
-                      <span class="source-title">{{ src.title || src.url }}</span>
-                    </div>
-                    <div class="source-content">{{ src.content }}</div>
-                    <a
-                      v-if="src.url"
-                      :href="src.url"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="source-link"
-                      @click.stop
-                    >
-                      打开链接 ↗
-                    </a>
-                  </template>
-                  <template v-else>
-                    <div class="source-meta">
-                      <span class="source-no">{{ src.index || i + 1 }}</span>
-                      <span class="source-tag">知识库</span>
-                      <span v-if="src.score" class="source-score">相关度 {{ src.score }}</span>
-                      <span v-if="src.source" class="source-name">{{ src.source }}</span>
-                      <span v-if="src.page != null">｜第 {{ src.page }} 页</span>
-                    </div>
-                    <div class="source-content">{{ src.content }}</div>
-                    <a class="source-link" @click.prevent="openSourceDoc(src)">
-                      查看原文 {{ src.page != null ? `· 第 ${src.page} 页` : '' }} ↗
-                    </a>
-                  </template>
-                </div>
-              </div>
-            </div>
+            <SourceList
+              v-if="msg.sources && msg.sources.length"
+              v-model:open="msg._sourcesOpen"
+              :sources="msg.sources"
+              @open-doc="openSourceDoc"
+            />
           </div>
         </div>
       </div>
@@ -921,33 +657,25 @@ wo<template>
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { createStreamHandlers } from '../composables/useAgentStream'
+import { useTypewriter } from '../composables/useTypewriter'
 import {
-  ArrowDown,
-  CircleCheck,
   Clock,
   Close,
   Collection,
-  Connection,
   CopyDocument,
   DataAnalysis,
-  Delete,
-  EditPen,
   Expand,
   Fold,
   Histogram,
-  Lock,
-  Link,
-  List,
   MagicStick,
   Memo,
   Operation,
   Picture,
-  Plus,
   Position,
   Promotion,
-  Reading,
   RefreshLeft,
   RefreshRight,
   User,
@@ -956,6 +684,13 @@ import {
 } from '@element-plus/icons-vue'
 import MarkdownContent from '../components/MarkdownContent.vue'
 import DocumentViewer from '../components/DocumentViewer.vue'
+import PermissionCard from '../components/chat/PermissionCard.vue'
+import PlanApprovalCard from '../components/chat/PlanApprovalCard.vue'
+import PlanSteps from '../components/chat/PlanSteps.vue'
+import ToolTraceList from '../components/chat/ToolTraceList.vue'
+import SourceList from '../components/chat/SourceList.vue'
+import TodoPanel from '../components/chat/TodoPanel.vue'
+import SessionList from '../components/chat/SessionList.vue'
 
 // keep-alive 按组件名匹配，显式声明
 defineOptions({ name: 'ChatView' })
@@ -973,6 +708,7 @@ import {
   getConversationMessages,
   getConversationTimeline,
   getPendingApproval,
+  getSettings,
   getSuggestions,
   getTodos,
   listConversations,
@@ -984,6 +720,7 @@ import {
   rewindConversation,
   rollbackConversation,
   streamAgentChat,
+  switchChatProvider,
   updateMemory,
   updateTemplate,
 } from '../api'
@@ -1007,6 +744,60 @@ const drafts = ref({})
 // 会话消息内存缓存：切换时保存当前内存态（含生成中的消息），
 // 切回时优先用缓存，避免正在生成的内容丢失
 const sessionMessagesCache = {}
+
+// ---------------- 供应商快捷切换（头部下拉） ----------------
+// 读 /api/settings 快照（独立于设置页草稿）；切换走专用轻量端点：
+// 只清对话缓存，不触发嵌入/重排重载；本会话流式中禁用。
+// 已知边界：切换只影响后续 LLM 迭代，不中断进行中的 run（与设置页保存同语义）。
+const quickProviders = ref([])
+const quickActiveId = ref('')
+const quickModel = ref('')
+const quickBusy = ref(false)
+const openSettingsTab = inject('openSettingsTab', null)
+
+const quickActiveName = computed(
+  () => quickProviders.value.find((p) => p.id === quickActiveId.value)?.name || '',
+)
+
+async function loadQuickProviders() {
+  try {
+    const snapshot = await getSettings()
+    quickProviders.value = (snapshot.providers || []).filter(
+      (p) => p.type === 'chat' && p.enabled,
+    )
+    quickActiveId.value =
+      snapshot.active_chat_provider || quickProviders.value[0]?.id || ''
+    syncQuickModel()
+  } catch {
+    /* 后端未就绪时静默，不影响对话主流程 */
+  }
+}
+
+function syncQuickModel() {
+  quickModel.value =
+    quickProviders.value.find((p) => p.id === quickActiveId.value)?.model || ''
+}
+
+async function onQuickSwitch(command) {
+  if (!command) return
+  if (command === '__manage__') {
+    openSettingsTab?.('models')
+    return
+  }
+  if (command === quickActiveId.value) return
+  quickBusy.value = true
+  try {
+    const res = await switchChatProvider(command)
+    quickActiveId.value = res.active_chat_provider || command
+    syncQuickModel()
+    ElMessage.success(`已切换到 ${quickActiveName.value || command}（对后续消息生效）`)
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '切换失败')
+    await loadQuickProviders()
+  } finally {
+    quickBusy.value = false
+  }
+}
 
 function currentDraftKey() {
   return activeId.value ?? 'new'
@@ -1062,72 +853,21 @@ function closeThinkingSegment() {
 let abortController = null
 let restoringTemplate = false // 切换会话时回填模板，不触发持久化写入
 
-// 打字机效果：后端 token 先进缓冲区，按固定节奏刷入消息，
-// 避免生成太快时"整段一下子跳出来"；积压多时自适应加速，不会拖慢
-const pendingText = ref('')
-let typewriterTimer = null
+// 打字机/增量流状态（缓冲区、节奏、撤回、跳过标记）已抽到
+// composables/useTypewriter.js（可单测：node frontend/scripts/check_typewriter.mjs）；
+// 本组件只持有"目标消息"并注入滚动副作用。
 let streamMsg = null
+const typewriter = useTypewriter({
+  getStreamMsg: () => streamMsg,
+  scrollToBottom,
+})
+// 兼容别名：其余逻辑沿用拆分前的名字（状态本体在 composable 里，单一属主）
+const pendingText = typewriter.pendingText
+const flushTypewriter = typewriter.flush
+const dropStreamedRound = typewriter.drop
+const startTypewriter = typewriter.start
 // 原生挂起（interrupt）的审批批次：{ conversationId, msg, submitted }
 let suspended = null
-// 增量流式状态：本轮 stream_delta 已推送字符数（工具轮撤回用）与
-// 「跳过随后全文 token」标记（正文轮已增量显示，token 是同一段全文）
-let streamedLen = 0
-let skipNextToken = false
-
-function flushTypewriter() {
-  if (typewriterTimer) {
-    clearInterval(typewriterTimer)
-    typewriterTimer = null
-  }
-  if (streamMsg && pendingText.value) {
-    streamMsg.content += pendingText.value
-    pendingText.value = ''
-    scrollToBottom()
-  }
-}
-
-// 撤回本轮增量推送的字符（工具轮过渡文本 / 停止生成）：已推送的字符在流的
-// 最尾部，先扣未显示的缓冲区，不足的部分再从消息正文尾部扣
-function dropStreamedRound() {
-  if (!streamMsg || !streamedLen) {
-    streamedLen = 0
-    return
-  }
-  const fromPending = Math.min(streamedLen, pendingText.value.length)
-  pendingText.value = pendingText.value.slice(
-    0,
-    pendingText.value.length - fromPending,
-  )
-  const rest = streamedLen - fromPending
-  if (rest > 0) {
-    streamMsg.content = streamMsg.content.slice(
-      0,
-      Math.max(0, streamMsg.content.length - rest),
-    )
-  }
-  streamedLen = 0
-}
-
-function startTypewriter() {
-  if (typewriterTimer || !streamMsg) return
-  let scrollCounter = 0
-  typewriterTimer = setInterval(() => {
-    if (!pendingText.value) {
-      flushTypewriter()
-      return
-    }
-    // 24ms 一帧，单帧最多 20 字符：
-    // - 稳态约 35~70 字符/秒，有清晰打字机观感；
-    // - 后端增量流式时积压持续增长，上限 20（≈800 字符/秒）保证打字机
-    //   不落后于生成速度，避免末尾一次性倾泻
-    const n = Math.max(1, Math.min(20, Math.round(pendingText.value.length / 10)))
-    streamMsg.content += pendingText.value.slice(0, n)
-    pendingText.value = pendingText.value.slice(n)
-    // 滚动节流：隔帧滚动一次，避免每 24ms 触发滚动导致底部抖动闪烁
-    scrollCounter = (scrollCounter + 1) % 2
-    if (scrollCounter === 0) scrollToBottom()
-  }, 24)
-}
 
 // 附加图片（粘贴 / 上传，随消息发送给后端做视觉识别）
 let imageSeq = 0
@@ -1319,14 +1059,6 @@ function toolName(name) {
   )
 }
 
-function toolIcon(name) {
-  if (name === 'web_search') return Position
-  if (name === 'image_to_text') return Picture
-  if (name === 'skill_lookup') return Reading
-  if (name && name.startsWith('mcp_')) return Connection
-  return Collection
-}
-
 function onMessagesScroll() {
   const el = messagesRef.value
   if (!el) return
@@ -1467,11 +1199,6 @@ function onPermissionKeydown(event) {
     event.preventDefault()
     questionInput.value?.focus()
   }
-}
-
-/** 任务项是否已完成：仅以模型/系统按进度标记的 done 为准，用户不可手改 */
-function todoDone(msg, t) {
-  return !!t.done
 }
 
 function isFailed(content) {
@@ -2082,166 +1809,38 @@ function focusPlanCard() {
 /**
  * 一轮问答/恢复流的事件处理器（send 与挂起恢复共用同一套渲染逻辑）。
  * 处理器通过模块级 streamMsg 写入目标助手消息：调用前先把它指到正确的气泡。
+ *
+ * 事件→状态 的映射本体已抽到 composables/useAgentStream.js（可单测，见
+ * scripts/check_stream_handlers.mjs）；这里只注入组件作用域的依赖：
+ * - state：只读的 ref/对象；
+ * - actions：组件副作用回调；
+ * - live：需要实时读写的组件级 let（值捕获会读到旧值）。
  */
 function buildStreamHandlers() {
-  return {
-    onSession: (data) => {
-      activeId.value = data.conversation_id
-      if (data.title) currentTitle.value = data.title
-      upsertSession(data)
+  return createStreamHandlers({
+    state: { activeId, currentTitle, currentTool, streamMsg, pendingText },
+    actions: {
+      closeThinkingSegment,
+      dropStreamedRound,
+      flushTypewriter,
+      focusPermissionCard,
+      focusPlanCard,
+      pushSuspendedCards,
+      scrollToBottom,
+      startTypewriter,
+      toolName,
+      upsertSession,
     },
-    onTitle: (data) => {
-      // 新会话标题是后台生成的，生成完成后推送到前端更新
-      if (data.title) {
-        currentTitle.value = data.title
-        upsertSession({ conversation_id: activeId.value, title: data.title })
-      }
+    live: {
+      getSkipNextToken: typewriter.getSkipNextToken,
+      setSkipNextToken: typewriter.setSkipNextToken,
+      getStreamedLen: typewriter.getStreamedLen,
+      setStreamedLen: typewriter.setStreamedLen,
+      setSuspended: (v) => {
+        suspended = v
+      },
     },
-    onReasoningDelta: (text) => {
-      // 原始思考链增量（仅展示）：按轮分段落进工具轨迹时间线
-      if (!text || !streamMsg) return
-      const trace = streamMsg.tool_trace
-      let seg = trace[trace.length - 1]
-      if (!seg || seg.kind !== 'thinking' || seg.done) {
-        seg = {
-          kind: 'thinking',
-          text: '',
-          done: false,
-          duration: 0,
-          _open: false,
-          _startedAt: Date.now(),
-        }
-        trace.push(seg)
-      }
-      seg.text += text
-      scrollToBottom()
-      nextTick(() => {
-        const els = document.querySelectorAll('.think-body.live')
-        const el = els[els.length - 1]
-        if (el) el.scrollTop = el.scrollHeight
-      })
-    },
-    onStatus: (data) => {
-      // 动态运行状态：准备中…/思考中…（tool_start 会覆盖为具体工具名）
-      if (data.text) {
-        currentTool.value = data.text
-        scrollToBottom()
-      }
-    },
-    onHook: (data) => {
-      // PreToolUse/PostToolUse 生命周期事件：拦截时给出明显提示
-      currentTool.value =
-        data.decision === 'deny'
-          ? `Hook 拦截：${data.name}`
-          : `Hook 触发：${data.name}`
-      scrollToBottom()
-    },
-    onPlanProgress: (data) => {
-      // 计划按当前进度展示：已完成/进行中/未开始
-      streamMsg.planDone = data.done || 0
-      streamMsg.planTotal =
-        data.total != null ? data.total : streamMsg.plan.length
-      streamMsg.planCurrent = data.current || null
-      scrollToBottom()
-    },
-    onToolStart: (data) => {
-      closeThinkingSegment()
-      currentTool.value = `${toolName(data.name)}…`
-      streamMsg.tool_trace.push({
-        name: data.name,
-        arguments: data.arguments,
-        summary: '',
-      })
-      scrollToBottom()
-    },
-    onPlan: (data) => {
-      streamMsg.plan = data.steps || []
-      streamMsg.planTotal = streamMsg.plan.length
-      scrollToBottom()
-    },
-    onTodos: (data) => {
-      // TodoWrite 任务清单：规划后随 SSE 推送，可勾选跟踪
-      streamMsg.todos = data.todos || []
-      scrollToBottom()
-    },
-    onVision: () => {
-      currentTool.value = '识别图片中…'
-    },
-    onToolResult: (data) => {
-      // 工具完成后保持反馈连续，衔接下一轮思考（避免状态条闪空）
-      currentTool.value = '继续思考…'
-      const trace = streamMsg.tool_trace.find((t) => t.name === data.name && !t.summary)
-      if (trace) {
-        trace.summary = data.summary
-        // 完整输出（截断版）：工具卡可展开查看
-        if (data.detail) trace.detail = data.detail
-      }
-      if (data.sources && data.sources.length) {
-        streamMsg.sources.push(...data.sources)
-      }
-      scrollToBottom()
-    },
-    onSuspended: (data) => {
-      // 原生挂起（interrupt）：本条流即将结束；渲染整批卡片/计划卡，收齐决定后一次提交
-      closeThinkingSegment()
-      currentTool.value = '等待人工确认…'
-      suspended = {
-        conversationId: data.conversation_id || activeId.value,
-        msg: streamMsg,
-        submitted: false,
-        planPending: false,
-      }
-      pushSuspendedCards(streamMsg, data.ops)
-      if (data.plan && (data.plan.steps || []).length) {
-        suspended.planPending = true
-        streamMsg.planApproval = {
-          text: (data.plan.steps || []).map((s) => String(s)).join('\n'),
-          steps: (data.plan.steps || []).map((s) => String(s)),
-          summary: data.plan.summary || '',
-          state: 'pending',
-          _suspended: true,
-        }
-        focusPlanCard()
-      } else {
-        focusPermissionCard()
-      }
-      scrollToBottom()
-    },
-    onStreamDelta: (text) => {
-      closeThinkingSegment() // 文本开始输出：本轮思考结束（含工具轮过渡文本）
-      pendingText.value += text
-      streamedLen += text.length
-      startTypewriter()
-    },
-    onStreamEnd: (data) => {
-      if (data && data.keep) {
-        // 正文：已增量显示，后端随后还会发同一段全文 token（供 CLI/评测），
-        // 这里标记跳过，避免同一段文字被追加两次
-        skipNextToken = true
-      } else {
-        // 工具轮过渡文本：整轮撤回
-        dropStreamedRound()
-      }
-    },
-    onToken: (token) => {
-      if (skipNextToken) {
-        skipNextToken = false
-        return
-      }
-      pendingText.value += token
-      startTypewriter()
-    },
-    onDone: () => {
-      closeThinkingSegment()
-      currentTool.value = ''
-      flushTypewriter()
-      streamMsg._streaming = false // 流式结束：切换到完整 Markdown 渲染
-      nextTick(() => scrollToBottom(true)) // 渲染切换后重新对齐底部，避免跳动
-      if (!streamMsg.content) {
-        streamMsg.content = '（未生成回答内容）'
-      }
-    },
-  }
+  })
 }
 
 /** 把挂起的待审批项渲染成卡片（挂起事件与刷新恢复共用同一形态） */
@@ -2498,9 +2097,7 @@ async function send(options = {}) {
   messages.value.push(assistantMsg)
   // 用响应式代理引用消息：typewriter 每帧增量更新 content 时能触发渲染
   streamMsg = messages.value[messages.value.length - 1]
-  pendingText.value = ''
-  streamedLen = 0
-  skipNextToken = false
+  typewriter.resetRound()
   question.value = ''
   // 发送成功：清空该会话草稿（内容已发出）
   drafts.value[currentDraftKey()] = ''
@@ -2640,13 +2237,18 @@ onMounted(() => {
   loadSessions()
   loadTemplates()
   loadSuggestions()
+  loadQuickProviders()
   // 窄屏（<1024）默认收起会话栏（抽屉模式，见样式媒体查询）
   if (window.innerWidth < 1024) sessionCollapsed.value = true
   window.addEventListener('keydown', onPermissionKeydown, true)
 })
 
+// keep-alive 回到本页时刷新供应商列表（设置页可能改过启用/名称）
+onActivated(loadQuickProviders)
+
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onPermissionKeydown, true)
+  typewriter.dispose() // 停掉打字机定时器，避免回调打到已卸载组件上
 })
 </script>
 
@@ -2655,147 +2257,6 @@ onBeforeUnmount(() => {
   height: calc(100vh - 32px);
   display: flex;
   gap: 16px;
-}
-
-/* ============ 会话侧栏 ============ */
-.session-panel {
-  width: 248px;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-panel);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  overflow: hidden;
-  transition: width 0.25s ease;
-}
-
-.session-panel.collapsed {
-  width: 56px;
-}
-
-.session-head {
-  padding: 14px;
-  flex-shrink: 0;
-}
-
-.new-chat-btn {
-  width: 100%;
-  border-radius: var(--radius-md);
-  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-2) 100%);
-  border: none;
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--primary) 25%, transparent);
-}
-
-.session-panel.collapsed .session-head {
-  display: flex;
-  justify-content: center;
-  padding: 14px 0;
-}
-
-.session-empty {
-  color: var(--text-3);
-  font-size: var(--font-sm);
-  text-align: center;
-  padding: 32px 0;
-}
-
-.session-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0 10px 10px;
-}
-
-.session-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  margin-bottom: 2px;
-  transition: background 0.2s;
-}
-
-.session-item:hover {
-  background: var(--bg-hover);
-}
-
-.session-item.active {
-  background: var(--bg-active);
-}
-
-.session-info {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  flex: 1;
-}
-
-.session-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--font-base);
-  color: var(--text-1);
-}
-
-.session-item.active .session-title {
-  color: var(--primary);
-  font-weight: 600;
-}
-
-.session-count {
-  flex-shrink: 0;
-  font-size: var(--font-2xs);
-  color: var(--text-3);
-  background: var(--bg-card-2);
-  border-radius: var(--radius-sm);
-  padding: 1px 6px;
-}
-
-.session-actions {
-  display: none;
-  gap: 6px;
-  color: var(--text-3);
-}
-
-.session-item:hover .session-actions {
-  display: flex;
-}
-
-.session-actions .el-icon {
-  cursor: pointer;
-}
-
-.session-actions .el-icon:hover {
-  color: var(--primary);
-}
-
-.session-foot {
-  display: flex;
-  justify-content: center;
-  padding: 10px 0;
-  border-top: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.panel-toggle {
-  width: 34px;
-  height: 34px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-md);
-  color: var(--text-3);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.panel-toggle:hover {
-  background: var(--bg-hover);
-  color: var(--primary);
 }
 
 /* ============ 对话主区 ============ */
@@ -2854,6 +2315,39 @@ onBeforeUnmount(() => {
 .header-toggle:hover {
   background: var(--bg-hover);
   color: var(--primary);
+}
+
+/* 供应商快捷切换 chip：当前「供应商 · 模型」，点击展开下拉 */
+.model-switch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 300px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  font-size: var(--font-xs);
+  color: var(--text-1);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.model-switch-chip:hover {
+  border-color: var(--primary);
+  color: var(--primary-text);
+}
+
+.model-switch-chip.busy {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.model-switch-model {
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-title {
@@ -3163,183 +2657,6 @@ onBeforeUnmount(() => {
   box-shadow: var(--shadow-soft);
 }
 
-/* 执行计划 */
-.plan-box {
-  margin-bottom: 8px;
-  padding: 10px 14px;
-  border-radius: var(--radius-md);
-  background: var(--plan-bg);
-  border: 1px solid var(--plan-border);
-}
-
-/* 计划审批卡：模型提交计划后等用户确认，可编辑步骤再执行 */
-.plan-approval-box {
-  margin-bottom: 8px;
-  padding: 10px 14px;
-  border-radius: var(--radius-md);
-  background: var(--plan-bg);
-  border: 1px solid var(--primary);
-}
-
-.plan-approval-summary {
-  font-size: var(--font-sm);
-  color: var(--text-2);
-  margin-bottom: 6px;
-}
-
-.plan-approval-input {
-  margin-bottom: 4px;
-}
-
-.plan-approval-input :deep(.el-textarea__inner) {
-  font-size: var(--font-sm);
-  line-height: 1.7;
-  font-family: inherit;
-}
-
-.plan-approval-hint {
-  font-size: var(--font-xs);
-  color: var(--text-3, var(--text-2));
-  margin-bottom: 8px;
-}
-
-.plan-approval-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.plan-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--font-sm);
-  font-weight: 600;
-  color: var(--primary);
-  margin-bottom: 6px;
-}
-
-.plan-progress {
-  margin-left: auto;
-  font-size: var(--font-2xs);
-
-  font-weight: 500;
-  color: var(--text-3);
-  background: var(--bg-hover);
-  border-radius: var(--radius-pill);
-  padding: 1px 8px;
-}
-
-.plan-steps {
-  margin: 0;
-  padding-left: 20px;
-}
-
-.plan-step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--font-sm);
-  color: var(--text-2);
-  line-height: 1.8;
-  list-style: none;
-}
-
-.plan-step-icon {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  font-size: var(--font-2xs);
-  color: var(--text-3);
-  background: var(--bg-hover);
-}
-
-.plan-step.done .plan-step-icon {
-  color: var(--text-on-brand);
-  background: var(--success);
-}
-
-.plan-step.done .plan-step-text {
-  color: var(--text-3);
-  text-decoration: line-through;
-}
-
-.plan-step.running .plan-step-icon {
-  background: var(--bg-active);
-  color: var(--primary);
-}
-
-.plan-step.running .plan-step-text {
-  color: var(--primary);
-  font-weight: 600;
-}
-
-.plan-step-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--primary);
-  animation: pulse-dot 1s infinite;
-}
-
-@keyframes pulse-dot {
-  0%,
-  100% {
-    opacity: 0.35;
-    transform: scale(0.8);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.15);
-  }
-}
-
-/* 思考链时间线（原始思考，仅展示；设置页开关控制，默认关闭） */
-.think-block {
-  margin: 4px 0;
-}
-
-.think-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 0;
-  font-size: var(--font-sm);
-  color: var(--text-3);
-  cursor: pointer;
-  user-select: none;
-}
-
-.think-head .arrow {
-  margin-left: auto;
-  transition: transform 0.2s;
-}
-
-.think-head .arrow.open {
-  transform: rotate(180deg);
-}
-
-.think-body {
-  margin: 4px 0 8px 19px;
-  padding: 8px 12px;
-  border-left: 2px solid var(--plan-border);
-  border-radius: 0 var(--radius-md) var(--radius-md) 0;
-  background: var(--plan-bg);
-  color: var(--text-2);
-  font-size: 12.5px;
-  line-height: 1.7;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.think-body.live {
-  max-height: 132px;
-  overflow-y: auto;
-}
-
 .status-time {
   color: var(--text-3);
   font-weight: 400;
@@ -3436,91 +2753,7 @@ onBeforeUnmount(() => {
   }
 }
 
-/* 工具轨迹 */
-.tool-trace {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.tool-item {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.tool-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
-  border-radius: var(--radius-pill);
-  background: var(--bg-card-2);
-  border: 1px solid var(--border);
-  color: var(--text-2);
-  font-size: var(--font-xs);
-}
-
-.tool-chip.expandable {
-  cursor: pointer;
-}
-
-.tool-chip.expandable:hover {
-  border-color: var(--primary);
-}
-
-.tool-expand-icon {
-  color: var(--text-3);
-  transition: transform 0.15s;
-}
-
-.tool-expand-icon :deep(.open),
-.tool-expand-icon.open {
-  transform: rotate(180deg);
-}
-
-.tool-detail {
-  margin: 4px 0 0;
-  padding: 8px 10px;
-  max-width: 560px;
-  max-height: 260px;
-  overflow: auto;
-  border-radius: var(--radius-sm);
-  background: var(--bg-card-2);
-  border: 1px dashed var(--border);
-  font-size: var(--font-xs);
-  line-height: 1.55;
-  color: var(--text-3);
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.tool-chip .el-icon {
-  color: var(--primary);
-}
-
-.tool-name {
-  font-weight: 600;
-}
-
-.tool-summary {
-  color: var(--text-3);
-  max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 人工确认（HITL）审批卡片 */
-.permission-box {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-/* 原生挂起：等全部卡片决定后自动继续；也可一键全拒收尾 */
+/* 挂起条基样式：供「中断未跑完」条复用（审批卡内的一份随 PermissionCard 组件走） */
 .suspension-bar {
   display: flex;
   align-items: center;
@@ -3588,440 +2821,6 @@ onBeforeUnmount(() => {
   display: inline-flex;
   gap: 6px;
   flex-shrink: 0;
-}
-
-.permission-card {
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  background: var(--bg-card-2);
-  overflow: hidden;
-}
-
-.permission-card.pending {
-  border-color: var(--warning);
-  box-shadow: 0 0 0 1px var(--warning-bg) inset;
-}
-
-.permission-card.approved {
-  border-color: var(--el-color-success-light-5);
-  opacity: 0.85;
-}
-
-.permission-card.denied {
-  border-color: var(--danger-border);
-  opacity: 0.85;
-}
-
-.permission-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  font-size: var(--font-sm);
-  font-weight: 600;
-  color: var(--text-2);
-  background: var(--bg-card-3, rgba(128, 128, 128, 0.08));
-  border-bottom: 1px solid var(--border);
-}
-
-.permission-head .el-icon {
-  color: var(--warning-text);
-}
-
-.permission-card.approved .permission-head .el-icon {
-  color: var(--success-text);
-}
-
-.permission-card.denied .permission-head .el-icon {
-  color: var(--danger-text);
-}
-
-.permission-title {
-  color: var(--text-1);
-}
-
-.permission-tool {
-  margin-left: auto;
-  padding: 1px 8px;
-  border-radius: var(--radius-pill);
-  background: var(--bg-card-2);
-  border: 1px solid var(--border);
-  color: var(--text-3);
-  font-size: var(--font-2xs);
-  font-weight: 400;
-}
-
-.permission-body {
-  padding: 10px 12px 4px;
-}
-
-.permission-summary {
-  font-size: var(--font-sm);
-  font-weight: 600;
-  color: var(--text-1);
-  line-height: 1.5;
-}
-
-.permission-args {
-  margin: 8px 0 0;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-card-3, rgba(128, 128, 128, 0.07));
-  border: 1px solid var(--border);
-  font-family: 'Cascadia Code', Consolas, monospace;
-  font-size: var(--font-xs);
-  line-height: 1.5;
-  color: var(--text-2);
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 180px;
-  overflow: auto;
-}
-
-/* 编辑类审批的变更预览（红删绿增） */
-.perm-diff {
-  margin-top: 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  max-height: 300px;
-  overflow-y: auto;
-}
-
-.perm-diff-head {
-  padding: 4px 10px;
-  font-size: var(--font-2xs);
-  color: var(--text-3);
-  background: var(--bg-card-3, rgba(128, 128, 128, 0.07));
-  border-bottom: 1px solid var(--border);
-}
-
-.perm-diff-line {
-  display: flex;
-  gap: 8px;
-  padding: 6px 10px;
-  font-family: 'Cascadia Code', Consolas, monospace;
-  font-size: var(--font-xs);
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.perm-diff-line.del {
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
-  color: var(--danger-text);
-}
-
-.perm-diff-line.add {
-  background: color-mix(in srgb, var(--success) 10%, transparent);
-  color: var(--success-text);
-}
-
-.perm-diff-sign {
-  flex-shrink: 0;
-  font-weight: 700;
-}
-
-.permission-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px 10px;
-}
-
-.permission-reason {
-  flex: 1;
-}
-
-/* 审批选项卡：数字键选择 / 方向键移动 / Enter 确认 / Esc 返回输入 */
-.permission-opts {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  outline: none;
-}
-
-.perm-opt {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-card-2);
-  color: var(--text-2);
-  font-size: var(--font-sm);
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.perm-opt .perm-num {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: var(--radius-xs);
-  background: var(--bg-hover);
-  font-size: var(--font-2xs);
-  font-weight: 700;
-  color: var(--text-3);
-}
-
-.perm-opt.primary {
-  border-color: var(--el-color-primary-light-5);
-  color: var(--primary);
-}
-
-.perm-opt.danger {
-  border-color: var(--danger-border);
-  color: var(--danger-text);
-}
-
-.perm-opt:hover,
-.perm-opt.active {
-  border-color: var(--primary);
-  background: var(--bg-active);
-  box-shadow: 0 0 0 2px var(--bg-active);
-}
-
-.perm-opt.active .perm-num {
-  background: var(--primary);
-  color: var(--text-on-brand);
-}
-
-.perm-key-hint {
-  font-size: var(--font-2xs);
-  color: var(--text-3);
-  white-space: nowrap;
-}
-
-/* 审批处理后的紧凑状态条 */
-.permission-resolved-chip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 8px;
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-card-2);
-  font-size: var(--font-xs);
-  color: var(--text-2);
-}
-
-.permission-resolved-chip.approved {
-  border-color: var(--el-color-success-light-7);
-}
-
-.permission-resolved-chip.approved > .el-icon {
-  color: var(--success-text);
-}
-
-.permission-resolved-chip.denied {
-  border-color: var(--danger-border);
-}
-
-.permission-resolved-chip.denied > .el-icon {
-  color: var(--danger-text);
-}
-
-.prc-label {
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
-.prc-tool {
-  padding: 0 7px;
-  border-radius: var(--radius-pill);
-  background: var(--bg-hover);
-  color: var(--text-3);
-  font-size: var(--font-2xs);
-  flex-shrink: 0;
-}
-
-.prc-summary {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-3);
-}
-
-.prc-reason {
-  color: var(--text-3);
-  flex-shrink: 0;
-}
-
-/* TodoWrite 任务清单 */
-.plan-todos {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 10px 10px;
-}
-
-.plan-todo {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  padding: 5px 8px;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-sm);
-  color: var(--text-1);
-}
-
-.plan-todo.done {
-  color: var(--text-3);
-  text-decoration: line-through;
-}
-
-.plan-todo-check {
-  color: var(--success-text);
-  margin-top: 2px;
-}
-
-.plan-todo-box {
-  width: 13px;
-  height: 13px;
-  margin-top: 2px;
-  border-radius: var(--radius-xs);
-  border: 1.5px solid var(--border-strong);
-  flex-shrink: 0;
-}
-
-.plan-todo-text {
-  line-height: 1.5;
-  word-break: break-word;
-}
-
-/* 引用来源 */
-.sources {
-  margin-top: 8px;
-  border-radius: var(--radius-md);
-  background: var(--bg-card-2);
-  border: 1px solid var(--border);
-  overflow: hidden;
-}
-
-.sources-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 9px 14px;
-  font-size: var(--font-sm);
-  color: var(--text-2);
-  cursor: pointer;
-  user-select: none;
-}
-
-.sources-head .el-icon:first-child {
-  color: var(--primary);
-}
-
-.sources-head .arrow {
-  margin-left: auto;
-  color: var(--text-3);
-  transition: transform 0.2s;
-}
-
-.sources-head .arrow.open {
-  transform: rotate(180deg);
-}
-
-.sources-body {
-  padding: 0 14px 10px;
-}
-
-.source-item {
-  padding: 10px 0;
-  border-top: 1px dashed var(--border);
-}
-
-.source-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-3);
-  font-size: var(--font-xs);
-  margin-bottom: 5px;
-  flex-wrap: wrap;
-}
-
-.source-score {
-  color: var(--primary);
-  background: var(--bg-active);
-  padding: 1px 8px;
-  border-radius: var(--radius-sm);
-}
-
-.source-tag {
-  color: var(--text-2);
-  background: var(--bg-hover);
-  padding: 1px 8px;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-2xs);
-}
-
-.source-tag.web {
-  color: var(--web-tag-text);
-  background: var(--web-tag-bg);
-}
-
-.source-title {
-  font-weight: 600;
-  color: var(--text-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: min(420px, 100%);
-}
-
-.source-link {
-  display: inline-block;
-  margin-top: 6px;
-  font-size: var(--font-sm);
-  color: var(--primary);
-  text-decoration: none;
-}
-
-.source-link:hover {
-  text-decoration: underline;
-}
-
-.source-no {
-  width: 20px;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  background: var(--primary);
-  color: var(--text-on-brand);
-  font-size: var(--font-2xs);
-  font-weight: 600;
-}
-
-.source-item.flash {
-  animation: flash-bg 1.6s ease;
-}
-
-@keyframes flash-bg {
-  0%,
-  40% {
-    background: var(--bg-active);
-    border-radius: var(--radius-sm);
-  }
-  100% {
-    background: transparent;
-  }
-}
-
-.source-content {
-  font-size: var(--font-sm);
-  color: var(--text-2);
-  line-height: 1.7;
-  max-height: 130px;
-  overflow-y: auto;
 }
 
 /* ============ 输入区 ============ */
@@ -4384,23 +3183,7 @@ onBeforeUnmount(() => {
 }
 
 /* ============ 响应式（阶段4） ============ */
-@media (max-width: 1440px) {
-  .session-panel {
-    width: 208px;
-  }
-}
-
 @media (max-width: 1024px) {
-  /* 会话栏改抽屉：展开时浮层覆盖，收起时保持 56px 竖条 */
-  .session-panel:not(.collapsed) {
-    position: fixed;
-    left: 12px;
-    top: 12px;
-    bottom: 12px;
-    z-index: var(--z-overlay);
-    width: 258px;
-    box-shadow: var(--shadow-modal);
-  }
 
   .chat-header {
     overflow-x: auto;

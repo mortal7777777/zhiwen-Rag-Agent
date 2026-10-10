@@ -204,7 +204,25 @@
 <script setup>
 import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import * as echarts from 'echarts'
+// echarts 按需引入（只用到 bar/line + 坐标轴/图例/提示框/Canvas 渲染器）：
+// 全量引入会把 RunsView 的 chunk 推到 1.1MB+，按需后约 300KB
+import * as echarts from 'echarts/core'
+import { BarChart, LineChart } from 'echarts/charts'
+import {
+  GridComponent,
+  LegendComponent,
+  TooltipComponent,
+} from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+
+echarts.use([
+  BarChart,
+  LineChart,
+  GridComponent,
+  LegendComponent,
+  TooltipComponent,
+  CanvasRenderer,
+])
 import { getRunTrace, getRunStats, listConversations, listRuns } from '../api'
 
 defineOptions({ name: 'RunsView' })

@@ -660,12 +660,11 @@ def make_bash_tool(
         name="bash",
         description=(
             "在工作目录内执行 shell 命令（Python/Node/Git 等），带超时与输出截断。"
-            "用于运行脚本、跑测试、查看目录、执行简单工具。"
-            "环境是 Git Bash（Unix 语法）：grep/find/sed/ls 均可用，路径用正斜杠"
-            "（C:/Users/... 或 /c/Users/...），空设备写 /dev/null 而不是 NUL，"
+            "环境是 Git Bash：路径用正斜杠（C:/Users/... 或 /c/Users/...），"
+            "空设备写 /dev/null 而不是 NUL，"
             "不要用 cd /d 这类 cmd 语法。多行脚本先写入文件再执行，"
-            "避免 python -c 的引号转义坑。敏感操作：默认每次执行都会请求用户确认；"
-            "命中命令白名单的会自动放行。"
+            "避免 python -c 的引号转义坑。敏感操作：默认每次请求用户确认；"
+            "命中命令白名单的自动放行。"
         ),
         args_schema=None,
     )

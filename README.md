@@ -491,7 +491,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-当前 308 个用例覆盖：编排（声明式派发解析/路由/上限、merge 回填 ToolMessage、
+当前 434 个用例覆盖：编排（声明式派发解析/路由/上限、merge 回填 ToolMessage、
 计划模式进入与结构化提交、工具轮链序不变量）、健壮性（空正文重试、流式看门狗、
 tool_trace 截断、bash 后台进程不挂死）、供应商兼容（Anthropic 思考块回传）、
 任务清单（播种/同步/跨轮刷新/模糊完成/修订/进度）、文件工具安全边界与命令白名单、
@@ -501,6 +501,19 @@ hooks 门禁、用户工具加载、run_verify 写后验证等。测试不依赖
 
 提交前自动跑测试：已安装 pre-commit 钩子（`scripts/install-git-hooks.ps1`），
 `git commit` 前会自动执行 pytest，失败则阻止提交（`--no-verify` 可跳过）。
+
+CI（`.github/workflows/ci.yml`）：push / PR 自动跑全量 pytest（3.11 + 3.12，lite 依赖，
+不需要 GPU / MySQL / 外网）、前端 `npm ci && npm run build`、裸 hex 与对比度守门。
+钩子只做本地提前反馈（找不到解释器时告警放行），**CI 才是唯一权威**。
+
+另有三个守门脚本（CI 与 pre-commit 都跑，防止约定漂移）：
+`scripts/check_frontend_hex.py`（前端裸 hex 基线）、
+`scripts/check_effective_default.py`（配置读取不得忽略环境变量）、
+`scripts/check_sse_protocol.py`（后端 SSE 事件必须在前端有处理分支）。
+
+前端另有三组 Node 单测（`cd frontend && npm run check`，无浏览器/后端依赖）：
+`check_stream_handlers.mjs`（SSE 事件→状态映射）、`check_typewriter.mjs`
+（打字机/增量流状态机）、`check_api_sse.mjs`（api 导出面快照 + SSE 帧解析与错误处理）。
 
 ## 评测
 
@@ -531,7 +544,7 @@ hooks 门禁、用户工具加载、run_verify 写后验证等。测试不依赖
 | `TAVILY_API_KEY` | 空 | 使用 Tavily 时填写 |
 | `WEB_SEARCH_MAX_RESULTS` | `6` | 单次联网搜索结果条数 |
 | `SEARXNG_BASE_URL` / `SEARXNG_ENGINES` | `http://localhost:8888` / 空 | 自托管 SearXNG 地址 / 指定引擎（如 bing,baidu,sogou） |
-| `AGENT_MAX_ITERATIONS` | `12` | 工具调用循环上限（参考 Claude Code 单轮约 10 次） |
+| `AGENT_MAX_ITERATIONS` | `20` | 工具调用循环上限（参考 Claude Code 单轮约 10 次） |
 | `AGENT_TASK_MAX_ITERATIONS` | `50` | 项目级任务（task_mode）的工具调用上限 |
 | `AGENT_TASK_MAX_FAILURES` | `6` | 项目级任务的连续失败上限 |
 | `TASK_MODE_DETECT` | `1` | 自动识别项目级任务并使用独立预算 |
@@ -585,15 +598,14 @@ hooks 门禁、用户工具加载、run_verify 写后验证等。测试不依赖
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | 健康检查 |
+| GET | `/api/settings/schema` | 可调项元数据（类型/区间/枚举/分组/展示名；设置页表单与校验用） |
 | POST | `/api/agent/chat` | Agent 问答（JSON：question / conversation_id / tool_mode / template_id / images） |
-| POST | `/api/agent/stream` | Agent 流式问答（SSE：session / plan / plan_progress / plan_approval / vision / tool_start / tool_result / run_suspended / token / title / done / error；空闲 15s 发 `: keepalive`） |
+| POST | `/api/agent/stream` | Agent 流式问答（SSE：session / status / plan / plan_progress / todos / reasoning_delta / vision / tool_start / tool_result / hook / run_suspended / permission_resolved / stream_delta / stream_end / token / title / done / error；空闲 15s 发 `: keepalive`） |
 | POST | `/api/agent/resume` | 恢复挂起的运行（提交审批决定），返回新 SSE 流续跑同一条回答 |
 | POST | `/api/agent/continue/{conversation_id}` | 续跑被中断的运行（进程被杀/异常退出留下的未完成任务） |
 | POST | `/api/agent/abandon/{conversation_id}` | 丢弃未完成的运行（删除该会话的原生检查点线程） |
 | GET | `/api/agent/pending/{conversation_id}` | 该会话挂起中的审批载荷（刷新/切换会话后恢复审批卡） |
 | GET | `/api/fs/browse` | 列出某路径下的子目录（设置页目录选择器用；仅本机可访问、只返回目录名） |
-| POST | `/api/agent/permission/{id}/resolve` | 人工确认：批准/拒绝敏感操作（写文件/编辑/删除/执行命令） |
-| GET | `/api/agent/permissions` | 当前待人工确认的审批请求列表 |
 | GET/PUT | `/api/todos/{conversation_id}` | 读取 / 保存某会话的 TodoWrite 任务清单 |
 | GET/POST | `/api/conversations` | 会话列表 / 新建 |
 | PATCH/DELETE | `/api/conversations/{id}` | 重命名 / 删除会话 |
@@ -626,6 +638,12 @@ hooks 门禁、用户工具加载、run_verify 写后验证等。测试不依赖
 
 - **版本保护**：项目已初始化 git（仓库根 = `rag_knowledge_base/`），
   运行数据（`data/`、`opensearch_meta/`、日志）已加入 `.gitignore` 不入库；
+- **单实例契约**：同一 `META_DIR` 只允许一个后端进程——启动时取 OS 文件锁
+  （`opensearch_meta/backend.lock`），拿不到直接拒绝启动，进程退出/崩溃时由内核
+  自动释放（不会残留死锁）。原因：会话并发闸门、审批超时 watchdog、挂起用量
+  快照都在进程内存，多开共享同一 meta_dir 会静默破坏"挂起期间拒绝新消息 /
+  审批超时自动拒绝"的语义。要跑第二份实例请用**不同的 `META_DIR`**
+  （检查点随之独立）；`GET /api/health` 的 `instance_lock` 字段可查持锁状态；
 - **提示词模板**：预设模板已按 Claude Code 风格重写（角色/原则/流程/安全边界），
   含“学习助手”模板；后端启动时自动同步到数据库（系统模板只读，用户模板不受影响）；
 - **MySQL 直启**：`python run.py` 会读取 gitignore 的 `backend/.env.local`

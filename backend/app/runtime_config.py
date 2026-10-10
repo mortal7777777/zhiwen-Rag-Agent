@@ -15,15 +15,177 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# 允许用户在设置页修改的键
-EDITABLE_KEYS = {
+# ============================================================
+# 可调项声明表（单一来源，2026-10-08）
+# ------------------------------------------------------------
+# 这里是"设置页能改什么"的唯一事实来源：
+#   * EDITABLE_KEYS / 数值区间 / 布尔键 / 枚举取值 全部由 _SPECS 派生；
+#   * GET /api/settings/schema 直接把 _SPECS 的元数据吐给前端（可据此渲染表单）；
+#   * 新增一个可调项 = 在 _SPECS（或 _PLAIN_KEYS）里加一行 + 在读点用
+#     effective()/effective_or() 读——不再需要"三处同步"。
+# 改动守则：本表的键集合有测试快照（tests/test_runtime_config_specs.py），
+# 少一个键 = 该设置项静默不可改，测试会拦住。
+# ============================================================
+
+
+@dataclass(frozen=True)
+class FieldSpec:
+    """一个可调项的声明：类型 + 兜底值 + 合法区间/枚举 + 展示元数据。
+
+    kind: int | float | bool | enum —— 决定保存时怎么清洗（越界夹取、
+    非数值跳过、枚举非法跳过；坏值不拖垮整批保存）。
+    default 仅用于展示与 schema（运行期读取一律走 effective/effective_or，
+    避免出现"默认值"与"读点"两个真相）。
+    """
+
+    kind: str
+    default: object = None
+    lo: float | None = None
+    hi: float | None = None
+    choices: tuple[str, ...] = ()
+    label: str = ""
+    group: str = "other"
+
+
+_SPECS: dict[str, FieldSpec] = {
+    # ---- Agent 预算与循环 ----
+    "agent_max_iterations": FieldSpec(
+        "int", 20, 1, 200, label="工具调用上限（普通轮次）", group="agent"
+    ),
+    "agent_max_failures": FieldSpec(
+        "int", 3, 1, 50, label="连续失败上限（普通轮次）", group="agent"
+    ),
+    "agent_task_max_iterations": FieldSpec(
+        "int", 50, 1, 500, label="工具调用上限（项目任务）", group="agent"
+    ),
+    "agent_task_max_failures": FieldSpec(
+        "int", 6, 1, 100, label="连续失败上限（项目任务）", group="agent"
+    ),
+    "agent_max_dispatch_rounds": FieldSpec(
+        "int", 3, 1, 10, label="单轮最多派发轮数", group="agent"
+    ),
+    "agent_subagent_max_rounds": FieldSpec(
+        "int", 2, 1, 20, label="research 子代理最多 LLM 轮数", group="agent"
+    ),
+    "agent_llm_stall_timeout_s": FieldSpec(
+        "float", 150.0, 10.0, 1800.0, label="流式卡死看门狗（秒）", group="agent"
+    ),
+    "task_mode_detect": FieldSpec(
+        "bool", True, label="任务态自动识别", group="agent"
+    ),
+    "agent_subagents_enabled": FieldSpec(
+        "bool", True, label="子代理并行", group="agent"
+    ),
+    "plan_mode_allowed": FieldSpec(
+        "bool", True, label="计划模式", group="agent"
+    ),
+    "reasoning_summary_enabled": FieldSpec(
+        "bool", False, label="展示思考过程", group="agent"
+    ),
+    "chat_temperature": FieldSpec(
+        "float", 0.5, 0.0, 2.0, label="回答温度", group="model"
+    ),
+    # ---- 检索与上下文 ----
+    "kb_chat_min_score": FieldSpec(
+        "float", 0.2, 0.0, 1.0, label="知识库相关度门槛", group="retrieval"
+    ),
+    "crag_fallback_enabled": FieldSpec(
+        "bool", True, label="知识库不足时补联网", group="retrieval"
+    ),
+    "crag_min_score": FieldSpec(
+        "float", 0.45, 0.0, 1.0, label="CRAG 触发阈值", group="retrieval"
+    ),
+    "history_max_messages": FieldSpec(
+        "int", 400, 8, 500, label="历史窗口条数", group="context"
+    ),
+    "history_max_tokens": FieldSpec(
+        "int", 64000, 1000, 200000, label="历史 token 预算", group="context"
+    ),
+    "vision_max_images": FieldSpec(
+        "int", 6, 1, 10, label="单次最多识图数", group="context"
+    ),
+    "checkpoint_keep_per_thread": FieldSpec(
+        "int", 20, 5, 200, label="每线程保留快照数", group="context"
+    ),
+    # ---- 记忆 ----
+    "memory_auto_extract_min_chars": FieldSpec(
+        "int", 400, 50, 5000, label="自动提取记忆的最小回答字数", group="memory"
+    ),
+    "memory_consolidate_threshold": FieldSpec(
+        "int", 10, 2, 500, label="记忆整合触发条数", group="memory"
+    ),
+    "memory_consolidate_interval_hours": FieldSpec(
+        "int", 24, 1, 720, label="记忆整合间隔（小时）", group="memory"
+    ),
+    "project_memory_max_chars": FieldSpec(
+        "int", 2600, 500, 20000, label="项目记忆注入上限（字符）", group="memory"
+    ),
+    "trajectory_compress_enabled": FieldSpec(
+        "bool", True, label="长任务轨迹摘要", group="memory"
+    ),
+    # ---- 技能与工具 ----
+    "skills_enabled": FieldSpec(
+        "bool", True, label="技能总开关", group="skills"
+    ),
+    "advanced_tools_enabled": FieldSpec(
+        "bool", True, label="受控执行工具（文件/命令）", group="tools"
+    ),
+    "mcp_enabled": FieldSpec("bool", True, label="MCP 工具接入", group="tools"),
+    "skill_sandbox_enabled": FieldSpec(
+        "bool", False, label="技能沙箱执行", group="tools"
+    ),
+    "sandbox_workspace_readonly": FieldSpec(
+        "bool", False, label="沙箱内工作目录只读", group="tools"
+    ),
+    "command_timeout": FieldSpec(
+        "int", 60, 5, 300, label="命令执行超时（秒）", group="tools"
+    ),
+    "verify_max_retries": FieldSpec(
+        "int", 1, 0, 5, label="写后验证重试次数", group="tools"
+    ),
+    "verify_auto_detect": FieldSpec(
+        "bool", True, label="按文件类型自动选验证命令", group="tools"
+    ),
+    # ---- 审批 ----
+    "tool_permission_mode": FieldSpec(
+        "enum", "ask", choices=("ask", "allow"), label="敏感操作确认模式", group="permission"
+    ),
+    "permission_timeout": FieldSpec(
+        "int", 0, 30, 3600, label="确认超时（秒，0=无限等待）", group="permission"
+    ),
+    "command_sandbox": FieldSpec(
+        "enum", "subprocess", choices=("subprocess", "docker"), label="命令执行环境", group="permission"
+    ),
+    # ---- 联网搜索 ----
+    "web_search_provider": FieldSpec(
+        "enum",
+        "duckduckgo",
+        choices=("duckduckgo", "searxng", "tavily", "off"),
+        label="搜索供应商",
+        group="web",
+    ),
+    "web_search_max_results": FieldSpec(
+        "int", 6, 1, 20, label="单次搜索结果条数", group="web"
+    ),
+    # ---- 视觉 ----
+    "main_model_vision": FieldSpec(
+        "bool", False, label="主模型原生支持视觉", group="vision"
+    ),
+}
+
+# 可调项的历史全集（键集合有测试快照锁住；类型化键已迁到上面的 _SPECS，
+# 由下面的 _PLAIN_KEYS 扣除，保证 EDITABLE_KEYS 与历史完全一致）
+_EDITABLE_LEGACY = {
     # 旧式对话模型键值（兼容保留，新前端走 providers）
     "deepseek_api_key",
     "deepseek_base_url",
@@ -100,6 +262,12 @@ EDITABLE_KEYS = {
     "reranker_api_model",
 }
 
+# 无需类型校验的普通键（字符串 / 密钥 / 路径 / 供应商列表）= 历史全集 − 类型化键
+_PLAIN_KEYS = _EDITABLE_LEGACY - set(_SPECS)
+
+# 可调项总集（键集合与历史一致；类型校验规则由 _SPECS 派生）
+EDITABLE_KEYS = _PLAIN_KEYS | set(_SPECS)
+
 # 只读展示键
 READONLY_KEYS = {
     "embedding_model_dir",
@@ -110,42 +278,57 @@ READONLY_KEYS = {
     "opensearch_index",
 }
 
-# 数值型可编辑键的合法区间（保存时夹取，防前端/手改传坏值把节点搞崩）
+# 数值区间 / 布尔键 / 枚举取值：全部由 _SPECS 派生（新增可调项只改声明表）
 _INT_RANGES = {
-    "agent_max_iterations": (1, 200),
-    "agent_max_failures": (1, 50),
-    "agent_task_max_iterations": (1, 500),
-    "agent_task_max_failures": (1, 100),
-    "agent_max_dispatch_rounds": (1, 10),
-    "agent_subagent_max_rounds": (1, 20),
-    "vision_max_images": (1, 10),
-    "history_max_messages": (8, 500),
-    "history_max_tokens": (1000, 200000),
-    "memory_auto_extract_min_chars": (50, 5000),
-    "project_memory_max_chars": (500, 20000),
-    "memory_consolidate_threshold": (2, 500),
-    "memory_consolidate_interval_hours": (1, 720),
-    "checkpoint_keep_per_thread": (5, 200),
-    "verify_max_retries": (0, 5),
+    key: (int(spec.lo), int(spec.hi))
+    for key, spec in _SPECS.items()
+    if spec.kind == "int"
 }
 _FLOAT_RANGES = {
-    "agent_llm_stall_timeout_s": (10.0, 1800.0),
-    "kb_chat_min_score": (0.0, 1.0),
-    "crag_min_score": (0.0, 1.0),
+    key: (float(spec.lo), float(spec.hi))
+    for key, spec in _SPECS.items()
+    if spec.kind == "float"
 }
-_BOOL_KEYS = {
-    "advanced_tools_enabled",
-    "agent_subagents_enabled",
-    "plan_mode_allowed",
-    "task_mode_detect",
-    "verify_auto_detect",
-    "sandbox_workspace_readonly",
-    "skill_sandbox_enabled",
-    "reasoning_summary_enabled",
-    "trajectory_compress_enabled",
-    "mcp_enabled",
-    "crag_fallback_enabled",
+_BOOL_KEYS = {key for key, spec in _SPECS.items() if spec.kind == "bool"}
+_ENUM_KEYS = {
+    key: spec.choices for key, spec in _SPECS.items() if spec.kind == "enum"
 }
+
+
+def editable_schema() -> list[dict]:
+    """可调项元数据（供设置页渲染表单；新增一项只需改 _SPECS）。
+
+    只暴露"填写辅助"信息，不含任何敏感值——密钥类键在 _PLAIN_KEYS 里，
+    这里不带 default，避免 schema 端点泄露。
+    """
+    rows: list[dict] = []
+    for key, spec in _SPECS.items():
+        rows.append(
+            {
+                "key": key,
+                "kind": spec.kind,
+                "default": spec.default,
+                "lo": spec.lo,
+                "hi": spec.hi,
+                "choices": list(spec.choices),
+                "label": spec.label,
+                "group": spec.group,
+            }
+        )
+    for key in sorted(_PLAIN_KEYS):
+        rows.append(
+            {
+                "key": key,
+                "kind": "str",
+                "default": None,
+                "lo": None,
+                "hi": None,
+                "choices": [],
+                "label": "",
+                "group": "other",
+            }
+        )
+    return rows
 
 # 旧键值 -> 供应商字段的映射（保存旧键时同步到 providers，保持两套机制一致）
 _LEGACY_TO_PROVIDER = {
@@ -199,6 +382,8 @@ def load_overrides(db) -> dict:
         _overrides = data
     # 重启后恢复 data_dir：直接改 settings 单例（RAGService 读属性不走 effective）
     if data.get("data_dir"):
+        from .config import get_settings  # 本模块此前漏了这个 import（仅 data_dir 路径触发）
+
         _apply_data_dir_override(get_settings(), data["data_dir"])
     return data
 
@@ -219,9 +404,10 @@ def save_overrides(db, updates: dict, settings=None) -> dict:
         if value is None:
             continue
         if key == "providers":
-            cleaned = _validate_providers(value, settings=settings)
-            if cleaned:
-                clean[key] = cleaned
+            # 非列表（坏载荷）跳过；显式空列表 = 删除全部供应商，必须允许写入
+            # （此前 `if cleaned:` 会把空列表当作"未提供"，删完后刷新又回来）
+            if isinstance(value, list):
+                clean[key] = _validate_providers(value, settings=settings)
             continue
         if key == "data_dir":
             # 路径校验 + 即时同步到 settings 单例（RAGService 读属性不走 effective）
@@ -235,14 +421,14 @@ def save_overrides(db, updates: dict, settings=None) -> dict:
         if key in ("active_chat_provider", "active_vision_provider"):
             clean[key] = str(value).strip()
             continue
-        if key.endswith("api_key") or key == "tavily_api_key":
+        if key.endswith("api_key"):
             value = str(value).strip()
             if not value:
                 continue  # 空串表示不修改
-        elif key == "chat_temperature":
-            value = max(0.0, min(2.0, float(value)))
-        elif key == "web_search_max_results":
-            value = max(1, min(20, int(value)))
+        elif key in _ENUM_KEYS:
+            value = str(value).strip()
+            if value not in _ENUM_KEYS[key]:
+                continue  # 非法枚举：跳过该键（不拖垮整批保存）
         elif key in _INT_RANGES:
             lo, hi = _INT_RANGES[key]
             try:
@@ -257,30 +443,61 @@ def save_overrides(db, updates: dict, settings=None) -> dict:
                 continue
         elif key in _BOOL_KEYS:
             value = bool(value)
-        elif key in ("main_model_vision", "skills_enabled"):
-            value = bool(value)
-        elif key == "tool_permission_mode":
-            value = str(value).strip()
-            if value not in ("ask", "allow"):
-                continue
-        elif key == "permission_timeout":
-            value = max(30, min(3600, int(value)))
         clean[key] = value
 
     with _lock:
         _overrides.update(clean)
-        _sync_legacy_to_providers()
+        _sync_legacy_to_providers(set(clean))
         _fix_active_provider_ids()
         merged = dict(_overrides)
     repo.set_meta(db, "runtime_overrides", json.dumps(merged, ensure_ascii=False))
     return merged
 
 
-def _legacy_keys(ptype: str) -> tuple[str, str, str]:
-    """返回 (api_key 键, base_url 键, model 键)。"""
-    if ptype == "vision":
-        return "sensenova_api_key", "sensenova_base_url", "sensenova_model"
-    return "deepseek_api_key", "deepseek_base_url", "deepseek_model"
+# 自定义请求头的约束：名字按 RFC 7230 token 字符集；这些头由传输层管理，
+# 用户自定义会破坏请求完整性（Host/长度/连接管理/鉴权走 api_key 字段）
+_HEADER_NAME_RE = re.compile(r"[A-Za-z0-9!#$%&'*+\-.^_`|~]+")
+_HEADER_NAME_BLACKLIST = {
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "authorization",
+}
+_MAX_HEADERS = 20
+_MAX_HEADER_NAME = 64
+_MAX_HEADER_VALUE = 2048
+
+# 名字含这些词的头值按密钥处理：GET /settings 与导出走 mask_key 脱敏，
+# 保存时按 "****" 前缀还原（与 api_key 同一套约定）
+_SENSITIVE_HEADER_RE = re.compile(r"key|token|secret|auth|cookie", re.IGNORECASE)
+
+
+def is_sensitive_header(name: str) -> bool:
+    """判断请求头名是否按敏感值处理（脱敏/还原）。"""
+    return bool(_SENSITIVE_HEADER_RE.search(str(name or "")))
+
+
+def _clean_headers(value) -> dict[str, str]:
+    """清洗自定义请求头：黑名单 + 非法名/值丢弃（坏条目跳过，不拖垮整批）。"""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for name, val in value.items():
+        name = str(name).strip()
+        val = str(val).strip()
+        if not name or len(name) > _MAX_HEADER_NAME:
+            continue
+        if name.lower() in _HEADER_NAME_BLACKLIST:
+            continue
+        if not _HEADER_NAME_RE.fullmatch(name):
+            continue
+        if len(val) > _MAX_HEADER_VALUE or "\r" in val or "\n" in val:
+            continue
+        out[name] = val
+        if len(out) >= _MAX_HEADERS:
+            break
+    return out
 
 
 def _validate_providers(value, settings=None) -> list[dict]:
@@ -301,37 +518,75 @@ def _validate_providers(value, settings=None) -> list[dict]:
         ptype = raw.get("type") if raw.get("type") in ("chat", "vision") else "chat"
         api_key = str(raw.get("api_key") or "").strip()
         if api_key.startswith("****"):
-            old = prev_by_id.get(pid, {}).get("api_key") or ""
-            if not old:
-                old = effective(settings, _legacy_keys(ptype)[0]) if settings is not None else ""
-            api_key = str(old or "").strip()
+            # 只允许按 id 命中的旧值。绝不回退 env/config 里的 deepseek_api_key——
+            # 那会把环境里的真实 Key 塞给"任意 id + 任意 base_url"的新供应商（外泄）。
+            api_key = str(prev_by_id.get(pid, {}).get("api_key") or "").strip()
         raw_models = raw.get("models") or []
         models = [str(m).strip() for m in raw_models if str(m).strip()]
         model = str(raw.get("model") or "").strip() or (models[0] if models else "")
+        if model and model not in models:
+            models.insert(0, model)  # 不变量：默认模型必须出现在候选列表里
         # 思考模式/强度（DeepSeek V4 等支持；disabled 时不发 reasoning_effort）
         effort = str(raw.get("thinking_effort") or "high").strip().lower()
         if effort not in ("low", "medium", "high", "max"):
             effort = "high"
-        cleaned.append(
-            {
-                "id": pid,
-                "name": str(raw.get("name") or "").strip()[:60] or pid,
-                "type": ptype,
-                "base_url": str(raw.get("base_url") or "").strip()[:300],
-                "api_key": api_key,
-                "model": model,
-                "models": models or ([model] if model else []),
-                "enabled": bool(raw.get("enabled", True)),
-                "note": str(raw.get("note") or "").strip()[:200],
-                "thinking_enabled": bool(raw.get("thinking_enabled", True)),
-                "thinking_effort": effort,
-            }
-        )
+        entry = {
+            "id": pid,
+            "name": str(raw.get("name") or "").strip()[:60] or pid,
+            "type": ptype,
+            "base_url": str(raw.get("base_url") or "").strip()[:300],
+            "api_key": api_key,
+            "model": model,
+            "models": models or ([model] if model else []),
+            "enabled": bool(raw.get("enabled", True)),
+            "note": str(raw.get("note") or "").strip()[:200],
+            "thinking_enabled": bool(raw.get("thinking_enabled", True)),
+            "thinking_effort": effort,
+        }
+        # 显式声明的 API 格式（provider_api_format 会优先读它）；空值不落库，
+        # 保持"按 base_url 推断"的默认行为
+        fmt = str(raw.get("api_format") or "").strip().lower()
+        if fmt in ("anthropic", "openai"):
+            entry["api_format"] = fmt
+        # 每供应商参数覆盖（空 = 用全局）；temperature 用 0.0 判断必须走 None 检查
+        temp = raw.get("temperature")
+        if temp is not None and str(temp).strip() != "":
+            try:
+                entry["temperature"] = max(0.0, min(2.0, float(temp)))
+            except (TypeError, ValueError):
+                pass
+        mt = raw.get("max_tokens")
+        if mt is not None and str(mt).strip() != "":
+            try:
+                n = int(mt)
+                if n > 0:
+                    entry["max_tokens"] = max(256, min(200000, n))
+            except (TypeError, ValueError):
+                pass
+        headers = _clean_headers(raw.get("headers"))
+        if headers:
+            # 敏感头值的 "****" 掩码还原：与 api_key 同约定，只认同 id 的旧值；
+            # 还原不到就丢弃该头（绝不能把 **** 字面量发给上游）
+            old_headers = prev_by_id.get(pid, {}).get("headers")
+            if isinstance(old_headers, dict):
+                for name, val in list(headers.items()):
+                    if not str(val).startswith("****"):
+                        continue
+                    if name in old_headers:
+                        headers[name] = old_headers[name]
+                    else:
+                        headers.pop(name)
+            entry["headers"] = headers
+        cleaned.append(entry)
     return cleaned
 
 
-def _sync_legacy_to_providers() -> None:
-    """旧式 deepseek_*/sensenova_* 键值保存后，同步到对应供应商。"""
+def _sync_legacy_to_providers(updated_keys=None) -> None:
+    """旧式 deepseek_*/sensenova_* 键值保存后，同步到对应 id 的供应商。
+
+    仅当本次保存显式包含 legacy 键才执行（否则每次保存都拿 DB 里可能残留的
+    旧值覆盖供应商），并按既定 id（deepseek/sensenova）匹配，而不是"第一个同类"。
+    """
     providers = _overrides.get("providers")
     if not isinstance(providers, list):
         return
@@ -339,8 +594,11 @@ def _sync_legacy_to_providers() -> None:
     for key, (ptype, field) in _LEGACY_TO_PROVIDER.items():
         if key not in _overrides:
             continue
+        if updated_keys is not None and key not in updated_keys:
+            continue
+        target_id = "sensenova" if ptype == "vision" else "deepseek"
         for p in providers:
-            if p.get("type") == ptype:
+            if p.get("id") == target_id:
                 p[field] = _overrides[key]
                 changed = True
                 break
@@ -383,13 +641,32 @@ def thinking_extra_body(cfg: dict) -> dict | None:
 
 
 def effective(settings, key: str, default=None):
-    """读取生效值：DB 覆盖优先，其次默认值。"""
+    """读取生效值：DB 覆盖 > settings（环境变量/config 默认值）> None。
+
+    **不要再传 default**：`effective(settings, key, x)` 会让环境变量与
+    config.py 默认值全部失效（只有设置页的 DB 覆盖能生效），历史上已经
+    造成 9 个键"部署配置通道断开"（含 /api/advanced 的受控执行开关读不到
+    默认值 True）。需要兜底常量时用 effective_or()。
+    守门：scripts/check_effective_default.py（CI + pre-commit）。
+    """
     overrides = get_overrides()
     if key in overrides:
         return overrides[key]
-    if default is not None:
-        return default
     return getattr(settings, key, None)
+
+
+def effective_or(settings, key: str, fallback):
+    """读取生效值，读不到才用兜底常量（语义写在名字里，防误用）。
+
+    顺序：DB 覆盖 > settings 属性（env/config）> fallback。
+    适用于"settings 里可能没有该字段"（如 skills_enabled）或"必须给安全
+    默认值"（如审批模式默认 ask，绝不能因读不到而放开确认）的读点。
+    """
+    overrides = get_overrides()
+    if key in overrides:
+        return overrides[key]
+    value = getattr(settings, key, None)
+    return fallback if value is None else value
 
 
 # ---------------- 供应商 API 格式（OpenAI 兼容 / Anthropic 兼容） ----------------
@@ -407,6 +684,44 @@ def provider_api_format(cfg: dict | None) -> str:
     if fmt in ("anthropic", "openai"):
         return fmt
     return "anthropic" if "/anthropic" in str(cfg.get("base_url") or "") else "openai"
+
+
+# 设置页常见粘贴错误：把文档里的完整端点当 base_url 填（如 OpenCode Zen 文档
+# 的 https://opencode.ai/zen/go/v1/messages）。按格式剥掉端点后缀还原出 SDK
+# 需要的 base：openai 保留 /v1（SDK 会拼 /chat/completions），anthropic 回到
+# 根（SDK 会拼 /v1/messages）。
+_OPENAI_ENDPOINT_SUFFIXES = ("/chat/completions", "/messages", "/responses")
+_ANTHROPIC_ENDPOINT_SUFFIXES = ("/v1/messages", "/messages")
+
+_DEFAULT_CHAT_BASE_URL = "https://api.deepseek.com"
+
+
+def normalize_base_url(base_url: str | None, fmt: str) -> str:
+    """把"完整端点地址"还原为 SDK 需要的 base_url（防御用户粘贴错误）。"""
+    base = (base_url or _DEFAULT_CHAT_BASE_URL).rstrip("/")
+    suffixes = (
+        _ANTHROPIC_ENDPOINT_SUFFIXES if fmt == "anthropic" else _OPENAI_ENDPOINT_SUFFIXES
+    )
+    for suffix in suffixes:
+        if base.endswith(suffix):
+            base = base[: -len(suffix)].rstrip("/")
+            break
+    return base or _DEFAULT_CHAT_BASE_URL
+
+
+def provider_extra_headers(cfg: dict | None, base_url: str) -> dict:
+    """按供应商生成额外的请求头。
+
+    OpenCode Zen/Go 网关要求客户端自报身份（https://opencode.ai/docs/go）：
+    自定义 User-Agent + 会话级稳定 `x-opencode-session`，缺失后者直接 400
+    （MissingSessionID）。会话 ID 按 (api_key, base_url) 稳定派生——进程重启
+    不变，网关侧可跨轮复用路由与提示词缓存；其他供应商返回空 dict 不受影响。
+    """
+    if not cfg or "opencode.ai/zen" not in base_url:
+        return {}
+    seed = f"{cfg.get('api_key') or ''}|{base_url}"
+    session_id = "zhiwen-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+    return {"x-opencode-session": session_id, "User-Agent": "zhiwen-rag/1.0"}
 
 
 def thinking_param(cfg: dict | None) -> dict:
@@ -644,10 +959,16 @@ def build_chat_model(
     与 OpenAI 格式的 prompt_cache_hit_tokens 等价。
     """
     fmt = provider_api_format(cfg)
-    base_url = (cfg.get("base_url") or "https://api.deepseek.com").rstrip("/")
+    base_url = normalize_base_url(cfg.get("base_url"), fmt)
+    # 供应商自定义请求头覆盖内置自动头（如 OpenCode 会话头），坏条目在构建点再兜一次底
+    extra_headers = {
+        **provider_extra_headers(cfg, base_url),
+        **_clean_headers(cfg.get("headers")),
+    }
     model_name = model or cfg.get("model") or "deepseek-v4-flash"
     temp = temperature if temperature is not None else 0.5
     if fmt == "anthropic":
+        temp = min(temp, 1.0)  # Anthropic 协议温度上界是 1，超界直接 400
         kwargs: dict = dict(
             model=model_name,
             api_key=cfg.get("api_key") or "",
@@ -659,6 +980,8 @@ def build_chat_model(
         )
         if thinking is not None:
             kwargs["thinking"] = thinking
+        if extra_headers:
+            kwargs["default_headers"] = extra_headers
         # 用带回退客户端的子类（Clash 关闭后不再 "Connection error."）
         return _AnthropicSystemNormalizer(_fallback_chat_anthropic_class()(**kwargs))
     from langchain_openai import ChatOpenAI
@@ -676,6 +999,8 @@ def build_chat_model(
         http_client=make_httpx_client(),
         http_async_client=make_async_httpx_client(),
     )
+    if extra_headers:
+        kwargs["default_headers"] = extra_headers
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
     return ChatOpenAI(**kwargs)

@@ -1,0 +1,79 @@
+#!/bin/sh
+# 提交前自动运行后端测试 + 前端裸 hex 守门；失败则阻止提交。
+#
+# 安装（钩子随仓库版本化，可 review）：
+#     scripts/install-git-hooks.ps1          # → git config core.hooksPath scripts/githooks
+#
+# 解释器探测顺序：
+#     1) 环境变量 ZHIWEN_PYTHON
+#     2) 仓库根的 .zhiwen-python（本机路径提示文件，gitignored，由安装脚本写入）
+#     3) PATH 上的 python3 / python
+# 都找不到（或没装 pytest）时：默认**显式告警后放行**——CI 才是权威
+# （.github/workflows/ci.yml）；要在本机强制要求，设 ZHIWEN_HOOK_STRICT=1。
+#
+# 注意：basetemp 用每次运行唯一的目录（.git/pytest-tmp-$$），避免 Windows 上
+# .git 目录 ACL 异常导致 pytest 无法清理旧 basetemp 而报 WinError 5。
+
+set -u
+
+ROOT="$(git rev-parse --show-toplevel)" || exit 1
+cd "$ROOT" || exit 1
+
+PYTHON="${ZHIWEN_PYTHON:-}"
+if [ -z "$PYTHON" ] && [ -f "$ROOT/.zhiwen-python" ]; then
+  PYTHON="$(head -n 1 "$ROOT/.zhiwen-python" | tr -d '\r')"
+fi
+if [ -z "$PYTHON" ]; then
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      PYTHON="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -z "$PYTHON" ] || ! "$PYTHON" -c "import pytest" >/dev/null 2>&1; then
+  echo "[pre-commit] 未找到带 pytest 的解释器：设 ZHIWEN_PYTHON=<path> 或跑 scripts/install-git-hooks.ps1" >&2
+  echo "[pre-commit] 本地检查已跳过；CI（.github/workflows/ci.yml）仍会跑全量测试。" >&2
+  if [ "${ZHIWEN_HOOK_STRICT:-0}" = "1" ]; then
+    echo "[pre-commit] ZHIWEN_HOOK_STRICT=1：拒绝本次提交。" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+BASETEMP=".git/pytest-tmp-$$"
+"$PYTHON" -m pytest backend/tests -q -p no:cacheprovider --basetemp "$BASETEMP"
+RESULT=$?
+# 尝试清理本次临时目录（失败可忽略：Windows ACL 问题不影响提交结果）
+rm -rf "$BASETEMP" 2>/dev/null
+
+if [ $RESULT -ne 0 ]; then
+  echo "" >&2
+  echo "[pre-commit] pytest 失败，提交已阻止。确实要跳过请用：git commit --no-verify" >&2
+  exit 1
+fi
+
+# 前端裸 hex 防回退（阶段2）：超过基线即阻止提交
+"$PYTHON" "$ROOT/scripts/check_frontend_hex.py" || exit 1
+
+# 配置读取守门（P1-2）：effective() 不得传 default（会忽略 env/config 默认值）
+"$PYTHON" "$ROOT/scripts/check_effective_default.py" || exit 1
+
+# SSE 协议守门（P1-1）：后端 emit 的事件必须在前端有处理分支（或显式豁免）
+"$PYTHON" "$ROOT/scripts/check_sse_protocol.py" || exit 1
+
+# 前端逻辑单测：SSE 事件→状态 映射 + 打字机/增量流状态机 + API 导出面/SSE 传输
+# + 设置表单键集合 + 供应商载荷映射（与 CI 的 npm run check 对齐）
+if command -v node >/dev/null 2>&1; then
+  (cd "$ROOT/frontend" \
+    && node scripts/check_stream_handlers.mjs \
+    && node scripts/check_typewriter.mjs \
+    && node scripts/check_api_sse.mjs \
+    && node scripts/check_settings_form.mjs \
+    && node scripts/check_provider_payload.mjs) || exit 1
+else
+  echo "[pre-commit] 未找到 node，跳过前端逻辑单测（CI 仍会跑）" >&2
+fi
+
+exit 0

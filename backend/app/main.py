@@ -31,6 +31,7 @@ from .api.vision import router as vision_router
 from .config import get_settings
 from .db.database import init_db
 from .runtime_config import load_overrides
+from .single_instance import acquire_instance_lock
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +46,10 @@ settings = get_settings()
 async def lifespan(_: FastAPI):
     """应用生命周期：启动时准备目录，关闭时清理。"""
     settings.ensure_dirs()
+    # 单实例契约（P0）：会话并发闸门 / 审批超时 watchdog / 挂起用量快照都在
+    # 进程内存里，两个进程共享同一 meta_dir 会静默破坏"挂起期间拒绝新消息"
+    # 与"超时自动拒绝"的语义。拿不到锁直接拒绝启动（见 app/single_instance.py）。
+    instance_lock = acquire_instance_lock(settings.meta_dir)
     init_db()  # MySQL：连接失败会降级，不影响服务启动
     # 加载用户运行时配置（模型/供应商覆盖）
     try:
@@ -93,8 +98,11 @@ async def lifespan(_: FastAPI):
 
     _warmup_rag_models()
     logger.info("启动 %s v%s", settings.app_name, settings.version)
-    yield
-    logger.info("服务已关闭")
+    try:
+        yield
+    finally:
+        instance_lock.release()
+        logger.info("服务已关闭")
 
 
 app = FastAPI(

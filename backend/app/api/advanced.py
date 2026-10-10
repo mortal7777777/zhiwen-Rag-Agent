@@ -14,7 +14,7 @@ from ..config import get_settings
 from ..db import get_db
 from ..db import repository as repo
 from ..project_memory import export_project_memory, load_project_memory, project_memory_path
-from ..runtime_config import effective, load_overrides
+from ..runtime_config import effective_or, load_overrides
 from .deps import get_agent_service
 
 router = APIRouter(tags=["advanced"])
@@ -325,7 +325,9 @@ def execute_tool(
     """执行受控工具（文件操作 / 白名单命令）。"""
     settings = get_settings()
     load_overrides(db)
-    if not effective(settings, "advanced_tools_enabled", False):
+    # 注意：这里原来写的是 effective(..., False)，会让 config/env 里的 True 失效，
+    # 导致"设置页没保存过就报未开启"。统一走 effective_or，与 Agent 侧同语义。
+    if not effective_or(settings, "advanced_tools_enabled", True):
         return {
             "error": "受控执行工具未开启",
             "summary": "请先在 设置 -> 工具 中开启并配置白名单",
@@ -389,7 +391,7 @@ def run_skill_command(
     """在沙箱中执行技能命令（需开启技能沙箱 + 命令在白名单内）。"""
     settings = get_settings()
     load_overrides(db)
-    if not effective(settings, "skill_sandbox_enabled", False):
+    if not effective_or(settings, "skill_sandbox_enabled", False):
         return {"ok": False, "error": "技能沙箱未开启（设置 -> 工具）"}
     command = (payload.get("command") or "").strip()
     if not command:

@@ -1,0 +1,4 @@
+# shell 钩子必须保持 LF：CRLF 会让 Linux/macOS 上的 shebang 变成 "/bin/sh\r"，
+# 直接报 "bad interpreter" 无法执行。
+scripts/githooks/* text eol=lf
+scripts/pre-commit text eol=lf

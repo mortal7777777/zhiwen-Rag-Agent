@@ -6,7 +6,14 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:stream": "node scripts/check_stream_handlers.mjs",
+    "check:typewriter": "node scripts/check_typewriter.mjs",
+    "check:api": "node scripts/check_api_sse.mjs",
+    "check:settings": "node scripts/check_settings_form.mjs",
+    "check:payload": "node scripts/check_provider_payload.mjs",
+    "check": "npm run check:stream && npm run check:typewriter && npm run check:api && npm run check:settings && npm run check:payload",
+    "shot:cards": "node dev/shot_cards.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",

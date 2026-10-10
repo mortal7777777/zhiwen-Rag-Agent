@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from app.llm_text import message_text
-from app.runtime_config import build_chat_model, provider_api_format, thinking_param
+from app.runtime_config import (
+    build_chat_model,
+    normalize_base_url,
+    provider_api_format,
+    provider_extra_headers,
+    thinking_param,
+)
 
 
 def test_message_text_passthrough_str():
@@ -74,6 +80,90 @@ def test_models_request_path_and_headers():
         }
     )
     assert cands[1][0] == "https://proxy.example.com/models"
+
+    # 用户把完整端点当 base_url 粘贴（OpenCode 文档式）：剥掉 /messages 后
+    # 首个候选即 Go 网关真实可用的模型列表端点
+    cands = _models_candidates(
+        {"base_url": "https://opencode.ai/zen/go/v1/messages", "api_key": "k"}
+    )
+    assert cands[0][0] == "https://opencode.ai/zen/go/v1/models"
+
+
+def test_normalize_base_url():
+    # openai：剥掉完整端点后缀，保留 SDK 需要的 /v1
+    assert (
+        normalize_base_url("https://opencode.ai/zen/go/v1/messages", "openai")
+        == "https://opencode.ai/zen/go/v1"
+    )
+    assert (
+        normalize_base_url("https://api.example.com/v1/chat/completions", "openai")
+        == "https://api.example.com/v1"
+    )
+    # anthropic：整段 /v1/messages 剥掉回根（SDK 自己会拼 /v1/messages）
+    assert (
+        normalize_base_url("https://opencode.ai/zen/go/v1/messages", "anthropic")
+        == "https://opencode.ai/zen/go"
+    )
+    # 正常 base 不受影响
+    assert normalize_base_url("https://api.deepseek.com", "openai") == "https://api.deepseek.com"
+    assert (
+        normalize_base_url("https://api.deepseek.com/anthropic", "anthropic")
+        == "https://api.deepseek.com/anthropic"
+    )
+    assert normalize_base_url(None, "openai") == "https://api.deepseek.com"
+
+
+def test_provider_extra_headers_opencode():
+    cfg = {"api_key": "oc_sk_test", "base_url": "https://opencode.ai/zen/go/v1"}
+    headers = provider_extra_headers(cfg, "https://opencode.ai/zen/go/v1")
+    assert headers["x-opencode-session"].startswith("zhiwen-")
+    # 稳定派生：同 key/base 两次调用一致（跨进程重启不变）
+    assert headers == provider_extra_headers(cfg, "https://opencode.ai/zen/go/v1")
+    # 其他供应商不加任何头
+    assert provider_extra_headers({"api_key": "k"}, "https://api.deepseek.com") == {}
+    assert provider_extra_headers(None, "https://opencode.ai/zen/go/v1") == {}
+
+
+def test_build_chat_model_opencode_identifies_client():
+    """OpenCode 网关要求自报身份：Go 端点缺 x-opencode-session 直接 400。"""
+    op = build_chat_model(
+        {
+            "api_key": "oc_sk_test",
+            "base_url": "https://opencode.ai/zen/go/v1/messages",
+            "model": "deepseek-v4.1-flash",
+        }
+    )
+    # base_url 先归一化再使用；默认头带会话 ID 与自定义 UA
+    assert str(op.openai_api_base) == "https://opencode.ai/zen/go/v1"
+    assert op.default_headers["x-opencode-session"].startswith("zhiwen-")
+    assert op.default_headers["User-Agent"] == "zhiwen-rag/1.0"
+    # 非 OpenCode 供应商不受影响
+    plain = build_chat_model(
+        {"api_key": "k", "base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"}
+    )
+    assert not plain.default_headers
+
+
+def test_build_chat_model_merges_custom_headers_and_clamps_anthropic_temp():
+    # 供应商自定义头覆盖自动注入（x-opencode-session 可被显式覆盖）
+    op = build_chat_model(
+        {
+            "api_key": "k",
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "model": "m",
+            "headers": {"X-Trace": "t", "x-opencode-session": "custom"},
+        }
+    )
+    assert op.default_headers["x-opencode-session"] == "custom"
+    assert op.default_headers["X-Trace"] == "t"
+
+    # Anthropic 协议温度上界 1：超界在构建点夹取（否则端点直接 400）
+    anth = build_chat_model(
+        {"api_key": "k", "base_url": "https://api.deepseek.com/anthropic", "model": "m"},
+        temperature=2.0,
+        thinking={"type": "disabled"},
+    )
+    assert anth._inner.temperature == 1.0
 
 
 def test_build_chat_model_picks_client_by_format():

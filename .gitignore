@@ -47,6 +47,8 @@ Thumbs.db
 
 # CLI 会话历史 / Agent 运行产物（含对话内容，勿上传）
 .zhiwen_history.json
+# 本机 pre-commit 解释器路径（每台机器不同；由 scripts/install-git-hooks.ps1 写入）
+.zhiwen-python
 .zcode/
 backend/app/agent/_persist_debug.txt
 backend/snap.md
@@ -71,6 +73,7 @@ AGENTS.md
 
 # 本地开发向文档 / 一次性实验脚本（保留在磁盘，不入库）
 docs/PROJECT_HANDOFF.md
+docs/HANDOVER_*.md
 docs/DEV_PITFALLS.md
 docs/GIT_GUIDE.md
 docs/DOCUMENT_VIEWER_PLAN.md

@@ -117,6 +117,20 @@ def _failure_limit(state: AgentState, settings) -> int:
     return int(effective(settings, "agent_max_failures") or 3)
 
 
+def _bump_patch(rt: dict, kind: str) -> None:
+    """记录一次"轮内纠偏补丁"的触发（P1-3：让补丁可观测、可淘汰）。
+
+    这些补丁（空正文重试 / XML 兜底 / 写后验证失败 / 强制收尾 …）本质是给
+    模型行为"打补丁"：触发频率高说明提示词或工具设计本身有问题。计数写进
+    `agent_runs.token_usage.patches`，于是可以按数据决定删哪条补丁，而不是
+    只增不减（22 处轮内 SystemMessage 注入的历史教训）。
+    """
+    if not isinstance(rt, dict):
+        return
+    patches = rt.setdefault("patches", {})
+    patches[kind] = int(patches.get(kind) or 0) + 1
+
+
 # ============================================================
 # 节点：prepare
 # ============================================================

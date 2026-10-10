@@ -6,6 +6,8 @@ import io
 import sys
 
 import cli_agent as c
+from cli import input as cli_input
+from cli import term as cli_term
 
 
 # ------------------------------------------------------------------ 宽度与换行
@@ -72,7 +74,8 @@ def test_safe_text_strips_escape_injection():
 
 
 def test_inline_md(monkeypatch):
-    monkeypatch.setattr(c, "USE_COLOR", True)
+    # USE_COLOR 的归属已移到 cli.term（物理拆分后打补丁要打到真正读它的模块）
+    monkeypatch.setattr(cli_term, "USE_COLOR", True)
     out = c.inline_md("`code` **粗** *斜* [链接](http://x)")
     plain = c.strip_ansi(out)
     assert "code" in plain and "粗" in plain and "斜" in plain and "链接" in plain
@@ -225,13 +228,14 @@ def _force_legacy_read_line(monkeypatch, fake_get):
     """
     import cli_agent as c_mod
 
-    monkeypatch.setattr(c.KeyReader, "get", fake_get)
+    monkeypatch.setattr(cli_input.KeyReader, "get", fake_get)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
 
     def _boom(_history):
         raise RuntimeError("prompt_toolkit 不可用（测试强制 legacy）")
 
-    monkeypatch.setattr(c_mod, "make_prompt_session", _boom)
+    # read_line 住在 cli.input：补丁必须打到它所在模块的全局名上
+    monkeypatch.setattr(cli_input, "make_prompt_session", _boom)
     return c_mod
 
 

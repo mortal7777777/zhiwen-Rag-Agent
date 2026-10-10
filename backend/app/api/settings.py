@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..agent.agent import AgentService
@@ -12,6 +12,7 @@ from ..rag.service import RAGService
 from ..runtime_config import (
     EDITABLE_KEYS,
     READONLY_KEYS,
+    editable_schema,
     effective,
     get_active_provider,
     get_overrides,
@@ -23,6 +24,24 @@ from ..runtime_config import (
 from .deps import get_agent_service, get_service
 
 router = APIRouter(tags=["settings"])
+
+
+@router.get("/settings/schema")
+def get_settings_schema() -> dict:
+    """可调项元数据（类型/区间/枚举/分组/展示名）。
+
+    单一来源是 runtime_config._SPECS：新增一个可调项只改声明表，前端可据此
+    渲染表单与做前端校验（不再需要三处同步）。不含任何敏感值。
+    """
+    return {"fields": editable_schema()}
+
+
+@router.get("/settings/provider-presets")
+def get_provider_presets() -> dict:
+    """内置供应商预设（cc-switch 式"从预设开始"），只含非敏感字段。"""
+    from ..provider_presets import PROVIDER_PRESETS
+
+    return {"presets": PROVIDER_PRESETS}
 
 
 @router.get("/settings")
@@ -59,9 +78,17 @@ def get_settings_view(db: Session = Depends(get_db)) -> dict:
 
 
 def _mask_provider(provider: dict) -> dict:
-    """返回脱敏后的供应商配置（API Key 只留后 4 位）。"""
+    """返回脱敏后的供应商配置（API Key 只留后 4 位；敏感请求头同规则）。"""
+    from ..runtime_config import is_sensitive_header
+
     out = dict(provider)
     out["api_key"] = mask_key(provider.get("api_key"))
+    headers = provider.get("headers")
+    if isinstance(headers, dict):
+        out["headers"] = {
+            name: (mask_key(val) or "" if is_sensitive_header(name) else val)
+            for name, val in headers.items()
+        }
     return out
 
 
@@ -103,12 +130,13 @@ def _models_candidates(cfg: dict) -> list[tuple[str, dict]]:
        {root}/v1/models——DeepSeek /anthropic 未实现模型列表，但根端点可用
        （cc-switch 的 DeepSeek 预设同样直接指向 https://api.deepseek.com/models）。
     """
-    from ..runtime_config import provider_api_format
+    from ..runtime_config import normalize_base_url, provider_api_format
 
-    base = (cfg.get("base_url") or "https://api.deepseek.com").rstrip("/")
+    fmt = provider_api_format(cfg)
+    base = normalize_base_url(cfg.get("base_url"), fmt)
     api_key = cfg.get("api_key") or ""
     auth = {"Authorization": f"Bearer {api_key}"}
-    if provider_api_format(cfg) == "anthropic":
+    if fmt == "anthropic":
         candidates = [
             (
                 f"{base}/v1/models",
@@ -174,3 +202,102 @@ def list_chat_models() -> dict:
             "error": "该供应商未提供模型列表接口，请手动填写模型名",
         }
     return {"ok": False, "models": [], "error": last_error}
+
+
+@router.post("/settings/providers/test")
+def test_provider_connection(payload: dict) -> dict:
+    """测试单个供应商（支持未保存草稿；恒 HTTP 200，由 ok 判别成败）。
+
+    payload = 完整供应商 cfg；api_key 为 `****` 掩码时，仅当 id 与 base_url
+    主机都能对上已存记录才还原（见 provider_probe.restore_masked_key）。
+    """
+    from ..provider_probe import probe_provider
+
+    cfg = payload if isinstance(payload, dict) else {}
+    return probe_provider(cfg, get_providers(get_settings()))
+
+
+@router.post("/settings/providers/models")
+def list_provider_models(payload: dict) -> dict:
+    """按指定供应商配置拉模型列表（修复"永远拉激活供应商"的既有 bug）。"""
+    from ..provider_probe import probe_models, restore_masked_key
+
+    cfg = payload if isinstance(payload, dict) else {}
+    fixed, err = restore_masked_key(cfg, get_providers(get_settings()))
+    if err:
+        return {"ok": False, "models": [], "error": err}
+    if not fixed.get("api_key"):
+        return {"ok": False, "models": [], "error": "未配置 API Key"}
+    return probe_models(fixed)
+
+
+@router.post("/settings/providers/speedtest")
+def speedtest_providers() -> dict:
+    """对全部已启用 chat 供应商并发测延迟（输入是服务端已存配置，Key 不过浏览器）。"""
+    from ..provider_probe import speedtest
+
+    return {"ok": True, "results": speedtest(get_providers(get_settings()))}
+
+
+@router.get("/settings/providers/export")
+def export_providers(include_keys: int = 0) -> dict:
+    """导出供应商配置（默认不含密钥；include_keys=1 带明文，仅本地使用）。"""
+    from ..provider_io import export_payload
+
+    return export_payload(bool(include_keys))
+
+
+@router.post("/settings/providers/import")
+def import_providers(
+    payload: dict,
+    db: Session = Depends(get_db),
+    agent: AgentService = Depends(get_agent_service),
+    service: RAGService = Depends(get_service),
+) -> dict:
+    """导入供应商配置（同 id 覆盖、空/掩码 Key 保留旧值、新 id 掩码 Key 拒收）。"""
+    from ..provider_io import import_providers as run_import
+
+    result = run_import(payload, db=db, settings=get_settings())
+    if result.get("ok"):
+        agent.refresh()
+        service.refresh()
+    return result
+
+
+@router.post("/settings/switch-chat-provider")
+def switch_chat_provider(
+    payload: dict,
+    db: Session = Depends(get_db),
+    agent: AgentService = Depends(get_agent_service),
+    service: RAGService = Depends(get_service),
+) -> dict:
+    """快捷切换激活对话供应商（聊天页头部下拉）。
+
+    与 PUT /settings 的区别：只清对话缓存（refresh_chat_only），不触发
+    RAGService 的嵌入/重排重载——本地 BGE 重新加载体感数秒，快捷切换要高频用。
+    """
+    provider_id = str((payload or {}).get("provider_id") or "").strip()
+    if not provider_id:
+        raise HTTPException(status_code=422, detail="缺少 provider_id")
+    target = next(
+        (
+            p
+            for p in get_providers(get_settings())
+            if p.get("id") == provider_id and p.get("type") == "chat"
+        ),
+        None,
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="供应商不存在")
+    if not target.get("enabled", True):
+        raise HTTPException(status_code=409, detail="供应商未启用，请先在设置中开启")
+    merged = save_overrides(
+        db, {"active_chat_provider": provider_id}, settings=get_settings()
+    )
+    agent.refresh_chat_only()
+    service.refresh_chat_only()
+    return {
+        "ok": True,
+        "active_chat_provider": merged.get("active_chat_provider"),
+        "model": target.get("model") or "",
+    }

@@ -1,16 +1,8 @@
-"""技能目录：扫描本机已安装的 Agent Skills（Codex / Claude / Hermes），
-把"技能名 + 描述 + SKILL.md 摘要"索引起来，供 Agent 按需检索注入。
+"""技能 · 扫描与检索（从 app/skills.py 拆出，2026-10-10）。
 
-设计要点：
-- 支持三种目录布局：Codex/Claude 平铺（skills/<name>/SKILL.md）、
-  Hermes 分类嵌套（skills/<category>/<name>/SKILL.md、optional-skills/...）；
-- 按技能名去重（保留 Codex > Hermes > Hermes-optional > Claude 的优先级）；
-- 屏蔽与本助手无关的元技能/领域技能，避免目录里塞满无用条目；
-- 启停/隐藏偏好持久化在 app_meta.skill_prefs：
-  * enabled = 本助手启用的技能（Agent 的 skill_lookup 只返回这些）；
-  * hidden  = 从本助手移除的技能（只影响本助手，绝不改动其他 Agent 的文件）；
-- 默认启用一份"最实用必要"的精选手集，用户可在设置页调整。
-"""
+多来源目录发现（codex/agent/hermes/claude）、frontmatter 解析、分组归类、
+TTL 扫描缓存与中英检索。"""
+
 
 from __future__ import annotations
 
@@ -25,12 +17,19 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# 自创技能目录：知问 Agent 通过 write_skill 写入（与 Hermes 个人层隔离）。
-# 用户可在技能页按技能选择"共享"——复制到 Hermes 个人层供 Hermes 使用。
+from .prefs import _get_cached_prefs
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
 AGENT_SKILLS_DIR = Path(os.environ.get("DATA_DIR") or (_PROJECT_ROOT / "data")) / "agent_skills"
+
+
 HERMES_SKILLS_DIR = Path(os.path.expanduser("~/.hermes/skills"))
+
+
 AGENT_SOURCE = "agent"
+
 
 def _expand_plugin_skill_root(rel_glob: str) -> str | None:
     """把 ~/.claude/plugins/cache/<glob> 展开为实际存在的技能根目录。
@@ -45,7 +44,6 @@ def _expand_plugin_skill_root(rel_glob: str) -> str | None:
     return matches[-1] if matches else None
 
 
-# (来源标签, 根目录, 目录布局: flat=一级目录 / nested=分类/技能 两级)
 DEFAULT_ROOTS = [
     # 知问自创技能（write_skill 写入；用户可共享到 Hermes 个人层）
     (AGENT_SOURCE, str(AGENT_SKILLS_DIR), "nested"),
@@ -64,9 +62,10 @@ DEFAULT_ROOTS = [
     ("hermes", r"D:\agents\hermes\optional-skills", "nested"),
 ]
 
+
 _SOURCE_PRIORITY = {"codex": 0, "agent": 0.5, "hermes": 1, "claude": 3}
 
-# 与本助手无关/元技能：直接不进入目录
+
 SKIP_NAMES = {
     # Codex 系统技能与元技能
     "openai-docs", "plugin-creator", "skill-creator", "skill-installer",
@@ -79,35 +78,14 @@ SKIP_NAMES = {
     "learned",
 }
 
-# 与个人知识库助手无关的领域分类（Hermes 分类目录）
+
 SKIP_CATEGORIES = {
     "apple", "smart-home", "blockchain", "finance", "gaming", "health",
     "payments", "security", "migration", "dogfood", "yuanbao", "index-cache",
     "evaluation", "inference", "models",
 }
 
-# 默认启用：经过筛选的"最实用必要"技能（可按 id 调整，用户偏好覆盖）
-DEFAULT_ENABLED = {
-    # 文档与知识库处理
-    "pdf", "ocr-and-documents", "docx", "xlsx", "powerpoint", "nano-pdf",
-    # 写作与内容
-    "content-research-writer", "email-draft-polish", "humanizer",
-    "tailored-resume-generator", "meeting-notes-and-actions",
-    # 研究与资料
-    "arxiv", "research-paper-writing", "grounded-citations",
-    # 个人效率
-    "file-organizer",
-    # 前端/设计
-    "design-taste-frontend", "canvas-design", "architecture-diagram",
-    "baoyu-infographic",
-    # 编程与调试
-    "create-plan", "systematic-debugging", "simplify-code",
-    "test-driven-development", "requesting-code-review", "codebase-inspection",
-    # 数据与机器学习
-    "jupyter-live-kernel",
-}
 
-# 功能分组（用于设置页按功能筛选）
 SKILL_GROUPS = {
     "documents": "文档处理",
     "writing": "写作内容",
@@ -122,7 +100,7 @@ SKILL_GROUPS = {
     "other": "其他",
 }
 
-# 分组判定规则：按 (名称/标签/描述 关键词, 分组) 顺序匹配
+
 _GROUP_RULES = [
     (("github",), "github"),
     (("youtube", "gif", "video", "audio", "song", "media", "manim"), "media"),
@@ -138,7 +116,7 @@ _GROUP_RULES = [
       "file-organizer", "templates"), "productivity"),
 ]
 
-# 名称优先精确归类：名称/目录名明确时直接定组，避免描述/标签里的关键词抢归类
+
 _NAME_OVERRIDES = {
     "pdf": "documents",
     "docx": "documents",
@@ -207,8 +185,6 @@ def _group_for(skill: dict) -> str:
     return "other"
 
 
-# 中文查询 -> 英文关键词映射：技能描述多为英文，跨语言语义检索不稳，
-# 用术语映射做关键词加权，保证中文查询能命中对应技能。
 TRANSLATE = {
     "写作": ["write", "writing", "author", "draft", "polish", "content"],
     "润色": ["polish", "refine", "writing", "edit"],
@@ -236,16 +212,14 @@ TRANSLATE = {
     "数据库": ["database", "sql", "query"],
 }
 
+
 _cache: list[dict] | None = None
+
+
 _scanned_at = 0.0
+
+
 _SCAN_TTL = 300  # 5 分钟重新扫描
-_prefs: dict | None = None
-_prefs_lock = threading.Lock()
-
-
-# ============================================================
-# 扫描
-# ============================================================
 
 
 def _iter_skill_dirs(root: Path, layout: str):
@@ -408,205 +382,6 @@ def scan_skills(force: bool = False) -> list[dict]:
     return skills
 
 
-# ============================================================
-# 偏好（启停 / 隐藏）——只影响本助手，绝不修改技能文件
-# ============================================================
-
-
-def _get_cached_prefs() -> dict:
-    with _prefs_lock:
-        if _prefs is None:
-            return {
-                "enabled": set(DEFAULT_ENABLED),
-                "hidden": set(),
-                "custom": False,
-            }
-        return {
-            "enabled": set(_prefs.get("enabled") or []),
-            "hidden": set(_prefs.get("hidden") or []),
-            "custom": bool(_prefs.get("custom")),
-        }
-
-
-def load_prefs(db, force: bool = False) -> dict:
-    """从数据库读取技能偏好；无自定义记录时使用默认精选手集。"""
-    global _prefs
-    if db is None:
-        return _get_cached_prefs()
-    raw = None
-    try:
-        from .db import repository as repo
-
-        raw = repo.get_meta(db, "skill_prefs")
-    except Exception as exc:
-        logger.warning("读取技能偏好失败：%s", exc)
-    data: dict = {}
-    if raw:
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                data = parsed
-        except Exception as exc:
-            logger.warning("skill_prefs 解析失败：%s", exc)
-    with _prefs_lock:
-        if data.get("custom"):
-            _prefs = {
-                "enabled": set(data.get("enabled") or []),
-                "hidden": set(data.get("hidden") or []),
-                "custom": True,
-            }
-        else:
-            _prefs = {
-                "enabled": set(DEFAULT_ENABLED),
-                "hidden": set(),
-                "custom": False,
-            }
-    return _get_cached_prefs()
-
-
-def save_prefs(db, enabled: list[str] | None = None, hidden: list[str] | None = None) -> dict:
-    """保存技能偏好并立即生效。enabled/hidden 传空列表即清空。"""
-    global _prefs
-    prev = _get_cached_prefs()
-    new_enabled = set(str(x).strip() for x in (enabled if enabled is not None else prev["enabled"]) if x)
-    new_hidden = set(str(x).strip() for x in (hidden if hidden is not None else prev["hidden"]) if x)
-    # 隐藏的技能不应同时处于启用状态
-    new_enabled -= new_hidden
-    data = {
-        "enabled": sorted(new_enabled),
-        "hidden": sorted(new_hidden),
-        "custom": True,
-    }
-    with _prefs_lock:
-        _prefs = {
-            "enabled": new_enabled,
-            "hidden": new_hidden,
-            "custom": True,
-        }
-    if db is not None:
-        try:
-            from .db import repository as repo
-
-            repo.set_meta(db, "skill_prefs", json.dumps(data, ensure_ascii=False))
-        except Exception as exc:
-            logger.warning("保存技能偏好失败：%s", exc)
-    return _get_cached_prefs()
-
-
-def reset_prefs(db) -> dict:
-    """恢复默认精选手集。"""
-    return save_prefs(db, enabled=sorted(DEFAULT_ENABLED), hidden=[])
-
-
-# ============================================================
-# 检索
-# ============================================================
-
-
-# ============================================================
-# 自创技能管理：定位 / 共享（复制给 Hermes）/ 取消共享 / 删除
-# ============================================================
-
-_SAFE_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,80}")
-
-
-def _resolve_agent_skill(dir_name: str, category: str | None = None) -> Path | None:
-    """定位自创技能目录并防路径穿越；返回绝对路径或 None。"""
-    dir_name = (dir_name or "").strip()
-    if not _SAFE_NAME_RE.fullmatch(dir_name):
-        return None
-    cat = (category or "").strip()
-    if cat and not _SAFE_NAME_RE.fullmatch(cat):
-        cat = ""
-    root = Path(AGENT_SKILLS_DIR)
-    if not root.is_dir():
-        return None
-    candidates: list[Path] = (
-        [root / cat / dir_name] if cat else sorted(root.glob(f"*/{dir_name}"))
-    )
-    for cand in candidates:
-        try:
-            resolved = cand.resolve()
-            resolved.relative_to(root.resolve())
-        except (ValueError, OSError):
-            continue
-        if (resolved / "SKILL.md").is_file():
-            return resolved
-    return None
-
-
-def _read_skill_origin(skill_dir: Path) -> str:
-    """读取技能 frontmatter 的 origin 字段（判断是否为本助手创建/共享）。"""
-    try:
-        text = (skill_dir / "SKILL.md").read_text(encoding="utf-8", errors="ignore")[:800]
-    except OSError:
-        return ""
-    _, _, _, extra = _parse_frontmatter(text)
-    return str(extra.get("origin") or "")
-
-
-def share_agent_skill(dir_name: str, category: str | None = None) -> dict:
-    """把自创技能复制到 Hermes 个人技能层（共享给 Hermes 使用）。"""
-    src = _resolve_agent_skill(dir_name, category)
-    if src is None:
-        raise FileNotFoundError(f"未找到自创技能 {dir_name}")
-    rel = src.relative_to(Path(AGENT_SKILLS_DIR).resolve())
-    dst = HERMES_SKILLS_DIR / rel
-    updated = (dst / "SKILL.md").exists()
-    dst.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src, dst, dirs_exist_ok=True)
-    scan_skills(force=True)
-    return {"ok": True, "updated": updated, "target": str(dst)}
-
-
-def unshare_agent_skill(dir_name: str, category: str | None = None) -> dict:
-    """取消共享：删除 Hermes 个人层里的副本（仅限 origin=agent 的目录）。"""
-    src = _resolve_agent_skill(dir_name, category)
-    if src is None:
-        raise FileNotFoundError(f"未找到自创技能 {dir_name}")
-    rel = src.relative_to(Path(AGENT_SKILLS_DIR).resolve())
-    dst = HERMES_SKILLS_DIR / rel
-    if not (dst / "SKILL.md").is_file():
-        return {"ok": True, "updated": False}
-    if _read_skill_origin(dst) != AGENT_SOURCE:
-        raise PermissionError("该目录不是本助手共享的副本，拒绝删除")
-    shutil.rmtree(dst)
-    scan_skills(force=True)
-    return {"ok": True, "updated": True, "target": str(dst)}
-
-
-def delete_agent_skill(dir_name: str, category: str | None = None) -> dict:
-    """删除自创技能；已共享的副本一并清理（仅限 origin=agent 的目录）。"""
-    src = _resolve_agent_skill(dir_name, category)
-    if src is None:
-        raise FileNotFoundError(f"未找到自创技能 {dir_name}")
-    rel = src.relative_to(Path(AGENT_SKILLS_DIR).resolve())
-    dst = HERMES_SKILLS_DIR / rel
-    removed_shared = False
-    if (dst / "SKILL.md").is_file() and _read_skill_origin(dst) == AGENT_SOURCE:
-        shutil.rmtree(dst)
-        removed_shared = True
-    shutil.rmtree(src)
-    scan_skills(force=True)
-    return {"ok": True, "removed_shared": removed_shared}
-
-
-def agent_skill_content(
-    dir_name: str, category: str | None = None, limit: int = 20000
-) -> dict:
-    """读取自创技能 SKILL.md 全文（预览用）。"""
-    src = _resolve_agent_skill(dir_name, category)
-    if src is None:
-        raise FileNotFoundError(f"未找到自创技能 {dir_name}")
-    text = (src / "SKILL.md").read_text(encoding="utf-8", errors="ignore")
-    return {
-        "ok": True,
-        "name": dir_name,
-        "content": text[:limit],
-        "truncated": len(text) > limit,
-    }
-
-
 def search_skills(
     query: str,
     embeddings=None,
@@ -656,153 +431,3 @@ def search_skills(
             scored.append((score, skill))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [s for _, s in scored[:top_k]]
-
-
-# ============================================================
-# 结构化技能目录（P2-13）：让 skill_lookup 返回分节摘要而非整段截断
-# ============================================================
-
-# 需要展开的优先段落（按重要性排序）
-_PRIORITY_SECTIONS = (
-    "when to use",
-    "prerequisites",
-    "steps",
-    "how to",
-    "usage",
-    "examples",
-    "workflow",
-    "recommended",
-    "gotchas",
-    "troubleshooting",
-)
-
-
-def skill_structure(skill_md_path: str, max_sections: int = 8) -> list[dict]:
-    """把 SKILL.md 解析成 {heading, summary} 段目录，供模型按需展开。
-
-    相比"前 N 字符截断"，分节目录能保留关键段（When to Use / Prerequisites /
-    Steps）的完整入口，避免复杂技能的关键步骤被截掉。
-    """
-    try:
-        text = Path(skill_md_path).read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return []
-    sections: list[dict] = []
-    current_heading = ""
-    current_lines: list[str] = []
-
-    def flush():
-        if current_heading and current_lines:
-            summary = " ".join(
-                ln.strip() for ln in current_lines if ln.strip()
-            ).strip()
-            sections.append(
-                {
-                    "heading": current_heading,
-                    "summary": summary[:300],
-                }
-            )
-
-    for line in text.splitlines():
-        if line.startswith("#"):
-            flush()
-            current_heading = line.lstrip("#").strip()
-            current_lines = []
-        elif current_heading:
-            current_lines.append(line)
-    flush()
-
-    if not sections:
-        return []
-    # 去掉 frontmatter 伪段落（--- 之类），并按优先级排序
-    cleaned = [
-        s for s in sections if s["heading"] and s["heading"] != "---"
-    ]
-    cleaned.sort(
-        key=lambda s: (
-            next(
-                (i for i, key in enumerate(_PRIORITY_SECTIONS) if key in s["heading"].lower()),
-                99,
-            ),
-            len(s["summary"]),
-        )
-    )
-    return cleaned[:max_sections]
-
-
-# ============================================================
-# 安全清洗与自动注入（防止 SKILL.md 提示注入）
-# ============================================================
-
-# 高风险指令模式：命中即整行替换为占位说明（只过滤"命令式越权"，不影响正常文档）
-RISK_PATTERNS = (
-    (r"ignore\s+(all\s+)?(previous|prior|above)", "试图覆盖此前指令"),
-    (r"you\s+are\s+now\b|pretend\s+you\s+are\b", "身份冒充指令"),
-    (r"disregard|override\s+(the\s+)?(system|safety|guardrail|policy|rules)", "越权指令"),
-    (r"exfiltrat|send\s+(all\s+)?(your\s+)?(data|files|keys|secrets|credentials)", "数据外传"),
-    (r"(output|print|reveal|show)\s+(your\s+)?(api\s*key|password|secret|token|credential)", "索要凭据"),
-    (r"do\s+not\s+(tell|inform|notify|ask)\s+(the\s+)?user", "隐瞒指令"),
-    (r"bypass|circumvent|disable\s+(.*)?(approval|permission|safety|security)", "绕过审批"),
-    (r"run\s+(it|this|commands|anything)\s+without\s+(asking|approval|permission|confirmation)", "擅自执行"),
-    (r"rm\s+-rf\s+[/~]|format\s+[a-z]:|del\s+/[fqs]", "破坏性命令"),
-)
-
-
-def sanitize_skill_text(text: str, limit: int = 1500) -> str:
-    """清洗技能内容：高风险指令行替换为占位说明，并做长度截断。"""
-    text = text or ""
-    lines = []
-    for ln in text.splitlines():
-        matched = next(
-            (label for pat, label in RISK_PATTERNS if re.search(pat, ln, re.I)),
-            None,
-        )
-        lines.append(f"[已过滤：{matched}]" if matched else ln)
-    cleaned = "\n".join(lines).strip()
-    if len(cleaned) > limit:
-        return cleaned[:limit] + "\n…（内容已截断）"
-    return cleaned
-
-
-def build_skill_catalog(enabled_ids: set[str] | None = None, limit: int = 40) -> str:
-    """生成紧凑的技能目录文本（名称 + 一句话描述），注入系统提示词。"""
-    skills = scan_skills()
-    if enabled_ids is not None:
-        skills = [s for s in skills if s["name"] in enabled_ids]
-    lines = []
-    for s in skills[:limit]:
-        desc = " ".join((s.get("description") or "").split())[:90]
-        lines.append(f"- {s['name']}：{desc}")
-    return "\n".join(lines)
-
-
-def matching_skills_for_injection(
-    query: str,
-    enabled_ids: set[str] | None = None,
-    top_k: int = 2,
-    max_sections: int = 6,
-) -> str:
-    """按关键词匹配当前问题最相关的技能，返回清洗后的结构化说明。
-
-    用于 prepare 阶段自动注入（不等模型主动调用 skill_lookup），
-    内容经 sanitize_skill_text 过滤高风险指令。
-    """
-    hits = search_skills(
-        query,
-        embeddings=None,
-        top_k=top_k,
-        enabled_ids=enabled_ids,
-    )
-    blocks = []
-    for h in hits:
-        sections = skill_structure(h["path"], max_sections=max_sections)
-        sec_text = "\n".join(
-            f"- {s['heading']}：{sanitize_skill_text(s['summary'], 200)}"
-            for s in sections
-        )
-        blocks.append(
-            f"### {h['name']}（来源：{h['source']}）\n"
-            f"{sanitize_skill_text(h.get('description') or '', 200)}\n"
-            f"{sec_text}"
-        )
-    return "\n\n".join(blocks)

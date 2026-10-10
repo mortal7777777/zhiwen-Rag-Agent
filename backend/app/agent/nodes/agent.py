@@ -10,11 +10,20 @@ import time
 
 from ...config import Settings
 from ...llm_text import extract_thinking_blocks, extract_thinking_text, message_text
-from ...runtime_config import effective
+from ...runtime_config import effective, effective_or
 
 logger = logging.getLogger(__name__)
 from ..state import AgentState, EventBus
-from .common import _iteration_limit
+from .common import _bump_patch, _iteration_limit
+from .prompts import (
+    EMPTY_RETRY_HINT,
+    LAST_CALL_WARNING,
+    XML_RETRY_HINT,
+    dispatch_cap_notice,
+    dispatch_ignored_notice,
+    downgraded_notice,
+    plan_remaining_notice,
+)
 from .subagent import (
     _parse_declared_subtasks,
     _split_declaration,
@@ -77,6 +86,41 @@ class _StreamError:
         self.exc = exc
 
 
+def _should_warn_last_call(
+    *,
+    has_tools: bool,
+    plan_steps: list | None,
+    remaining_calls: int,
+    forced_final: bool,
+    warned: bool,
+) -> bool:
+    """还剩最后一次工具调用（且有计划步骤）时，是否插入"补充检索"提示。"""
+    return (
+        has_tools
+        and bool(plan_steps)
+        and remaining_calls == 1
+        and not forced_final
+        and not warned
+    )
+
+
+def _should_retry_xml(
+    *,
+    tool_calls: list,
+    merged_text: str,
+    forced_final: bool,
+    retry_count: int,
+    limit: int = 2,
+) -> bool:
+    """XML 工具调用标记存在但解析失败时，是否给一次纠正重试（有界）。"""
+    return (
+        not tool_calls
+        and any(m in merged_text for m in _XML_TOOL_MARKERS)
+        and not forced_final
+        and retry_count < limit
+    )
+
+
 def _stall_timeout(settings: Settings) -> float:
     raw = effective(settings, "agent_llm_stall_timeout_s")
     try:
@@ -106,24 +150,15 @@ def _agent_node(state: AgentState, runtime) -> dict:
 
     # 还剩最后一次工具调用时提前提示：优先补充检索，随后必须作答
     remaining_calls = _iteration_limit(state, settings) - state["tool_calls_used"]
-    if (
-        tools
-        and state.get("plan_steps")
-        and remaining_calls == 1
-        and not state["forced_final"]
-        and not state["last_call_warned"]
+    if _should_warn_last_call(
+        has_tools=bool(tools),
+        plan_steps=state.get("plan_steps"),
+        remaining_calls=remaining_calls,
+        forced_final=bool(state["forced_final"]),
+        warned=bool(state["last_call_warned"]),
     ):
         state["last_call_warned"] = True
-        messages.append(
-            SystemMessage(
-                content=(
-                    "你只剩最后一次工具调用机会。若信息仍不完整，"
-                    "请利用这次机会做一次补充检索（优先 knowledge_base_search"
-                    " 或 web_search）；之后必须给出最终回答。"
-                    "若仍不足，明确告诉用户缺少什么，不要编造。"
-                )
-            )
-        )
+        messages.append(SystemMessage(content=LAST_CALL_WARNING))
 
     bus.emit("status", {"phase": "thinking", "text": "正在思考并生成回答…"})
 
@@ -202,7 +237,7 @@ def _agent_node(state: AgentState, runtime) -> dict:
         emit_len = 0
         emit_last = time.perf_counter()
         # 思考链展示缓冲（仅展示，不进历史/缓存前缀）：开关控制，默认关
-        show_thinking = effective(settings, "reasoning_summary_enabled", False)
+        show_thinking = effective_or(settings, "reasoning_summary_enabled", False)
         think_buf: list[str] = []
         think_len = 0
         think_last = time.perf_counter()
@@ -368,6 +403,7 @@ def _agent_node(state: AgentState, runtime) -> dict:
     if state["forced_final"] and tool_calls:
         # forced_final 下模型仍调工具：计数，超过阈值后解除绑定兜底
         rt["forced_tool_rounds"] = rt.get("forced_tool_rounds", 0) + 1
+        _bump_patch(rt, "forced_tool_round")
     merged_text = message_text(merged.content)
     # 全角/DSML 前缀变体先归一化：否则 <｜DSML｜tool_calls> 这类标签
     # 漏过工具轮判定，正文（含标签）直接泄漏进最终回答
@@ -393,14 +429,7 @@ def _agent_node(state: AgentState, runtime) -> dict:
         # 达上限：不再受理声明，让它作为普通工具调用走 tools 节点（链形状合法、
         # 该工具无副作用），并明确要求模型自己收尾，避免无界扇出。
         declared = []
-        messages.append(
-            SystemMessage(
-                content=(
-                    f"本轮派发已达上限（{dispatch_cap} 轮），不再受理新的派发声明。"
-                    "请自己完成剩余工作或直接作答。"
-                )
-            )
-        )
+        messages.append(SystemMessage(content=dispatch_cap_notice(dispatch_cap)))
     if declared:
         subtasks, downgraded = _parse_declared_subtasks(declared)
         if not subtasks:
@@ -415,23 +444,11 @@ def _agent_node(state: AgentState, runtime) -> dict:
             state["pending_subtasks"] = subtasks
             if others:
                 messages.append(
-                    SystemMessage(
-                        content=(
-                            "本轮已受理派发声明，同轮的其它工具调用未执行"
-                            f"（{', '.join(str((tc or {}).get('name') or '') for tc in others)}）。"
-                            "子任务结果返回后，如仍需这些调用请重新发起。"
-                        )
-                    )
+                    SystemMessage(content=dispatch_ignored_notice(others))
                 )
             if downgraded:
                 messages.append(
-                    SystemMessage(
-                        content=(
-                            f"本轮声明了多个 execute 子任务，只放开第一个；"
-                            f"其余 {downgraded} 个已按 research 只读执行"
-                            "（并行写同一目录有冲突风险）。需要串行执行请下一轮再派。"
-                        )
-                    )
+                    SystemMessage(content=downgraded_notice(downgraded))
                 )
     # 工具轮：content 是过渡思考文本，不写入消息历史（避免下一轮
     # 重复发送 + 污染上下文）；只保留 tool_calls 供 tools 节点执行
@@ -503,22 +520,15 @@ def _agent_node(state: AgentState, runtime) -> dict:
     # 模型把工具调用写成 XML 文本且格式无法解析时，不执行工具也不作答就
     # 收尾会表现为"停止生成"；提示模型改用标准工具调用或直接作答，最多重试 2 次。
     xml_force = False
-    if (
-        not tool_calls
-        and any(m in merged_text for m in _XML_TOOL_MARKERS)
-        and not state["forced_final"]
-        and int(state.get("xml_retry_count") or 0) < 2
+    if _should_retry_xml(
+        tool_calls=tool_calls,
+        merged_text=merged_text,
+        forced_final=bool(state["forced_final"]),
+        retry_count=int(state.get("xml_retry_count") or 0),
     ):
         state["xml_retry_count"] = int(state.get("xml_retry_count") or 0) + 1
-        messages.append(
-            SystemMessage(
-                content=(
-                    "你上一条输出包含 XML 风格工具调用标记（如 <tool_calls>/<invoke>），"
-                    "未能解析执行。请改用标准工具调用格式继续（不要把工具调用写成 XML 文本），"
-                    "或直接给出最终回答。"
-                )
-            )
-        )
+        _bump_patch(rt, "xml_retry")
+        messages.append(SystemMessage(content=XML_RETRY_HINT))
         xml_force = True
 
     # ---- 空正文兜底：输出预算被思考吃光，正文一个字都没剩 ----
@@ -534,17 +544,10 @@ def _agent_node(state: AgentState, runtime) -> dict:
         retry_count=int(state.get("empty_retry_count") or 0),
     ):
         state["empty_retry_count"] = int(state.get("empty_retry_count") or 0) + 1
+        _bump_patch(rt, "empty_retry")
         # 下一轮用无思考模型：只有一次机会，不能再被 reasoning 吃光
         state["empty_retry_pending"] = True
-        messages.append(
-            SystemMessage(
-                content=(
-                    "你上一条输出没有产生任何正文（内容可能全部消耗在思考上、"
-                    "并被输出长度上限截断）。请直接输出给用户的回答正文，"
-                    "不要再重复思考；若信息确实不足，明确说明缺少什么。"
-                )
-            )
-        )
+        messages.append(SystemMessage(content=EMPTY_RETRY_HINT))
         empty_force = True
 
     # ---- 计划硬约束：还有未完成的工具型步骤时，不允许提前收尾 ----
@@ -577,21 +580,9 @@ def _agent_node(state: AgentState, runtime) -> dict:
                 state["plan_push_count"] = (
                     int(state.get("plan_push_count") or 0) + 1
                 )
-                remaining_text = "；".join(
-                    str(item.get("text") or item.get("step") or item)
-                    for item in remaining[:6]
-                )
+                _bump_patch(rt, "plan_push")
                 messages.append(
-                    SystemMessage(
-                        content=(
-                            "【计划硬约束】以下步骤尚未完成："
-                            f"{remaining_text}\n"
-                            "请继续完成它们，不要提前输出最终回答；"
-                            "若某步确实无需执行或已完成，先用 todo_update "
-                            "complete 标记为已完成（无需执行的用 remove 删除），"
-                            "再结束。"
-                        )
-                    )
+                    SystemMessage(content=plan_remaining_notice(remaining))
                 )
         except Exception as exc:
             logger.warning("计划硬约束判断失败：%s", exc)
