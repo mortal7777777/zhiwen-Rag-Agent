@@ -26,62 +26,67 @@
           </el-tooltip>
           <span class="chat-title">{{ currentTitle }}</span>
         </div>
-        <!-- 供应商快捷切换（只切供应商；管理入口跳设置页模型面板） -->
-        <el-dropdown
-          trigger="click"
-          :disabled="loading || quickBusy"
-          @command="onQuickSwitch"
-        >
-          <span :class="['model-switch-chip', { busy: quickBusy }]">
-            {{ quickActiveName || '未配置供应商' }}
-            <span v-if="quickModel" class="model-switch-model">{{ quickModel }}</span>
-          </span>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item
-                v-for="p in quickProviders"
-                :key="p.id"
-                :command="p.id"
-                :disabled="p.id === quickActiveId"
-              >
-                {{ p.name }} · {{ p.model || '未设模型' }}
-              </el-dropdown-item>
-              <el-dropdown-item divided command="__manage__">管理供应商…</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-        <el-button text type="primary" @click="openTemplateManager">
-          <el-icon><Operation /></el-icon>
-          提示词模板
-        </el-button>
-        <el-button text type="primary" class="memory-btn" @click="openMemories">
-          <el-icon><Memo /></el-icon>
-          记忆
-        </el-button>
-        <el-button text type="primary" class="memory-btn" @click="$router.push('/runs')">
-          <el-icon><DataAnalysis /></el-icon>
-          运行记录
-        </el-button>
-        <el-button
-          text
-          type="primary"
-          class="memory-btn"
-          :disabled="!activeId"
-          @click="openContextDialog"
-        >
-          <el-icon><Histogram /></el-icon>
-          上下文
-        </el-button>
-        <el-button
-          text
-          type="primary"
-          class="memory-btn"
-          :disabled="!activeId"
-          @click="openTimeline"
-        >
-          <el-icon><Clock /></el-icon>
-          快照
-        </el-button>
+        <div class="header-actions">
+          <!-- 供应商快捷切换（只切供应商；管理入口跳设置页模型面板） -->
+          <el-dropdown
+            trigger="click"
+            :disabled="loading || quickBusy"
+            @command="onQuickSwitch"
+          >
+            <span :class="['model-switch-chip', { busy: quickBusy }]">
+              {{ quickActiveName || '未配置供应商' }}
+              <span v-if="quickModel" class="model-switch-model">{{ quickModel }}</span>
+            </span>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  v-for="p in quickProviders"
+                  :key="p.id"
+                  :command="p.id"
+                  :disabled="p.id === quickActiveId"
+                >
+                  {{ p.name }} · {{ p.model || '未设模型' }}
+                </el-dropdown-item>
+                <el-dropdown-item divided command="__manage__">管理供应商…</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+
+          <el-tooltip content="上下文占用" placement="bottom">
+            <div
+              :class="['header-icon-btn', { disabled: !activeId }]"
+              @click="activeId && openContextDialog()"
+            >
+              <el-icon :size="16"><Histogram /></el-icon>
+            </div>
+          </el-tooltip>
+          <el-tooltip content="会话快照" placement="bottom">
+            <div
+              :class="['header-icon-btn', { disabled: !activeId }]"
+              @click="activeId && openTimeline()"
+            >
+              <el-icon :size="16"><Clock /></el-icon>
+            </div>
+          </el-tooltip>
+          <el-dropdown trigger="click">
+            <div class="header-icon-btn header-more-btn" title="更多">
+              <el-icon :size="16"><MoreFilled /></el-icon>
+            </div>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item @click="openTemplateManager">
+                  <el-icon><Operation /></el-icon>提示词模板
+                </el-dropdown-item>
+                <el-dropdown-item @click="openMemories">
+                  <el-icon><Memo /></el-icon>记忆
+                </el-dropdown-item>
+                <el-dropdown-item @click="$router.push('/runs')">
+                  <el-icon><DataAnalysis /></el-icon>运行记录
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
       </header>
 
       <div
@@ -105,10 +110,31 @@
               @click="ask(s)"
             >
               <span class="suggestion-icon">
-                <el-icon :size="15"><component :is="s.icon" /></el-icon>
+                <el-icon :size="16"><component :is="s.icon" /></el-icon>
               </span>
-              {{ s.text }}
+              <span class="suggestion-body">
+                <span class="suggestion-text" :title="s.text">{{ s.text }}</span>
+                <span class="suggestion-desc">{{ s.desc }}</span>
+              </span>
             </div>
+          </div>
+          <!-- 静态能力标签（纯展示，不联动开关状态） -->
+          <div class="capability-chips">
+            <span class="capability-chip">
+              <el-icon :size="13"><Collection /></el-icon>知识库 RAG
+            </span>
+            <span class="capability-chip">
+              <el-icon :size="13"><Position /></el-icon>联网搜索
+            </span>
+            <span class="capability-chip">
+              <el-icon :size="13"><Picture /></el-icon>识图
+            </span>
+            <span class="capability-chip">
+              <el-icon :size="13"><Operation /></el-icon>工具执行
+            </span>
+            <span class="capability-chip">
+              <el-icon :size="13"><List /></el-icon>计划模式
+            </span>
           </div>
         </div>
 
@@ -247,48 +273,8 @@
         </div>
       </div>
 
-      <!-- 输入区 -->
+      <!-- 输入区（composer：textarea 在上、控制行在下） -->
       <div class="input-area">
-        <div class="toolbar">
-          <div class="toolbar-group">
-            <el-switch
-              v-model="toolMode"
-              active-value="auto"
-              inactive-value="manual"
-              active-text="自动"
-              inactive-text="自动"
-              class="auto-switch"
-              :disabled="loading"
-            />
-            <el-switch
-              v-model="useWebSearch"
-              active-text="联网搜索"
-              inactive-text="联网搜索"
-              :disabled="loading || toolMode === 'auto'"
-            />
-            <el-switch
-              v-model="useKnowledgeBase"
-              active-text="知识库"
-              inactive-text="知识库"
-              :disabled="loading || toolMode === 'auto'"
-            />
-          </div>
-          <el-select
-            v-model="templateId"
-            class="template-select"
-            placeholder="提示词模板"
-            :disabled="loading"
-          >
-            <el-option label="默认模板" :value="0" />
-            <el-option
-              v-for="t in templates"
-              :key="t.id"
-              :label="t.name"
-              :value="t.id"
-            />
-          </el-select>
-        </div>
-
         <!-- 已附加图片预览 -->
         <div v-if="attachedImages.length" class="image-preview-row">
           <div
@@ -304,11 +290,6 @@
         </div>
 
         <div class="input-box">
-          <el-tooltip content="上传图片（支持 Ctrl+V 粘贴）" placement="top">
-            <div class="attach-btn" @click="imageInputRef.click()">
-              <el-icon :size="18"><Picture /></el-icon>
-            </div>
-          </el-tooltip>
           <el-input
             ref="questionInput"
             v-model="question"
@@ -320,35 +301,86 @@
             @keydown.enter.exact.prevent="send"
             @paste="onPaste"
           />
-          <input
-            ref="imageInputRef"
-            type="file"
-            accept="image/*"
-            multiple
-            class="hidden-file-input"
-            @change="onImageFiles"
-          />
-          <el-button
-            v-if="loading"
-            circle
-            class="send-btn stop-btn"
-            @click="stop"
-          >
-            <el-icon :size="17"><VideoPause /></el-icon>
-          </el-button>
-          <el-button
-            v-else
-            type="primary"
-            circle
-            class="send-btn"
-            :disabled="hasSuspendedPending || (!question.trim() && !attachedImages.length)"
-            @click="send"
-          >
-            <el-icon :size="17"><Promotion /></el-icon>
-          </el-button>
+          <div class="composer-bar">
+            <div class="composer-chips">
+              <button
+                type="button"
+                :class="['composer-chip', { on: toolMode === 'auto' }]"
+                :disabled="loading"
+                title="自动模式：由模型自行决定检索与工具"
+                @click="toolMode = toolMode === 'auto' ? 'manual' : 'auto'"
+              >
+                <el-icon :size="13"><MagicStick /></el-icon>自动
+              </button>
+              <button
+                type="button"
+                :class="['composer-chip', { on: useWebSearch }]"
+                :disabled="loading || toolMode === 'auto'"
+                @click="useWebSearch = !useWebSearch"
+              >
+                <el-icon :size="13"><Position /></el-icon>联网搜索
+              </button>
+              <button
+                type="button"
+                :class="['composer-chip', { on: useKnowledgeBase }]"
+                :disabled="loading || toolMode === 'auto'"
+                @click="useKnowledgeBase = !useKnowledgeBase"
+              >
+                <el-icon :size="13"><Collection /></el-icon>知识库
+              </button>
+            </div>
+            <el-select
+              v-model="templateId"
+              class="composer-template"
+              placeholder="模板"
+              :disabled="loading"
+            >
+              <el-option label="默认模板" :value="0" />
+              <el-option
+                v-for="t in templates"
+                :key="t.id"
+                :label="t.name"
+                :value="t.id"
+              />
+            </el-select>
+            <div class="composer-right">
+              <el-tooltip content="上传图片（支持 Ctrl+V 粘贴）" placement="top">
+                <div class="attach-btn" @click="imageInputRef.click()">
+                  <el-icon :size="17"><Picture /></el-icon>
+                </div>
+              </el-tooltip>
+              <input
+                ref="imageInputRef"
+                type="file"
+                accept="image/*"
+                multiple
+                class="hidden-file-input"
+                @change="onImageFiles"
+              />
+              <el-button
+                v-if="loading"
+                circle
+                class="send-btn stop-btn"
+                @click="stop"
+              >
+                <el-icon :size="16"><VideoPause /></el-icon>
+              </el-button>
+              <el-button
+                v-else
+                type="primary"
+                circle
+                class="send-btn"
+                :disabled="hasSuspendedPending || (!question.trim() && !attachedImages.length)"
+                @click="send"
+              >
+                <el-icon :size="16"><Promotion /></el-icon>
+              </el-button>
+            </div>
+          </div>
         </div>
         <div class="input-foot">
-          Enter 发送 · Shift+Enter 换行 · 支持 Ctrl+V 粘贴图片
+          <kbd>Enter</kbd> 发送 · <kbd>Shift</kbd> + <kbd>Enter</kbd> 换行 ·
+          <kbd>Ctrl</kbd> + <kbd>V</kbd> 粘贴图片
         </div>
       </div>
     </main>
@@ -670,8 +702,10 @@ import {
   Expand,
   Fold,
   Histogram,
+  List,
   MagicStick,
   Memo,
+  MoreFilled,
   Operation,
   Picture,
   Position,
@@ -1010,6 +1044,12 @@ function categoryTagType(key) {
 
 // 欢迎页建议问题：每天由后端生成（知识库 / 热点新闻 / 通用）
 const suggestionIcons = { kb: Collection, news: Position, general: MagicStick }
+// 建议卡副描述：后端只返回 type/text，前端按类型补一行能力说明
+const suggestionDescs = {
+  kb: '检索知识库文档，回答附带出处',
+  news: '联网检索最新资讯',
+  general: '通用对话、写作与润色',
+}
 const suggestions = ref([])
 
 async function loadSuggestions() {
@@ -1018,12 +1058,13 @@ async function loadSuggestions() {
     suggestions.value = items.map((item) => ({
       icon: suggestionIcons[item.type] || MagicStick,
       text: item.text,
+      desc: suggestionDescs[item.type] || '直接开始对话',
     }))
   } catch {
     suggestions.value = [
-      { icon: Collection, text: '知识库里的文档主要讲了什么？' },
-      { icon: MagicStick, text: '帮我写一封简洁的工作周报' },
-      { icon: Position, text: '今天有什么值得关注的新闻？' },
+      { icon: Collection, text: '知识库里的文档主要讲了什么？', desc: suggestionDescs.kb },
+      { icon: MagicStick, text: '帮我写一封简洁的工作周报', desc: suggestionDescs.general },
+      { icon: Position, text: '今天有什么值得关注的新闻？', desc: suggestionDescs.news },
     ]
   }
 }
@@ -2283,14 +2324,41 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--border);
 }
 
-/* 顶部动作按钮：中性灰、悬浮升蓝（蓝色留给发送等主动作） */
-.chat-header :deep(.el-button.is-text) {
-  color: var(--text-2);
+/* 顶栏动作区：供应商 chip + 高频图标钮 + 「更多」下拉 */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
 }
 
-.chat-header :deep(.el-button.is-text:hover) {
-  color: var(--primary-text);
+/* 顶栏图标钮：与左端折叠钮同一视觉语言（32px 圆角方钮） */
+.header-icon-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.header-icon-btn:hover {
   background: var(--bg-hover);
+  color: var(--primary-text);
+}
+
+.header-icon-btn.disabled {
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+
+.header-icon-btn.disabled:hover {
+  background: transparent;
+  color: var(--text-3);
 }
 
 .header-left {
@@ -2395,7 +2463,6 @@ onBeforeUnmount(() => {
 
 .welcome .suggestions {
   flex-shrink: 0;
-  margin-bottom: auto;
 }
 
 .welcome-mark {
@@ -2407,7 +2474,9 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-lg);
   color: var(--text-on-brand);
   background: var(--primary-grad);
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--primary) 30%, transparent);
+  /* 品牌光晕：外圈扩散光 + 下方柔影 */
+  box-shadow: 0 0 0 10px color-mix(in srgb, var(--primary) 7%, transparent),
+    0 10px 28px color-mix(in srgb, var(--primary) 32%, transparent);
   margin-bottom: 20px;
 }
 
@@ -2421,7 +2490,7 @@ onBeforeUnmount(() => {
 }
 
 .welcome-title {
-  font-size: var(--font-2xl);
+  font-size: var(--font-3xl);
   font-weight: 700;
   margin-bottom: 8px;
 }
@@ -2436,22 +2505,25 @@ onBeforeUnmount(() => {
 
 .suggestions {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   width: 100%;
-  max-width: 780px;
+  max-width: 640px;
+}
+
+/* 奇数张建议卡：最后一张通栏，避免半行空格 */
+.suggestions .suggestion:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
 }
 
 .suggestion {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: flex-start;
+  gap: 12px;
   padding: 14px 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-card-2);
-  color: var(--text-2);
-  font-size: var(--font-base);
   cursor: pointer;
   text-align: left;
   transition: border-color var(--dur-base) var(--ease-out),
@@ -2462,7 +2534,6 @@ onBeforeUnmount(() => {
 .suggestion:hover {
   border-color: var(--primary);
   background: var(--bg-active);
-  color: var(--primary);
   transform: translateY(-2px);
   box-shadow: 0 6px 16px color-mix(in srgb, var(--primary) 12%, transparent);
 }
@@ -2479,8 +2550,68 @@ onBeforeUnmount(() => {
   color: var(--primary);
 }
 
+.suggestion-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.suggestion-text {
+  color: var(--text-1);
+  font-size: var(--font-base);
+  font-weight: 500;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.suggestion:hover .suggestion-text {
+  color: var(--primary);
+}
+
+.suggestion-desc {
+  color: var(--text-3);
+  font-size: var(--font-xs);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
 .suggestions {
   animation: fade-up var(--dur-slow) var(--ease-out) both;
+}
+
+/* 欢迎页能力标签行（静态展示） */
+.capability-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+  margin-top: var(--space-5);
+  margin-bottom: auto;
+  padding: 0 12px;
+  flex-shrink: 0;
+}
+
+.capability-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-card-2);
+  color: var(--text-3);
+  font-size: var(--font-xs);
+}
+
+.capability-chip .el-icon {
+  color: var(--primary);
 }
 
 
@@ -2654,6 +2785,12 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-md) var(--radius-md) var(--radius-md) var(--radius-xs);
   background: var(--bg-card);
   border: 1px solid var(--border);
+  /* 轻量化：常驻阴影改 hover 才显（边框保留） */
+  box-shadow: none;
+  transition: box-shadow var(--dur-base) var(--ease-out);
+}
+
+.assistant-content:hover {
   box-shadow: var(--shadow-soft);
 }
 
@@ -2662,12 +2799,18 @@ onBeforeUnmount(() => {
   font-weight: 400;
 }
 
+/* 消息动作（复制/重生成）：卡底左对齐，hover 浮现（覆盖式，不占正文高度） */
 .msg-actions {
   position: absolute;
-  top: 10px;
-  right: 12px;
+  bottom: 6px;
+  left: 12px;
+  display: flex;
+  gap: var(--space-1);
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg-card) 88%, transparent);
   opacity: 0;
-  transition: opacity 0.2s;
+  transition: opacity var(--dur-base) var(--ease-out);
 }
 
 .assistant-content:hover .msg-actions {
@@ -2832,38 +2975,6 @@ onBeforeUnmount(() => {
   border-top: 1px solid var(--border);
 }
 
-.toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  margin-bottom: 10px;
-}
-
-.toolbar-group {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 14px;
-}
-
-/* 开关配色由 theme.css 的 EP 映射层统一（--el-color-primary），不再就地打补丁 */
-
-.auto-switch :deep(.el-switch__label) {
-  font-weight: 600;
-  color: var(--text-1);
-}
-
-.toolbar-group .el-switch.is-disabled {
-  opacity: 0.65;
-}
-
-.template-select {
-  flex: 0 1 180px;
-  min-width: 140px;
-}
-
 /* 附加图片预览 */
 .image-preview-row {
   display: flex;
@@ -2909,12 +3020,12 @@ onBeforeUnmount(() => {
 }
 
 .input-box {
-  position: relative;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  padding: 10px 56px 10px 44px;
+  border-radius: var(--radius-lg);
+  padding: var(--space-3) var(--space-3) var(--space-2);
   background: var(--bg-card-2);
-  transition: all 0.2s;
+  transition: border-color var(--dur-base) var(--ease-out),
+    background var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
 }
 
 .input-box:focus-within {
@@ -2932,17 +3043,84 @@ onBeforeUnmount(() => {
   line-height: 1.6;
 }
 
+/* 控制行：开关 chips + 模板选择 + 附件/发送 */
+.composer-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.composer-chips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--font-xs);
+  font-family: inherit;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.composer-chip:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.composer-chip.on {
+  border-color: transparent;
+  background: var(--bg-active);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.composer-chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer-template {
+  width: 140px;
+  flex-shrink: 0;
+}
+
+.composer-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .attach-btn {
-  position: absolute;
-  left: 12px;
-  top: 14px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
   color: var(--text-3);
   cursor: pointer;
-  transition: color 0.2s;
+  transition: color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
 }
 
 .attach-btn:hover {
   color: var(--primary);
+  background: var(--bg-hover);
 }
 
 .hidden-file-input {
@@ -2950,11 +3128,8 @@ onBeforeUnmount(() => {
 }
 
 .send-btn {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   background: linear-gradient(135deg, var(--primary) 0%, var(--primary-2) 100%);
   border: none;
   box-shadow: 0 4px 10px color-mix(in srgb, var(--primary) 30%, transparent);
@@ -2974,11 +3149,39 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--danger) 88%, white);
 }
 
+/* 快捷键提示：kbd 键帽样式，仅输入区聚焦时浮现（触屏常显） */
 .input-foot {
-  margin-top: 8px;
+  margin-top: 6px;
   text-align: center;
   color: var(--text-3);
   font-size: var(--font-xs);
+  opacity: 0;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+
+.input-area:focus-within .input-foot {
+  opacity: 1;
+}
+
+.input-foot kbd {
+  display: inline-block;
+  min-width: 16px;
+  margin: 0 1px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-card-2);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: var(--font-2xs);
+  line-height: 1.5;
+}
+
+@media (hover: none) {
+  .input-foot {
+    opacity: 1;
+  }
 }
 
 /* 失败提示 */
@@ -3205,6 +3408,10 @@ onBeforeUnmount(() => {
 
   .msg {
     max-width: 100%;
+  }
+
+  .suggestions {
+    grid-template-columns: 1fr;
   }
 }
 /* ============ 界面风格细节（设置页切换；令牌见 theme.css）============ */

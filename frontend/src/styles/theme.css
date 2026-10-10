@@ -88,6 +88,7 @@
   --font-lg: 16px;
   --font-xl: 20px;
   --font-2xl: 24px;
+  --font-3xl: 30px;
   /* 标题字体（界面风格可覆写：书斋 → 宋体系） */
   --font-display: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial,
     sans-serif;

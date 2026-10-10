@@ -19,25 +19,32 @@
     </div>
 
     <template v-if="!collapsed">
-      <div v-if="!sessions.length" class="session-empty">暂无历史会话</div>
+      <div v-if="!sessions.length" class="session-empty">
+        <el-icon :size="26"><ChatDotRound /></el-icon>
+        <p>暂无历史会话</p>
+        <span>点击上方「新建对话」开始提问</span>
+      </div>
       <div class="session-list">
-        <div
-          v-for="session in sessions"
-          :key="session.id"
-          :class="['session-item', { active: session.id === activeId }]"
-          @click="emit('switch', session)"
-        >
-          <div class="session-info">
-            <span class="session-title">{{ session.title }}</span>
-            <span v-if="session.message_count" class="session-count">
-              {{ session.message_count }}
-            </span>
+        <template v-for="group in groups" :key="group.label">
+          <div class="session-group-label">{{ group.label }}</div>
+          <div
+            v-for="session in group.items"
+            :key="session.id"
+            :class="['session-item', { active: session.id === activeId }]"
+            @click="emit('switch', session)"
+          >
+            <div class="session-info">
+              <span class="session-title">{{ session.title }}</span>
+              <span v-if="session.message_count" class="session-count">
+                {{ session.message_count }}
+              </span>
+            </div>
+            <div class="session-actions" @click.stop>
+              <el-icon @click="emit('rename', session)"><EditPen /></el-icon>
+              <el-icon @click="emit('delete', session)"><Delete /></el-icon>
+            </div>
           </div>
-          <div class="session-actions" @click.stop>
-            <el-icon @click="emit('rename', session)"><EditPen /></el-icon>
-            <el-icon @click="emit('delete', session)"><Delete /></el-icon>
-          </div>
-        </div>
+        </template>
       </div>
     </template>
 
@@ -69,15 +76,42 @@
  * `.chat-page`（flex 容器）作用到组件根上不受影响（Vue 作用域样式对子组件
  * 根节点有效），`.session-panel` / `.session-panel.collapsed` 等样式随组件走。
  */
-import { Delete, EditPen, Expand, Fold, Plus } from '@element-plus/icons-vue'
+import { computed } from 'vue'
+import { ChatDotRound, Delete, EditPen, Expand, Fold, Plus } from '@element-plus/icons-vue'
 
-defineProps({
+const props = defineProps({
   sessions: { type: Array, required: true },
   activeId: { type: [Number, String], default: null },
   collapsed: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
 })
 const emit = defineEmits(['new-chat', 'switch', 'rename', 'delete', 'update:collapsed'])
+
+// 按最近更新时间分组：今天 / 昨天 / 7 天内 / 更早（组内保持后端「最近更新在前」序）
+const groups = computed(() => {
+  const now = new Date()
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const startYesterday = new Date(startToday)
+  startYesterday.setDate(startToday.getDate() - 1)
+  const start7 = new Date(startToday)
+  start7.setDate(startToday.getDate() - 7)
+
+  const buckets = [
+    { label: '今天', items: [] },
+    { label: '昨天', items: [] },
+    { label: '7 天内', items: [] },
+    { label: '更早', items: [] },
+  ]
+  for (const s of props.sessions) {
+    const t = s.updated_at ? new Date(s.updated_at) : null
+    if (!t || Number.isNaN(t.getTime())) buckets[3].items.push(s)
+    else if (t >= startToday) buckets[0].items.push(s)
+    else if (t >= startYesterday) buckets[1].items.push(s)
+    else if (t >= start7) buckets[2].items.push(s)
+    else buckets[3].items.push(s)
+  }
+  return buckets.filter((b) => b.items.length)
+})
 </script>
 
 <style scoped>
@@ -117,10 +151,30 @@ const emit = defineEmits(['new-chat', 'switch', 'rename', 'delete', 'update:coll
 }
 
 .session-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
   color: var(--text-3);
   font-size: var(--font-sm);
   text-align: center;
-  padding: 32px 0;
+  padding: 40px 16px;
+}
+
+.session-empty .el-icon {
+  color: var(--text-3);
+  opacity: 0.55;
+  margin-bottom: 2px;
+}
+
+.session-empty p {
+  margin: 0;
+}
+
+.session-empty span {
+  font-size: var(--font-xs);
+  color: var(--text-3);
+  opacity: 0.8;
 }
 
 .session-list {
@@ -129,7 +183,17 @@ const emit = defineEmits(['new-chat', 'switch', 'rename', 'delete', 'update:coll
   padding: 0 10px 10px;
 }
 
+/* 时间分组标题 */
+.session-group-label {
+  padding: 10px 10px 4px;
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+}
+
 .session-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -146,6 +210,19 @@ const emit = defineEmits(['new-chat', 'switch', 'rename', 'delete', 'update:coll
 
 .session-item.active {
   background: var(--bg-active);
+}
+
+/* 选中项：左侧品牌渐变指示条（与全局导航选中态同一视觉语言） */
+.session-item.active::before {
+  content: '';
+  position: absolute;
+  left: 1px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 16px;
+  border-radius: var(--radius-pill);
+  background: var(--primary-grad);
 }
 
 .session-info {
