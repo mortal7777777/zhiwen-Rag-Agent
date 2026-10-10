@@ -68,7 +68,10 @@ for (const theme of ['light', 'dark']) {
     console.log('settings shot failed:', String(e).slice(0, 100))
   }
   try {
-    await page.locator('button:has-text("记忆")').first().click()
+    // 「记忆」已收进顶栏「更多」下拉（2026-10-10 步骤 2a）：先开菜单再点菜单项
+    await page.locator('.header-more-btn').first().click()
+    await page.waitForTimeout(400)
+    await page.locator('.el-dropdown__popper:visible .el-dropdown-menu__item:has-text("记忆")').first().click()
     await page.waitForTimeout(1300)
     await page.screenshot({ path: `${OUT}/memory-${theme}.png` })
     console.log('shot:', `memory-${theme}`)

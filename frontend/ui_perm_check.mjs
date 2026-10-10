@@ -6,6 +6,8 @@ import { mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 
+// 慢供应商下 180s 不够挂起+续跑：CHECK_TIMEOUT_MS=420000 node ui_perm_check.mjs
+const T = (v) => Number(process.env.CHECK_TIMEOUT_MS || v)
 const BASE = process.env.BASE || 'http://localhost:5173'
 
 async function launch() {
@@ -32,7 +34,7 @@ await page.locator('textarea').first().fill(
 )
 await page.keyboard.press('Enter')
 
-await page.waitForSelector('.permission-card.pending', { timeout: 180000 })
+await page.waitForSelector('.permission-card.pending', { timeout: T(180000) })
 console.log('✅ 审批卡已出现（挂起）')
 const summary = await page.locator('.permission-card.pending .permission-summary').first().innerText()
 console.log('卡片内容:', summary.slice(0, 80))
@@ -64,7 +66,7 @@ const gotAnswer = await page
       return last && last.innerText.length > 10
     },
     null,
-    { timeout: 180000 },
+    { timeout: T(180000) },
   )
   .then(() => true)
   .catch(() => false)

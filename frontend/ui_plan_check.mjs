@@ -1,9 +1,11 @@
 // 计划模式 UI 回归：开关渲染 → 模型自主进入计划模式 → 挂起渲染确认卡 →
 // 编辑后 Ctrl+Enter 确认（同一 run 经 /agent/resume 继续）→ 首个写入再挂起 → 数字键批准
+// 慢供应商下 180s 不够探索+提交：CHECK_TIMEOUT_MS=420000 node ui_plan_check.mjs
 import { mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 
+const T = (v) => Number(process.env.CHECK_TIMEOUT_MS || v)
 const BASE = process.env.BASE || 'http://localhost:5174'
 async function launch() {
   // 本地 playwright 版本与已下载的 chromium 版本不匹配，优先复用系统浏览器
@@ -50,7 +52,7 @@ await page.keyboard.press('Enter')
 
 // 3) 等计划确认卡（后端要探索 + 提交，给足时间）
 try {
-  await page.waitForSelector('.plan-approval-box', { timeout: 180000 })
+  await page.waitForSelector('.plan-approval-box', { timeout: T(180000) })
   console.log('✅ 计划确认卡已出现')
 } catch (e) {
   console.log('❌ 未出现计划确认卡', String(e).slice(0, 120))
@@ -70,7 +72,9 @@ const focusedCard = await page.evaluate(() => {
 })
 console.log('卡片是否自动聚焦:', focusedCard)
 
-// 等本轮 run 结束（按钮解禁）再确认：生成中 loading=true 时会拦住确认
+// 等本轮 run 结束（按钮解禁）再确认：生成中 loading=true 时会拦住确认。
+// 注意 waitForFunction 第二参是"传给页面函数的 arg"，options 必须放第三参
+// （原写法把 {timeout} 当 arg 传了，实际一直用默认 30s——2026-10-10 修复）。
 await page.waitForFunction(
   () => {
     const btn = [...document.querySelectorAll('.plan-approval-box button')].find((b) =>
@@ -78,7 +82,8 @@ await page.waitForFunction(
     )
     return btn && !btn.disabled
   },
-  { timeout: 90000 },
+  null,
+  { timeout: T(90000) },
 )
 console.log('确认按钮已可用（挂起收流，等用户决定）')
 
@@ -103,7 +108,7 @@ console.log('未追加"按计划开始执行"用户消息:', !bodyText.includes(
 // 6) 审批卡键盘：等到 permission 卡片，按数字键 1 批准（焦点不在卡内也应生效）
 let permSeen = false
 try {
-  await page.waitForSelector('.permission-card.pending', { timeout: 120000 })
+  await page.waitForSelector('.permission-card.pending', { timeout: T(120000) })
   permSeen = true
 } catch {
   console.log('（本次任务未触发审批卡，跳过审批键盘检查）')
