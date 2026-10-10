@@ -18,6 +18,8 @@ from .common import _bump_patch, _iteration_limit
 from .prompts import (
     EMPTY_RETRY_HINT,
     LAST_CALL_WARNING,
+    PLAN_SUBMIT_HINT,
+    PLAN_SUBMIT_HINT_FORCED,
     XML_RETRY_HINT,
     dispatch_cap_notice,
     dispatch_ignored_notice,
@@ -118,6 +120,41 @@ def _should_retry_xml(
         and any(m in merged_text for m in _XML_TOOL_MARKERS)
         and not forced_final
         and retry_count < limit
+    )
+
+
+# 计划提交硬约束的推回上限（整个用户轮内）；与 plan_push 同量级
+_PLAN_SUBMIT_PUSH_LIMIT = 3
+
+
+def _should_push_plan_submit(
+    *,
+    plan_only: bool,
+    tool_calls: list,
+    merged_text: str,
+    status: str | None,
+    push_count: int,
+    limit: int = _PLAN_SUBMIT_PUSH_LIMIT,
+) -> bool:
+    """计划模式中"无工具调用就要收尾"时，是否推回一轮要求提交计划。
+
+    进入计划模式后只有两条合法路径：继续调只读工具探索，或调用
+    exit_plan_mode 提交结构化步骤。无工具调用直接收尾=把计划写成了正文，
+    确认卡永不出现（2026-10-10 OpenCode Go 网关实测）；推回并附明确
+    提示，次数受 limit 约束（计数每轮重置，见 prepare）。
+    空正文场景交由既有空正文重试处理，这里要求有正文才算"以正文交计划"；
+    夹 XML 工具标记的输出交由 xml 重试处理，两条提示不叠加。
+    刻意**不看 forced_final**：预算耗尽先触发强制收尾、提示语是"汇报进度"
+    （2026-10-10 实测 22 步探索后正是这条路径），但计划还没提交——此时必须
+    给最后的提交机会（工具在强制收尾前 2 轮仍绑定，可调用 exit_plan_mode）。
+    """
+    return (
+        plan_only
+        and not tool_calls
+        and bool(merged_text.strip())
+        and not any(m in merged_text for m in _XML_TOOL_MARKERS)
+        and status != "stopped"
+        and push_count < limit
     )
 
 
@@ -588,6 +625,29 @@ def _agent_node(state: AgentState, runtime) -> dict:
             logger.warning("计划硬约束判断失败：%s", exc)
             force_continue = False
 
+    # ---- 计划提交硬约束：计划模式中无工具调用就要收尾（把计划写成正文）时推回 ----
+    # 2026-10-10 OpenCode Go 网关实测：模型探索正常但从不调 exit_plan_mode，
+    # 计划被写成正文导致确认卡永不出现；推回一轮明确要求用工具完成提交（有界）。
+    plan_submit_force = False
+    plan_submit_push_count = int(state.get("plan_submit_push_count") or 0)
+    if _should_push_plan_submit(
+        plan_only=bool(state.get("plan_only")),
+        tool_calls=tool_calls,
+        merged_text=merged_text,
+        status=rt.get("status"),
+        push_count=plan_submit_push_count,
+    ):
+        plan_submit_push_count += 1
+        _bump_patch(rt, "plan_submit_push")
+        # 预算已耗尽（forced_final）时不留探索出口，只要求提交
+        hint = (
+            PLAN_SUBMIT_HINT_FORCED
+            if state["forced_final"]
+            else PLAN_SUBMIT_HINT
+        )
+        messages.append(SystemMessage(content=hint))
+        plan_submit_force = True
+
     return {
         "messages": messages,
         "pending_tool_calls": exec_calls,
@@ -595,8 +655,9 @@ def _agent_node(state: AgentState, runtime) -> dict:
         "forced_final": state["forced_final"],
         "last_call_warned": state["last_call_warned"],
         "plan_done_count": state.get("plan_done_count", 0),
-        "force_continue": force_continue or xml_force or empty_force,
+        "force_continue": force_continue or xml_force or empty_force or plan_submit_force,
         "plan_push_count": state.get("plan_push_count", 0),
+        "plan_submit_push_count": plan_submit_push_count,
         "xml_retry_count": state.get("xml_retry_count", 0),
         "empty_retry_count": state.get("empty_retry_count", 0),
         "empty_retry_pending": bool(state.get("empty_retry_pending")),

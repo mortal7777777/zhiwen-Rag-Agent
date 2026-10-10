@@ -164,6 +164,7 @@ def _prepare_node(state: AgentState, runtime) -> dict:
             todos = []
     plan_done_count = 0
     plan_push_count = 0
+    plan_submit_push_count = 0
     if todos:
         try:
             from ...todos import plan_progress
@@ -530,6 +531,7 @@ def _prepare_node(state: AgentState, runtime) -> dict:
         "empty_retry_pending": False,
         "force_continue": False,
         "plan_push_count": plan_push_count,
+        "plan_submit_push_count": plan_submit_push_count,
         # 每轮重置派发状态：上一轮的声明/轮数绝不能跨轮残留在 checkpointer 里
         "pending_subtasks": [],
         "dispatch_rounds": 0,

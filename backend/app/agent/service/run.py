@@ -125,6 +125,7 @@ class RunMixin(ServiceBaseMixin):
             "plan_done_count": 0,
             "force_continue": False,
             "plan_push_count": 0,
+            "plan_submit_push_count": 0,
             "xml_retry_count": 0,
             # 每轮重置：checkpointer 按 conv:<id> 持久化 state，不重置的话
             # 一次用掉就整个会话再也享受不到空正文兜底（2026-09-24 实测）

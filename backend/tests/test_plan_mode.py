@@ -257,5 +257,104 @@ def test_hard_constraint_releases_when_all_steps_done():
     )
 
 
+# ---------------- 计划提交硬约束（plan_submit_push，2026-10-10） ----------------
+# OpenCode Go 网关实测：模型在计划模式里探索正常，但收尾时把计划写成正文、
+# 从不调 exit_plan_mode（确认卡永不出现）。无工具调用收尾时推回要求提交。
+
+
+def _submit_push_state(chat, *, plan_only=True, push_count=0) -> dict:
+    state = _constraint_state([], chat)
+    # 清掉计划执行阶段的残留，避免 plan_push（todos 硬约束）与本分支混淆
+    state["plan_map"] = []
+    state["plan_steps"] = []
+    state["plan_only"] = plan_only
+    state["plan_submit_push_count"] = push_count
+    return state
+
+
+def test_plan_submit_push_on_text_only_finish():
+    from app.agent.nodes.agent import _agent_node
+
+    chat = _PlainChat("好的，执行计划如下：\n1. 新建 HTML 页面\n2. 截图核验")
+    state = _submit_push_state(chat)
+    out = _agent_node(state, runtime_from_state(state))
+
+    assert out["force_continue"] is True
+    assert out["plan_submit_push_count"] == 1
+    assert any(
+        "exit_plan_mode" in str(getattr(m, "content", ""))
+        for m in out["messages"]
+    ), "推回提示必须明确要求调用 exit_plan_mode 提交"
+
+
+def test_plan_submit_push_released_at_limit_and_outside_plan():
+    from app.agent.nodes.agent import _agent_node
+
+    # 到达上限（3 次）后放行收尾，不再推回
+    chat = _PlainChat("计划如下……")
+    state = _submit_push_state(chat, push_count=3)
+    out = _agent_node(state, runtime_from_state(state))
+    assert out["force_continue"] is False
+    assert out["plan_submit_push_count"] == 3
+
+    # 非计划模式：完全不受影响
+    chat2 = _PlainChat("普通回答")
+    state2 = _submit_push_state(chat2, plan_only=False)
+    out2 = _agent_node(state2, runtime_from_state(state2))
+    assert out2["force_continue"] is False
+    assert out2["plan_submit_push_count"] == 0
+
+
+def test_plan_submit_push_still_gives_chance_after_forced_final():
+    """预算耗尽先触发强制收尾（forced_final）时，计划未提交仍要推回给提交机会。
+
+    2026-10-10 OpenCode Go 实测路径：22 步探索烧光预算 → tools 节点置
+    forced_final → 模型以正文汇报、从不调 exit_plan_mode。推回不看
+    forced_final，且此时用"预算耗尽版"提示（不留探索出口）。
+    """
+    from app.agent.nodes.agent import _agent_node
+
+    chat = _PlainChat("预算已用尽，进度汇报：我已完成调研，计划如下……")
+    state = _submit_push_state(chat)
+    state["forced_final"] = True
+    out = _agent_node(state, runtime_from_state(state))
+
+    assert out["force_continue"] is True
+    assert out["plan_submit_push_count"] == 1
+    assert any(
+        "不要再调用探索工具" in str(getattr(m, "content", ""))
+        for m in out["messages"]
+    ), "forced_final 下的推回要使用预算耗尽版提示（只留提交一条路）"
+
+
+class _OkTool:
+    name = "noop"
+
+    def invoke(self, args):
+        return {"summary": "ok"}
+
+
+def test_budget_exhausted_in_plan_mode_asks_submit_not_report():
+    """预算耗尽且计划未提交：tools 节点注入"立即提交"提示而非"汇报进度"。
+
+    2026-10-10 实测：旧提示（budget_exhausted_notice 的"请给出进度汇报"）
+    与提交要求打架，模型继续探索/以正文汇报，从不调 exit_plan_mode。
+    """
+    calls = [{"name": "noop", "id": "c1", "args": {}}]
+    state = _state(
+        [_OkTool()], calls, tool_calls_used=12, plan_only=True
+    )
+    out = _tools_node(state, runtime_from_state(state))
+
+    contents = [
+        str(getattr(m, "content", ""))
+        for m in out["messages"]
+        if getattr(m, "type", "") == "system"
+    ]
+    assert any("立即调用 exit_plan_mode" in c for c in contents)
+    assert not any("进度汇报" in c for c in contents), "计划未提交时不劝汇报"
+    assert out["forced_final"] is True
+
+
 # finalize 的「等待计划确认」状态随旧路径删除：计划确认走原生挂起，
 # 不再以 awaiting_approval 收尾（覆盖在 tests/test_tools_hitl_interrupt.py）。

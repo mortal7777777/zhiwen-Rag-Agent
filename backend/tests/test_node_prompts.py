@@ -41,6 +41,23 @@ def test_空正文重试提示():
     )
 
 
+def test_计划提交硬约束提示():
+    assert P.PLAN_SUBMIT_HINT == (
+        "你仍在计划模式：上一条回答没有调用任何工具就结束了。"
+        "计划模式下只有两条路——需要继续了解现状就用只读工具探索；"
+        "探索完成后必须调用 exit_plan_mode 提交结构化步骤（steps 数组），"
+        "不要把计划写成正文。请立即调用工具完成提交。"
+    )
+
+
+def test_计划提交硬约束提示_预算耗尽版():
+    assert P.PLAN_SUBMIT_HINT_FORCED == (
+        "你的工具调用预算已耗尽，但计划尚未提交。不要再调用探索工具、"
+        "不要再输出正文汇报——立即调用 exit_plan_mode，把已经调研到的内容"
+        "整理为结构化步骤（steps 数组）提交，这是本轮的强制要求。"
+    )
+
+
 # ---------------- 构建函数（固定入参渲染快照） ----------------
 
 def test_派发上限与忽略提示():
@@ -185,3 +202,28 @@ def test_xml重试判定():
     assert not _should_retry_xml(
         tool_calls=[], merged_text="普通文本", forced_final=False, retry_count=0
     )
+
+
+def test_计划提交推回判定():
+    from app.agent.nodes.agent import _should_push_plan_submit
+    from app.agent.utils import _XML_TOOL_MARKERS
+
+    marker = list(_XML_TOOL_MARKERS)[0]
+    base = dict(
+        plan_only=True,
+        tool_calls=[],
+        merged_text="计划如下：1. 新建页面",
+        status="ok",
+        push_count=0,
+    )
+    assert _should_push_plan_submit(**base)
+    assert not _should_push_plan_submit(**{**base, "plan_only": False})
+    assert not _should_push_plan_submit(
+        **{**base, "tool_calls": [{"name": "exit_plan_mode"}]}
+    )
+    assert not _should_push_plan_submit(**{**base, "merged_text": "   "})
+    assert not _should_push_plan_submit(
+        **{**base, "merged_text": f"{marker}xx"}
+    ), "XML 标记场景交由 xml 重试处理，两条提示不叠加"
+    assert not _should_push_plan_submit(**{**base, "status": "stopped"})
+    assert not _should_push_plan_submit(**{**base, "push_count": 3})

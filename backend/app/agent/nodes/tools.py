@@ -21,6 +21,7 @@ from ..tools import (
 )
 from .common import (_bump_patch, _failure_limit, _iteration_limit, _plan_hint)
 from .prompts import (
+    PLAN_SUBMIT_HINT_FORCED,
     budget_exhausted_notice,
     failure_limit_notice,
     hook_context_notice,
@@ -645,12 +646,18 @@ def _tools_node(state: AgentState, runtime) -> dict:
         status=rt.get("status"),
     ):
         state["forced_final"] = True
-        _bump_patch(rt, "force_final_iterations")
-        messages.append(
-            SystemMessage(
-                content=budget_exhausted_notice(bool(state.get("task_mode")))
+        if state.get("plan_only"):
+            # 计划模式且尚未提交：不劝"汇报进度"（2026-10-10 实测该提示与提交
+            # 要求打架，模型转而继续探索/正文汇报），只留"立即提交"一条路
+            _bump_patch(rt, "plan_submit_forced")
+            messages.append(SystemMessage(content=PLAN_SUBMIT_HINT_FORCED))
+        else:
+            _bump_patch(rt, "force_final_iterations")
+            messages.append(
+                SystemMessage(
+                    content=budget_exhausted_notice(bool(state.get("task_mode")))
+                )
             )
-        )
 
     # 失败次数过多仍受阻：强制收尾并让模型向用户说明（避免无意义空转）
     max_failures = _failure_limit(state, settings)

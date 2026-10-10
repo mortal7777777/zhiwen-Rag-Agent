@@ -115,6 +115,8 @@ class AgentState(TypedDict, total=False):
     plan_progress_sig: str
     force_continue: bool
     plan_push_count: int
+    # 计划模式"无工具调用收尾→推回提交"的计数（上限见 agent._PLAN_SUBMIT_PUSH_LIMIT）
+    plan_submit_push_count: int
     sub_task: dict
     subagent_results: Annotated[list[dict], merge_subagent_results]
     subagent_round_count: int
