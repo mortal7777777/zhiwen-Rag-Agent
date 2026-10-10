@@ -255,11 +255,17 @@ onMounted(() => {
   height: 100%;
 }
 
+/* 侧栏为悬浮圆角卡片（2026-10-10 美化二期步骤1）：
+   与 session panel / chat main 统一"三段式卡片"节奏。
+   上下左边距 16px，右侧间距由 .app-main 的左内边距提供。 */
 .app-aside {
   display: flex;
   flex-direction: column;
+  margin: 16px 0 16px 16px;
   background: var(--bg-sidebar);
-  border-right: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
   transition: width 0.25s ease;
   overflow: hidden;
 }
@@ -307,21 +313,38 @@ onMounted(() => {
 }
 
 .app-menu .el-menu-item {
+  position: relative;
   height: 44px;
   margin-bottom: 4px;
   border-radius: var(--radius-md);
   color: var(--text-2);
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
 }
 
 .app-menu .el-menu-item:hover {
   background: var(--bg-hover);
   color: var(--primary);
+  transform: translateX(2px);
 }
 
 .app-menu .el-menu-item.is-active {
   background: var(--bg-active);
   color: var(--primary);
   font-weight: 600;
+}
+
+/* 选中态：左侧品牌渐变指示条 */
+.app-menu .el-menu-item.is-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 18px;
+  border-radius: var(--radius-pill);
+  background: var(--primary-grad);
 }
 
 .app-menu.el-menu--collapse {
@@ -344,11 +367,16 @@ onMounted(() => {
   margin: 0 !important;
 }
 
+/* 折叠态：图标居中，不做位移微动效（避免居中被推移） */
+.app-menu.el-menu--collapse .el-menu-item:hover {
+  transform: none;
+}
+
 .aside-footer {
   display: flex;
   justify-content: center;
-  gap: 4px;
-  padding: 12px 0;
+  gap: 6px;
+  padding: 10px 0;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
 }
@@ -362,7 +390,8 @@ onMounted(() => {
   border-radius: var(--radius-md);
   color: var(--text-3);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 
 .collapse-btn:hover {
@@ -374,6 +403,17 @@ onMounted(() => {
   padding: 16px;
   background: var(--bg-app);
   overflow: hidden;
+}
+
+/* 窄屏收紧外边距（与 ChatView ≤768px 的 calc(100vh - 16px) 高度规则配套） */
+@media (max-width: 768px) {
+  .app-aside {
+    margin: 8px 0 8px 8px;
+  }
+
+  .app-main {
+    padding: 8px;
+  }
 }
 
 .fade-enter-active,
