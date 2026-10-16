@@ -9,8 +9,7 @@
 services:
   backend:
     build:
-      args:
-        PROFILE: full
+      target: full
     environment:
       EMBEDDING_PROVIDER: local
       EMBEDDING_MODEL_DIR: /models/bge-base-zh-v1.5
@@ -19,6 +18,9 @@ services:
       EMBEDDING_FP16: "1"
     volumes:
       - ../local_models:/models:ro
+    # 无 NVIDIA 显卡/驱动的机器：先删掉下面 deploy.resources 整段再启动——
+    # GPU 预留无法满足时 docker 直接拒绝起容器（could not select device driver）；
+    # 删除后走 CPU 推理，慢但可用（2026-10-14 修正文档口径）
     deploy:
       resources:
         reservations:

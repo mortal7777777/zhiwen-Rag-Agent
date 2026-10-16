@@ -7,6 +7,8 @@
 # full 模式（本地 BGE 模型 + GPU）：docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
 services:
   opensearch:
+    # 保持 2.x：就地大版本升级到 3.x 不受支持（需清理数据卷重建索引），本机开发
+    # 用 3.5；如需对齐大版本请单独验证后再升（2026-10-14 审计决定，先保数据）
     image: opensearchproject/opensearch:2.19.0
     environment:
       - discovery.type=single-node
@@ -26,6 +28,10 @@ services:
   searxng:
     image: searxng/searxng:latest
     environment:
+      # 容器内监听端口：官方镜像里 settings.yml 的 server.port 不生效，必须用 env
+      # （2026-10-14 修正：此前 backend 连 8888、容器实际听 8080，healthcheck 却查 8080 显绿）
+      SEARXNG_PORT: 8888
+      BIND_ADDRESS: 0.0.0.0:8888
       # 国内网络可选:SEARXNG_PROXY=http://host.docker.internal:7890(走宿主机 Clash)
       HTTP_PROXY: ${SEARXNG_PROXY:-}
       HTTPS_PROXY: ${SEARXNG_PROXY:-}
@@ -36,13 +42,14 @@ services:
     # 仅供后端容器内网调用（SEARXNG_BASE_URL=http://searxng:8888），不暴露宿主端口；
     # 手动调试可临时加 -p 映射
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/ || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8888/ || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 20
 
   mysql:
-    image: mysql:8.0
+    # 8.4 LTS（8.0 已于 2026-04 EOL）；旧 8.0 数据卷由 8.4 首次启动自动升级
+    image: mysql:8.4
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ragassistant123}
       MYSQL_DATABASE: rag_assistant
@@ -60,8 +67,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # lite 为默认 target（不含 torch / torch_wheels）；full 由 docker-compose.full.yml 覆盖
+      target: lite
       args:
-        PROFILE: ${PROFILE:-lite}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     environment:
       # 必填：对话模型 API Key（OpenAI 兼容，也可在设置页改供应商）
@@ -96,6 +104,12 @@ services:
     # 本机想直调 API 时用：docker exec -it $CONTAINER_ID python -c "..."，
     # 或临时加 -p 绑定，用完即删。
     # 若只需从宿主机访问 API：docker run --rm --network rag_knowledge_base_default curlimages/curl ...
+    healthcheck:
+      # 供 frontend 等待：避免 nginx 先起来、打开页面首屏 /api 全部 502
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
     depends_on:
       opensearch:
         condition: service_healthy
@@ -110,7 +124,8 @@ services:
       # 本机访问；需要局域网/演示时改回 "0.0.0.0:${FRONTEND_PORT:-5173}:80"
       - "127.0.0.1:${FRONTEND_PORT:-5173}:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   opensearch-data:

@@ -3,10 +3,11 @@
 # 定位：本机 pre-commit 钩子只做"提前反馈"，CI 才是唯一权威——
 # 钩子可被 --no-verify 跳过、可因解释器缺失而放行，CI 不能。
 #
-# 三个 job：
-#   backend   —— 全量 pytest（367+ 用例，不需要 GPU / MySQL / 外网；lite 依赖即可跑，
+# 四个 job：
+#   backend   —— 全量 pytest（535+ 用例，不需要 GPU / MySQL / 外网；lite 依赖即可跑，
 #                顺带验证 lite 档没有偷偷依赖 torch）
 #   frontend  —— 构建 + 裸 hex 防回退 + 对比度审计（两个守门脚本都是纯 Python，无浏览器依赖）
+#   docker    —— 后端 lite 镜像构建守门（全新检出没有 torch_wheels/，构建不得依赖它）
 #   eval-gate —— RAGAS 回归门槛：需要真实后端（OpenSearch/MySQL/模型 API），
 #                只在手动触发且配置了自托管 runner 时执行，默认跳过
 #
@@ -14,6 +15,7 @@
 #   python -m pytest backend/tests -q
 #   cd frontend && npm ci && npm run build
 #   python scripts/check_frontend_hex.py && python scripts/contrast_audit.py
+#   DEEPSEEK_API_KEY=dummy docker compose config -q && docker build --target lite .
 
 name: ci
 
@@ -57,7 +59,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: 安装依赖
@@ -76,6 +78,26 @@ jobs:
         run: |
           python scripts/check_frontend_hex.py
           python scripts/contrast_audit.py
+
+  docker:
+    # 后端 lite 镜像构建守门：全新检出没有 torch_wheels/（gitignored），构建不得依赖它。
+    # 2026-10-14 之前 Dockerfile 无条件 COPY torch_wheels/，新用户第一步直接失败。
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: compose 配置校验
+        env:
+          DEEPSEEK_API_KEY: dummy  # 仅为通过 ${VAR:?} 插值校验
+        run: docker compose config -q
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: lite
+          push: false
+          cache-from: type=gha,scope=docker-lite
+          cache-to: type=gha,mode=max,scope=docker-lite
 
   eval-gate:
     # 需要真实后端（OpenSearch + MySQL + 模型 API）。默认跳过：

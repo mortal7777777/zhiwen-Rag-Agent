@@ -1,26 +1,29 @@
 # lite 依赖：纯 API 模式（API 嵌入/重排 + API 对话），不安装 torch / sentence-transformers。
 # 由 requirements.txt 去除 torch、sentence-transformers 两行得到，两者仅在
 # backend/app/rag/embeddings.py / reranker.py / utils.py 的本地模型路径中按需导入。
-fastapi>=0.115
-uvicorn[standard]>=0.30
-python-multipart>=0.0.9
-httpx>=0.27
-langchain-core>=0.3
-langchain-community>=0.3
+#
+# 版本锁定（2026-10-14）：== 版本为本机开发环境实测通过（535 单测 + 评测基线）的组合，
+# Docker 镜像与 CI 均按此安装，避免每次构建拉到未测新版本导致行为漂移。
+fastapi==0.137.1
+uvicorn[standard]==0.49.0
+python-multipart==0.0.32
+httpx==0.28.1
+langchain-core==1.6.2
+langchain-community==0.3.31
 chardet>=5.0,<6  # langchain-community 0.3 与 chardet 7.x API 不兼容
-langchain-openai>=0.2
-langchain-anthropic>=0.3  # Anthropic 兼容格式供应商（如 DeepSeek /anthropic 端点）
-langchain-text-splitters>=0.3
-jieba>=0.42
-docx2txt>=0.8
-openpyxl>=3.1
-pypdf>=5.0
-pymupdf4llm>=1.28
-ebooklib>=0.20
-beautifulsoup4>=4.12
-doc2txt>=1.0
-legacy-doc>=0.2
-pymysql>=1.1
-ddgs>=9.0
-langgraph>=1.0
-prompt_toolkit>=3.0.43
+langchain-openai==1.4.1
+langchain-anthropic==1.7.1  # Anthropic 兼容格式供应商（如 DeepSeek /anthropic 端点）
+langchain-text-splitters==1.1.2
+jieba==0.42.1
+docx2txt==0.9
+openpyxl==3.1.5
+pypdf==6.15.0
+pymupdf4llm==1.28.2
+ebooklib==0.20
+beautifulsoup4==4.15.0
+doc2txt==1.0.9
+legacy-doc==0.2.1
+pymysql==1.2.0
+ddgs==9.14.4
+langgraph==1.2.10
+prompt_toolkit==3.0.53

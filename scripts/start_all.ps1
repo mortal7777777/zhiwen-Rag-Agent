@@ -54,6 +54,39 @@ function Wait-Health([string]$Url, [int]$Seconds) {
 Write-Host ''
 Write-Host '========== 知问 ZhiWen 一键启动 ==========' -ForegroundColor Cyan
 
+# ---------- 0/5 环境预检（缺什么先说清楚，避免后面的超时提示误导排查）----------
+# 解释器探测顺序同 pre-commit 钩子：ZHIWEN_PYTHON > 仓库根 .zhiwen-python > 默认路径
+$Python = if ($env:ZHIWEN_PYTHON) { $env:ZHIWEN_PYTHON }
+    elseif (Test-Path (Join-Path $root '.zhiwen-python')) {
+        (Get-Content (Join-Path $root '.zhiwen-python') -First 1).Trim()
+    } else { 'D:\conda_envs\pytorch_env\python.exe' }
+$backendOk = $true
+$frontendOk = $true
+if (-not (Test-Path $Python)) {
+    $backendOk = $false
+    Write-Host ('[0/5] 后端环境     : Python 解释器不存在：' + $Python) -ForegroundColor Red
+    Write-Host '      处理：设置环境变量 ZHIWEN_PYTHON，或编辑仓库根 .zhiwen-python 指向本机 python.exe' -ForegroundColor DarkGray
+} else {
+    & $Python -c 'import fastapi, uvicorn' 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        $backendOk = $false
+        Write-Host '[0/5] 后端环境     : 依赖未安装（缺 fastapi / uvicorn）' -ForegroundColor Red
+        Write-Host ('      处理：' + $Python + ' -m pip install -r ' + (Join-Path $root 'backend\requirements.txt')) -ForegroundColor DarkGray
+    } else {
+        Write-Host '[0/5] 后端环境     : 就绪（Python + 依赖）' -ForegroundColor Green
+    }
+}
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    $frontendOk = $false
+    Write-Host '[0/5] 前端环境     : 未找到 node（前端需要 Node.js 18+）' -ForegroundColor Red
+} elseif (-not (Test-Path (Join-Path $root 'frontend\node_modules'))) {
+    $frontendOk = $false
+    Write-Host '[0/5] 前端环境     : 依赖未安装（frontend\node_modules 不存在）' -ForegroundColor Red
+    Write-Host '      处理：cd frontend 后运行 npm install' -ForegroundColor DarkGray
+} else {
+    Write-Host '[0/5] 前端环境     : 就绪（node + 依赖）' -ForegroundColor Green
+}
+
 # ---------- 1/5 MySQL（3306）----------
 if (Test-Port 3306) {
     Write-Host '[1/5] MySQL        : 已运行 (3306)' -ForegroundColor Green
@@ -110,7 +143,9 @@ if (Test-Port 8888) {
 }
 
 # ---------- 4/5 后端（8000）----------
-if (Test-Port 8000) {
+if (-not $backendOk) {
+    Write-Host '[4/5] 后端 FastAPI : 跳过（环境预检未通过，见 [0/5]）' -ForegroundColor Red
+} elseif (Test-Port 8000) {
     Write-Host '[4/5] 后端 FastAPI : 已运行 (8000)' -ForegroundColor Green
     Write-Host '      提示：改过后端代码请执行 backend\restart_backend.ps1 重启' -ForegroundColor DarkGray
 } else {
@@ -133,7 +168,7 @@ if (Test-Port 8000) {
             if ($val) { Set-Item -Path "env:$key" -Value $val }
         }
     }
-    Start-Process -FilePath 'D:\conda_envs\pytorch_env\python.exe' `
+    Start-Process -FilePath $Python `
         -ArgumentList '-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', '8000' `
         -WorkingDirectory (Join-Path $root 'backend') -WindowStyle Hidden
     if (Wait-Health 'http://127.0.0.1:8000/api/health' 90) {
@@ -144,7 +179,9 @@ if (Test-Port 8000) {
 }
 
 # ---------- 5/5 前端（5173）----------
-if (Test-Port 5173) {
+if (-not $frontendOk) {
+    Write-Host '[5/5] 前端 Vite    : 跳过（环境预检未通过，见 [0/5]）' -ForegroundColor Red
+} elseif (Test-Port 5173) {
     Write-Host '[5/5] 前端 Vite    : 已运行 (5173)' -ForegroundColor Green
 } else {
     Write-Host '[5/5] 前端 Vite    : 启动中（新窗口；关闭该窗口即停止前端）...' -ForegroundColor Yellow

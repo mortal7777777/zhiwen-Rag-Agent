@@ -1,0 +1,2 @@
+# 占位文件：full 模式离线 wheel 目录（wheel 本身不入库，见 .gitignore torch_wheels/*）
+# 预下载：bash scripts/download_torch_wheels.sh；目录为空时 Dockerfile full 阶段回退在线安装

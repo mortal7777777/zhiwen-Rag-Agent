@@ -123,8 +123,10 @@ docs/CACHE_MEMORY_OPTIMIZATION.md
 docs/TOOL_PIPELINE_DETAILED.md
 docs/INDEX_DEDUP_PIPELINE_DETAILED.md
 
-# full 模式离线 wheel（构建上下文用，不提交）
-torch_wheels/
+# full 模式离线 wheel（构建上下文用，不入库；目录由 .gitkeep 占位——
+# Dockerfile full 阶段 COPY 需要路径存在，lite 构建已与其解耦）
+torch_wheels/*
+!torch_wheels/.gitkeep
 
 # 私人文档（面试笔记等，不进入公开仓库 / 源码包）
 docs/interview*
