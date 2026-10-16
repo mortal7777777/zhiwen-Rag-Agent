@@ -6,11 +6,15 @@ param(
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot   # 仓库根（本脚本位于 scripts/ 下）
 
-# OpenSearch 原生安装目录（迁移后可用环境变量 ZHIWEN_OPENSEARCH_HOME 覆盖）
+# OpenSearch 原生安装目录。探测顺序（同 .zhiwen-python 的本机文件约定）：
+#   环境变量 ZHIWEN_OPENSEARCH_HOME > 仓库根 .zhiwen-opensearch 文件（gitignore）> 通用默认
 $OpenSearchHome = if ($env:ZHIWEN_OPENSEARCH_HOME) {
     $env:ZHIWEN_OPENSEARCH_HOME
+} elseif (Test-Path (Join-Path $root '.zhiwen-opensearch')) {
+    # -Encoding UTF8：PS 5.1 默认按 ANSI 读，路径含中文时会乱码导致找不到目录
+    (Get-Content (Join-Path $root '.zhiwen-opensearch') -First 1 -Encoding UTF8).Trim()
 } else {
-    'D:\AI\新建文件夹 (3)\opensearch-3.5.0-windows-x64\opensearch-3.5.0'
+    'D:\opensearch\opensearch-3.5.0'
 }
 
 function Test-Port([int]$Port) {

@@ -49,6 +49,8 @@ Thumbs.db
 .zhiwen_history.json
 # 本机 pre-commit 解释器路径（每台机器不同；由 scripts/install-git-hooks.ps1 写入）
 .zhiwen-python
+# 本机 OpenSearch 安装路径（每台机器不同；start_all.bat 一键启动读取）
+.zhiwen-opensearch
 .zcode/
 backend/app/agent/_persist_debug.txt
 backend/snap.md
