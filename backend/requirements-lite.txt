@@ -26,4 +26,6 @@ legacy-doc==0.2.1
 pymysql==1.2.0
 ddgs==9.14.4
 langgraph==1.2.10
+langgraph-checkpoint-sqlite==3.1.1  # 原生检查点 SqliteSaver（langgraph 1.x 起为独立包，须显式安装）
 prompt_toolkit==3.0.53
+tzdata==2026.3  # Windows 无系统时区库（zoneinfo 渲染时间块需要）；Linux 自带，装上无害
