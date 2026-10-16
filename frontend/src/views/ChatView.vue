@@ -1042,13 +1042,14 @@ function categoryTagType(key) {
   )
 }
 
-// 欢迎页建议问题：每天由后端生成（知识库 / 热点新闻 / 通用）
-const suggestionIcons = { kb: Collection, news: Position, general: MagicStick }
+// 欢迎页建议问题：由后端生成（知识库 / 热点新闻 / 最近任务），6 小时刷新
+const suggestionIcons = { kb: Collection, news: Position, general: MagicStick, recent: Clock }
 // 建议卡副描述：后端只返回 type/text，前端按类型补一行能力说明
 const suggestionDescs = {
   kb: '检索知识库文档，回答附带出处',
   news: '联网检索最新资讯',
   general: '通用对话、写作与润色',
+  recent: '接着最近的任务继续',
 }
 const suggestions = ref([])
 
