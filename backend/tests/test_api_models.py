@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from langchain_core.documents import Document
 
-from app.agent.tools import _search_searxng, execute_web_search
+from app.agent.tools import (
+    _decode_bing_url,
+    _parse_baidu_html,
+    _parse_bing_html,
+    _search_baidu,
+    _search_bing,
+    _search_searxng,
+    execute_web_search,
+)
 from app.mcp_manager import _mcp_default_args
 from app.rag.embeddings import APIBGEEmbeddings
 from app.rag.reranker import APIReranker
@@ -581,3 +589,285 @@ def test_mcp_default_args_strips_null_optional_fields():
     assert _mcp_default_args(
         "browser_navigate", {"url": "https://x.com", "timeout": None}
     ) == {"url": "https://x.com"}
+
+
+# ---------------- 联网搜索：DuckDuckGo → 百度降级（2026-10-14） ----------------
+
+_BAIDU_RESULT_HTML = """
+<html><body>
+<div class="result c-container xpath-log new-pmd"
+     mu="https://example.com/a?x=1&amp;y=2">
+  <h3 class="t"><a href="http://www.baidu.com/link?url=xx">示例<em>标题</em>一</a></h3>
+  <div class="c-abstract">这是 <em>摘要</em>一</div>
+</div>
+<div class="result-op c-container new-pmd" mu="https://example.org/b">
+  <h3>实体卡标题</h3>
+  <div class="summary-text_15QGa">新版 cosc 摘要文本</div>
+</div>
+<div class="result c-container" mu="http://fakeurl.baidu.com/xueshu">
+  <h3>百度学术占位卡</h3>
+</div>
+<div class="c-container sidebar-noresult">侧栏块（无 result 类，不应命中）</div>
+<div class="result c-container"><h3>无 mu 的块</h3></div>
+<div class="result c-container" mu="https://example.org/b">
+  <h3>重复 URL 的块</h3>
+</div>
+</body></html>
+"""
+
+
+class FakeSearchPageClient:
+    """make_httpx_client 替身：记录 GET 并返回预设 HTML 页面。"""
+
+    def __init__(self, page_html: str):
+        self.page_html = page_html
+        self.calls: list[dict] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def get(self, url, params=None, headers=None, follow_redirects=None):
+        self.calls.append(
+            {"url": url, "params": params or {}, "headers": headers or {}}
+        )
+        return _FakePageResponse(self.page_html)
+
+
+class _FakePageResponse:
+    status_code = 200
+
+    def __init__(self, text: str):
+        self.text = text
+
+    def raise_for_status(self):
+        pass
+
+
+def test_parse_baidu_html_extracts_mu_urls():
+    results = _parse_baidu_html(_BAIDU_RESULT_HTML, max_results=5)
+    # mu 属性给出真实 URL（HTML 实体反转义），侧栏/无 mu/重复块被跳过
+    assert [r["url"] for r in results] == [
+        "https://example.com/a?x=1&y=2",
+        "https://example.org/b",
+    ]
+    assert results[0]["title"] == "示例标题一"
+    # 摘要兼容老版 c-abstract 与新版 summary-text_*（类名带构建哈希）
+    assert results[0]["snippet"] == "这是摘要一"
+    assert results[1]["snippet"] == "新版 cosc 摘要文本"
+
+
+def test_parse_baidu_html_caps_max_results():
+    assert len(_parse_baidu_html(_BAIDU_RESULT_HTML, max_results=1)) == 1
+
+
+def test_search_baidu_parses_page_and_sends_query(monkeypatch):
+    from app import network as network_mod
+
+    fake = FakeSearchPageClient(_BAIDU_RESULT_HTML)
+    monkeypatch.setattr(network_mod, "make_httpx_client", lambda **kw: fake)
+
+    results = _search_baidu("测试查询", max_results=3)
+
+    assert len(results) == 2
+    call = fake.calls[0]
+    assert call["url"] == "https://www.baidu.com/s"
+    assert call["params"]["wd"] == "测试查询"
+    assert "Windows" in call["headers"]["User-Agent"]
+
+
+def test_search_baidu_raises_on_unparseable_page(monkeypatch):
+    from app import network as network_mod
+
+    fake = FakeSearchPageClient("<html>安全验证</html>")
+    monkeypatch.setattr(network_mod, "make_httpx_client", lambda **kw: fake)
+    try:
+        _search_baidu("q", max_results=3)
+        assert False, "空解析应抛错"
+    except RuntimeError as exc:
+        assert "未解析到结果" in str(exc)
+
+
+# ---------------- Bing 国内站（降级链中间级） ----------------
+
+def test_decode_bing_url_unwraps_ck_a_redirect():
+    import base64
+
+    token = (
+        base64.urlsafe_b64encode(b"https://example.com/news?id=1")
+        .decode()
+        .rstrip("=")
+    )
+    href = f"https://www.bing.com/ck/a?!&&p=xx&u=a1{token}&ntb=1"
+    assert _decode_bing_url(href) == "https://example.com/news?id=1"
+    # 非跳转链 / 坏 base64 原样返回
+    assert _decode_bing_url("https://direct.example.org/p") == "https://direct.example.org/p"
+    assert _decode_bing_url("https://www.bing.com/ck/a?u=a1!!bad") == "https://www.bing.com/ck/a?u=a1!!bad"
+
+
+def test_parse_bing_html_extracts_results():
+    import base64
+
+    token = (
+        base64.urlsafe_b64encode(b"https://example.com/news?id=1")
+        .decode()
+        .rstrip("=")
+    )
+    html = f"""
+    <ol id="b_results">
+    <li class="b_algo">
+      <h2><a href="https://www.bing.com/ck/a?!&&p=xx&u=a1{token}&ntb=1">新闻<strong>标题</strong></a></h2>
+      <div class="b_caption"><p>摘要文本一</p></div>
+    </li>
+    <li class="b_algo">
+      <h2><a href="https://direct.example.org/page">直接链接结果</a></h2>
+    </li>
+    <li class="b_algo"><h2>无链接的块</h2></li>
+    </ol>
+    """
+    results = _parse_bing_html(html, max_results=5)
+    assert [r["url"] for r in results] == [
+        "https://example.com/news?id=1",
+        "https://direct.example.org/page",
+    ]
+    assert results[0]["title"] == "新闻标题"
+    assert results[0]["snippet"] == "摘要文本一"
+    assert results[1]["snippet"] == ""
+    assert len(_parse_bing_html(html, max_results=1)) == 1
+
+
+def test_search_bing_parses_page_and_sends_query(monkeypatch):
+    from app import network as network_mod
+
+    fake = FakeSearchPageClient(
+        '<li class="b_algo"><h2><a href="https://example.org/a">标题</a></h2><p>摘要</p></li>'
+    )
+    monkeypatch.setattr(network_mod, "make_httpx_client", lambda **kw: fake)
+
+    results = _search_bing("测试查询", max_results=3)
+
+    assert len(results) == 1
+    call = fake.calls[0]
+    assert call["url"] == "https://cn.bing.com/search"
+    assert call["params"]["q"] == "测试查询"
+    assert "Windows" in call["headers"]["User-Agent"]
+
+
+def test_search_bing_raises_on_unparseable_page(monkeypatch):
+    from app import network as network_mod
+
+    fake = FakeSearchPageClient("<html>nothing</html>")
+    monkeypatch.setattr(network_mod, "make_httpx_client", lambda **kw: fake)
+    try:
+        _search_bing("q", max_results=3)
+        assert False, "空解析应抛错"
+    except RuntimeError as exc:
+        assert "Bing" in str(exc)
+
+
+# ---------------- execute_web_search 降级链 ----------------
+
+def test_execute_web_search_falls_back_to_bing(monkeypatch):
+    from app.agent import tools as tools_mod
+
+    monkeypatch.setattr("app.network.proxy_reachable", lambda: True)
+    monkeypatch.setattr(
+        tools_mod,
+        "_search_duckduckgo",
+        lambda q, n: (_ for _ in ()).throw(RuntimeError("tunnel error")),
+    )
+    monkeypatch.setattr(
+        tools_mod,
+        "_search_bing",
+        lambda q, n: [
+            {"title": "T", "url": "https://news.example.com/x", "snippet": "S"}
+        ],
+    )
+    monkeypatch.setattr(
+        tools_mod,
+        "_search_baidu",
+        lambda q, n: (_ for _ in ()).throw(AssertionError("Bing 成功时不应调用百度")),
+    )
+    result = execute_web_search("今日新闻", "duckduckgo", api_key="", max_results=3)
+    assert len(result["results"]) == 1
+    assert result["results"][0]["credibility"] == "medium"
+    assert result["summary"].startswith("联网搜索到")
+
+
+def test_execute_web_search_falls_back_to_baidu_when_bing_fails(monkeypatch):
+    from app.agent import tools as tools_mod
+
+    monkeypatch.setattr("app.network.proxy_reachable", lambda: True)
+    monkeypatch.setattr(tools_mod, "_search_duckduckgo", lambda q, n: [])
+    monkeypatch.setattr(
+        tools_mod,
+        "_search_bing",
+        lambda q, n: (_ for _ in ()).throw(RuntimeError("captcha")),
+    )
+    calls = []
+    monkeypatch.setattr(
+        tools_mod,
+        "_search_baidu",
+        lambda q, n: calls.append(q)
+        or [{"title": "T", "url": "https://a.com", "snippet": ""}],
+    )
+    result = execute_web_search("关键词", "duckduckgo", api_key="", max_results=3)
+    assert calls == ["关键词"]
+    assert len(result["results"]) == 1
+
+
+def test_execute_web_search_ddgs_success_skips_fallbacks(monkeypatch):
+    from app.agent import tools as tools_mod
+
+    monkeypatch.setattr("app.network.proxy_reachable", lambda: True)
+    monkeypatch.setattr(
+        tools_mod,
+        "_search_duckduckgo",
+        lambda q, n: [{"title": "T", "url": "https://a.com", "snippet": "S"}],
+    )
+    monkeypatch.setattr(
+        tools_mod,
+        "_search_bing",
+        lambda q, n: (_ for _ in ()).throw(AssertionError("不应调用 Bing")),
+    )
+    monkeypatch.setattr(
+        tools_mod,
+        "_search_baidu",
+        lambda q, n: (_ for _ in ()).throw(AssertionError("不应调用百度")),
+    )
+    result = execute_web_search("q", "duckduckgo", api_key="", max_results=3)
+    assert result["results"][0]["title"] == "T"
+
+
+def test_execute_web_search_all_fallbacks_fail_returns_error(monkeypatch):
+    from app.agent import tools as tools_mod
+
+    monkeypatch.setattr("app.network.proxy_reachable", lambda: True)
+    boom = lambda q, n: (_ for _ in ()).throw(RuntimeError("down"))  # noqa: E731
+    monkeypatch.setattr(tools_mod, "_search_duckduckgo", boom)
+    monkeypatch.setattr(tools_mod, "_search_bing", boom)
+    monkeypatch.setattr(tools_mod, "_search_baidu", boom)
+    result = execute_web_search("q", "duckduckgo", api_key="", max_results=3)
+    assert result["results"] == []
+    assert "down" in result["error"]
+
+
+def test_execute_web_search_skips_ddgs_when_proxy_dead(monkeypatch):
+    """系统代理不可达：DDGS 整个跳过（省十几秒白等），直接走 Bing。"""
+    from app.agent import tools as tools_mod
+
+    monkeypatch.setattr("app.network.proxy_reachable", lambda: False)
+    monkeypatch.setattr(
+        tools_mod,
+        "_search_duckduckgo",
+        lambda q, n: (_ for _ in ()).throw(AssertionError("代理死时不应调用 DDGS")),
+    )
+    monkeypatch.setattr(
+        tools_mod,
+        "_search_bing",
+        lambda q, n: [{"title": "T", "url": "https://a.com", "snippet": "S"}],
+    )
+    result = execute_web_search("q", "duckduckgo", api_key="", max_results=3)
+    assert result["results"][0]["title"] == "T"

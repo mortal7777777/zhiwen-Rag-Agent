@@ -88,7 +88,7 @@ def execute_web_search(
         elif provider == "searxng":
             results = _search_searxng(query, searxng_base_url, max_results, searxng_engines)
         else:
-            results = _search_duckduckgo(query, max_results)
+            results = _search_with_fallback(query, max_results)
         for item in results:
             credibility, reason = _credibility_for(item.get("url", ""))
             item["credibility"] = credibility
@@ -169,6 +169,175 @@ def _search_duckduckgo(query: str, max_results: int) -> list[dict]:
             }
         )
     return results[:max_results]
+
+
+def _search_with_fallback(query: str, max_results: int) -> list[dict]:
+    """DuckDuckGo 优先；失败时依次回退 Bing 国内站 → 百度（均直连）。
+
+    DDGS 底层（primp）会读 Windows 系统代理且无法禁用：Clash 未启动时必然
+    报 tunnel error（2026-10-14 实测），且会逐个引擎白等十几秒——系统代理
+    不可达时直接跳过 DDGS。降级链里 Bing 国内站最快最稳（0.5s、无验证码），
+    百度放末级（对无 cookie 自动化请求偶发 302 图形验证，同日实测）。
+    """
+    from ..network import proxy_reachable
+
+    if proxy_reachable():
+        try:
+            results = _search_duckduckgo(query, max_results)
+            if results:
+                return results
+            logger.warning("DuckDuckGo 搜索无结果，尝试 Bing")
+        except Exception as exc:
+            logger.warning("DuckDuckGo 搜索失败（%s），尝试 Bing", exc)
+    else:
+        logger.warning("系统代理不可达，跳过 DuckDuckGo 直接走 Bing")
+    try:
+        return _search_bing(query, max_results)
+    except Exception as exc:
+        logger.warning("Bing 搜索失败（%s），尝试百度", exc)
+    return _search_baidu(query, max_results)
+
+
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+)
+
+
+def _search_bing(query: str, max_results: int) -> list[dict]:
+    """Bing 国内站直连搜索（cn.bing.com，Clash 未启动时的首选降级源）。"""
+    from ..network import make_httpx_client
+
+    with make_httpx_client(timeout=8) as client:
+        response = client.get(
+            "https://cn.bing.com/search",
+            params={"q": query},
+            headers={"User-Agent": _BROWSER_UA, "Accept-Language": "zh-CN,zh;q=0.9"},
+        )
+        response.raise_for_status()
+        page_html = response.text
+    results = _parse_bing_html(page_html, max_results)
+    if not results:
+        raise RuntimeError("Bing 搜索未解析到结果（页面结构变更或请求被拦截）")
+    return results
+
+
+def _decode_bing_url(href: str) -> str:
+    """解开 Bing 跳转链（ck/a?...&u=a1<base64url> 里的真实 URL）；非跳转链原样返回。"""
+    import base64
+    import re
+
+    match = re.search(r"[?&]u=a1([A-Za-z0-9_\-%]+)", href)
+    if not match:
+        return href
+    token = match.group(1).split("%")[0]  # 截掉可能被 URL 编码的 "=" padding
+    try:
+        return base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode(
+            "utf-8", "replace"
+        )
+    except Exception:
+        return href
+
+
+def _parse_bing_html(page_html: str, max_results: int) -> list[dict]:
+    """解析 Bing 结果页：li.b_algo 块内 h2>a 标题与链接，摘要取块内首个 <p>。"""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(page_html, "html.parser")
+    results: list[dict] = []
+    seen: set[str] = set()
+    for block in soup.select("li.b_algo"):
+        link = block.select_one("h2 a")
+        if link is None:
+            continue
+        title = link.get_text(strip=True)
+        url = _decode_bing_url(link.get("href") or "").strip()
+        if not title or not url.startswith("http") or url in seen:
+            continue
+        paragraph = block.find("p")
+        snippet = paragraph.get_text(strip=True) if paragraph else ""
+        seen.add(url)
+        results.append(
+            {
+                "title": _truncate(title, 150),
+                "url": url,
+                "snippet": _truncate(snippet, 350),
+            }
+        )
+        if len(results) >= max_results:
+            break
+    return results
+
+
+def _search_baidu(query: str, max_results: int) -> list[dict]:
+    """百度网页搜索（国内可直连；对无 cookie 自动化请求偶发图形验证，放末级）。"""
+    from ..network import make_httpx_client
+
+    with make_httpx_client(timeout=10) as client:
+        response = client.get(
+            "https://www.baidu.com/s",
+            params={"wd": query, "rn": max(10, max_results * 2)},
+            headers={"User-Agent": _BROWSER_UA, "Accept-Language": "zh-CN,zh;q=0.9"},
+            follow_redirects=False,
+        )
+        if response.status_code // 100 == 3:
+            # 302 → wappass.baidu.com 图形验证（无 cookie 自动化请求偶发）
+            raise RuntimeError("百度搜索触发安全验证（302），请稍后重试或启动 Clash")
+        response.raise_for_status()
+        page_html = response.text
+    results = _parse_baidu_html(page_html, max_results)
+    if not results:
+        raise RuntimeError(
+            "百度搜索未解析到结果（可能触发安全验证或页面结构变更），"
+            "可启动 Clash 后走 DuckDuckGo"
+        )
+    return results
+
+
+def _parse_baidu_html(page_html: str, max_results: int) -> list[dict]:
+    """解析百度结果页：结果块带 mu 属性（真实目标 URL，无需解析 link 跳转）。
+
+    标题取块内首个 <h3>；摘要按代际依次尝试 c-abstract（老版）与
+    summary-text_*（新版 cosc 卡片，类名带构建哈希）；部分卡片没有摘要取空串。
+    fakeurl.baidu.com 是学术频道等卡片的占位链接，跳过。
+    """
+    import re
+
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(page_html, "html.parser")
+    results: list[dict] = []
+    seen: set[str] = set()
+    for block in soup.find_all("div", class_="c-container"):
+        classes = block.get("class") or []
+        if not any(c == "result" or c.startswith("result-") for c in classes):
+            continue
+        url = (block.get("mu") or "").strip()
+        if not url.startswith("http") or url in seen or "fakeurl.baidu.com" in url:
+            continue
+        h3 = block.find("h3")
+        if h3 is None:
+            continue
+        title = h3.get_text(strip=True)
+        if not title:
+            continue
+        abstract = (
+            block.find(class_="c-abstract")
+            or block.find(class_=re.compile(r"summary-text_"))
+            or block.find(class_=re.compile(r"content-right_"))
+        )
+        snippet = abstract.get_text(strip=True) if abstract else ""
+        seen.add(url)
+        results.append(
+            {
+                "title": _truncate(title, 150),
+                "url": url,
+                "snippet": _truncate(snippet, 350),
+            }
+        )
+        if len(results) >= max_results:
+            break
+    return results
 
 
 def _search_tavily(query: str, api_key: str, max_results: int) -> list[dict]:

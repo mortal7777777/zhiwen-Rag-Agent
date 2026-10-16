@@ -29,6 +29,31 @@ def system_proxy() -> str | None:
     return proxies.get("https") or proxies.get("http")
 
 
+def proxy_reachable(timeout: float = 0.5) -> bool:
+    """系统代理端口是否可连；未配置代理时返回 True（无需跳过直连路径）。
+
+    DDGS（primp）等库读系统代理且无法禁用：Clash 未启动时逐个引擎白等
+    连接拒绝（实测多引擎合计十几秒），调用方可先探测再跳过代理依赖的源
+    （2026-10-14 起用于联网搜索/欢迎页热点的降级链）。
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    proxy = system_proxy()
+    if not proxy:
+        return True
+    parsed = urlparse(proxy if "://" in proxy else f"http://{proxy}")
+    host = parsed.hostname
+    if not host:
+        return True
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 class ProxyFallbackTransport(httpx.BaseTransport):
     """优先走系统代理，代理连接被拒时回退直连。"""
 

@@ -9,6 +9,7 @@ import threading
 
 import pytest
 
+from app import network
 from app.network import make_httpx_client
 
 
@@ -66,3 +67,24 @@ def test_proxy_used_when_alive(local_server, monkeypatch):
     with make_httpx_client(timeout=5) as client:
         resp = client.get(f"http://127.0.0.1:{port}/")
         assert resp.status_code == 200
+
+
+def test_proxy_reachable_false_when_refused(monkeypatch):
+    """系统代理指向无监听端口（Clash 未启动）：探测应为不可达。"""
+    monkeypatch.setattr("app.network.system_proxy", lambda: "http://127.0.0.1:1")
+    assert network.proxy_reachable(timeout=0.3) is False
+
+
+def test_proxy_reachable_true_without_proxy(monkeypatch):
+    """未配置代理：返回 True（表达"无需跳过依赖代理的路径"）。"""
+    monkeypatch.setattr("app.network.system_proxy", lambda: None)
+    assert network.proxy_reachable() is True
+
+
+def test_proxy_reachable_true_when_listening(local_server, monkeypatch):
+    """系统代理端口有监听：探测应为可达。"""
+    proxy_port = local_server.server_address[1]
+    monkeypatch.setattr(
+        "app.network.system_proxy", lambda: f"http://127.0.0.1:{proxy_port}"
+    )
+    assert network.proxy_reachable(timeout=1.0) is True
