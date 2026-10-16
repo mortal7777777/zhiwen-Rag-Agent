@@ -1,662 +1,95 @@
-# 知问 ZhiWen（LangChain / LangGraph Agent）
+# 知问 ZhiWen · 个人知识库智能助手
 
-> **Latest release: [v0.1.0](https://github.com/mortal7777777/zhiwen-Rag-Agent/releases)** —
-> 源码包（zip / tar.gz）可从 Releases 页面下载，不含数据、模型与私有文档。
+<p>
+  <img src="https://img.shields.io/badge/version-0.2.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="python">
+  <img src="https://img.shields.io/badge/node-18%2B-green" alt="node">
+  <img src="https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white" alt="docker">
+</p>
 
-前后端分离的个人知识库 + 智能助手：基于 **LangChain 框架**，Agent 编排层使用
-**LangGraph 状态图**（7 节点 + 条件路由）实现按需工具调用，支持个人知识库问答、
-联网搜索、视觉识别、本机 Skills 复用、三层对话记忆（MySQL）、预设提示词模板、
-多供应商模型管理与可视化设置。
-<img width="2520" height="1174" alt="image" src="https://github.com/user-attachments/assets/ec283eff-59a9-4bf9-b9da-ef8d7e451709" />
+基于 **LangChain / LangGraph** 的个人知识库 + 智能助手：把散落的本机文档（PDF / EPUB / Word / 笔记）建成可检索的私人知识库，
+用带工具调用与人工确认的 Agent 回答问题——**答案带原文出处、可追溯**；
+同时支持联网搜索、图片识别、本机 Skills 复用、长期记忆、代码文件与命令执行（类 Claude Code 工作流）。
 
+- **后端**：FastAPI + LangGraph（7 节点状态图）+ OpenSearch 混合检索 + 本地 BGE Embedding/Reranker + 任意 OpenAI / Anthropic 兼容模型 + MySQL
+- **前端**：Vue 3 + Element Plus（流式打字机、执行计划、审批卡片、来源引用、浅色/深色主题）
+- **一键部署**：`docker compose up`（自带 OpenSearch / MySQL / SearXNG，无需本机环境）
 
-- **后端**：FastAPI + LangChain / LangGraph + OpenSearch + 本地 BGE Embedding/Reranker + DeepSeek / 任意 OpenAI 兼容模型 + SenseNova 视觉 + MySQL
-- **前端**：Vue 3 + Vite + Element Plus（浅色/深色主题、打字机流式、引用索引、设置面板）
+![欢迎页](docs/screenshots/01-chat-welcome.png)
 
-## 核心能力
+## 核心特性
 
-### Agent 编排（LangGraph）
+- **Agent 编排（LangGraph 状态图）**：`prepare → agent ⇄ tools → finalize`，模型自主声明并行子代理、自主进入计划模式先出方案，全程可审计
+- **RAG 检索管道**：Parent-Child 切分 + Multi-Query/HyDE 查询扩展 + kNN×BM25 混合检索 + RRF 融合 + 本地 bge-reranker 精排；文件级增量索引（增改只嵌入该文件，删除秒级生效）
+- **引用可追溯**：逐条来源卡片与 `[n]` 角标，点角标跳到原文；PDF / EPUB / Word 内置文档查看器
+- **类 Claude Code 的文件与命令执行**：读文件/检索自动执行；写文件、执行命令走**人工确认**（原生 interrupt 挂起，批准后原轮续跑），命令可跑在 Docker 沙箱里
+- **Prompt caching 友好**：消息链严格纯追加，DeepSeek 前缀缓存实测轮内命中 ~94%，长会话输入成本大幅下降
+- **三层对话记忆**：MySQL 持久会话 + 滚动摘要（粘滞窗口）+ 长期事实记忆（自动提取/分类/整合/语义召回）
+- **多供应商模型管理**：OpenAI 兼容与 Anthropic 兼容两种 API 格式，设置页即切即用
+- **联网可信度分级**：结果自动标注 high / medium / low 并约束模型引用；DuckDuckGo → Bing → 百度 多级降级
+- **终端客户端（类 Claude Code）**：`zhiwen` 一条命令进终端问答，支持审批弹窗、按目录加载 `AGENTS.md`、`/resume` 恢复会话
+- **可观测性**：逐轮运行记录（用时 / token / 缓存命中 / 工具轨迹）+ JSONL trace
 
-编排不是手工循环，而是显式状态图（见"架构设计"）：
-`prepare → agent → tools → (循环) → finalize`，其中 agent 可**自己声明**并行子任务
-（`dispatch → subagent(Send 并行) → merge → agent`），也可自主进入计划模式先出方案。
+> 每一项的完整细节（记忆体系、HITL 流程、沙箱、键盘快捷键、全部环境变量与 API 一览）见 **[docs/GUIDE.md](docs/GUIDE.md)**。
 
-- 输入框上方开关控制：
-  - **知识库检索** `knowledge_base_search`：复用完整 RAG 管道（查询扩展 + 混合检索 + Parent-Child + 本地重排），内置 CRAG 兜底；
-  - **联网搜索** `web_search`：provider 可插拔（DuckDuckGo 免 key / Tavily 需 key / SearXNG 自托管 / 关闭）；
-  - **识图** `image_to_text`：主模型无视觉时按需调用 SenseNova；
-  - **技能检索** `skill_lookup`：按需取回本机已启用的 Skills 指令（结构化分节）。
-- 四种模式：**自动**（模型按需决定）/ **知识库** / **联网** / **不启用**（纯对话）；
-- **计划模式**（设置 → 工具与集成，默认开）：允许模型对复杂任务先出计划让你确认；关闭即不注册相关工具、模型无法进入；
-- **文件与终端工具**（见下节）：读取自动执行，写/命令敏感操作弹窗人工确认。
-- **声明式并行子代理**：主 Agent 在运行中判断某步"自包含且值得隔离上下文"时，
-  用 `dispatch_subtasks` 声明子任务（`research` 只读 / `execute` 可写），
-  条件边用 LangGraph `Send` 扇出并行子代理，结果按 tool_call 一一对应回填为
-  `ToolMessage`（含**产物证据**：新建/覆盖、字节数、命令与退出码、写后校验），
-  未经核实由主 Agent 自行判断采信或重派；每轮最多 4 个子任务、execute 只放开一个；
-- **知识库写入**：新增 `add_document` 工具（txt/md/csv/json），
-  保存文档并增量建索引；属敏感操作，经人工确认后才执行；
-- **TodoWrite 任务清单（计划硬约束）**：由主 Agent 声明的子任务或用户确认的计划自动播种（MySQL 持久化、跨轮跟踪），
-  Agent 可经 `todo_update` 增删改查（list/add/complete/remove/set，set 支持整体修订），
-  前端计划卡片渲染为可勾选清单，切换会话后自动恢复；
-- **进度以显式勾选为准**：模型经 `todo_update` complete/add/remove/set 维护清单并推进
-  进度（提示词要求"每完成一步立即标记"）；子任务声明完成时按文本补勾，纯推理/总结
-  步骤在收尾时补完成，未完成的工具型步骤保留未勾选状态（审计留痕）。不再按"1 次
-  工具调用 = 1 个步骤"自动推进——那会把同一轮的多次检索算成多步、勾过头；
-- **计划硬约束**：存在未完成步骤时（清单来自用户确认的计划或模型自己的派发声明），
-  模型不允许提前输出最终回答，图路由会把任务推回 agent 继续执行（推送语会说明如何用
-  `todo_update` complete/remove 收尾；最多提示 3 次，超限或达调用上限才强制收尾）；
-- **可审计**：运行 trace（JSONL）记录每次运行的 todos 快照与 `plan_done_count`；
-- **计划进度回填**：声明/确认的计划落成任务清单后，每轮工具执行完毕自动回填"已完成 x/y 步、当前步骤、剩余步骤"，并作为硬约束依据；
-- 工具调用上限（默认 20 次，task_mode 50），剩余最后一次时提示"补充检索后必须作答"，超限强制收尾；
-- 空参数工具调用兜底（返回"参数缺失"，不浪费调用）；`recursion_limit` 超限时自动兜底收尾；
-- **停止生成**：客户端断开后后端感知并置停止信号，只保存问题、不落半截回答；
-- **打字机流式**：后端按窗口（~60ms / 120 字）推送正文增量 `stream_delta`，前端 24ms 节流 + 积压自适应加速，首字随生成出现；工具轮的过渡思考文本整轮 `stream_end{keep:false}` 撤回，正文轮 `keep:true`（全文 `token` 仍发，供 CLI/评测消费，前端跳过避免重复）；
-- **SSE 心跳**：工具长执行（10~20s）时发送 `: keepalive` 注释行保活；
-- **标题后置**：新会话首 token 不被标题阻塞，后台生成后经 `title` 事件更新；
-- **引用溯源**：知识库/联网结果带全局 index，回答用 `[n]` 标注，前端可点击高亮来源卡片；
-- 决策透明：前端展示执行计划、工具轨迹（含耗时）、引用来源；后端记录完整 trace。
+## 界面预览
 
-### 文件与命令执行（类 Claude Code，含 HITL 人工确认）
+**Agent 对话** — `[n]` 引用角标、来源卡片与工具轨迹
 
-- 工具集：`list_dir` / `read_file` / `grep_search`（只读，自动执行）；
-  `write_file` / `edit_file` / `delete_file` / `bash`（敏感，默认人工确认）；
-- **Docker 沙箱**：设置里把“命令沙箱”切到 docker 后，`bash` 在
-  `python:3.11-slim` 容器内执行（挂载工作目录、`--network=none` 隔离外网、
-  限 512M 内存/1 CPU）；容器根文件系统只读、去 Linux 能力、限进程数，
-  可选“工作目录只读”（项目 `:ro` 挂载，写入走内存盘 `/scratch`）；
-  `COMMAND_SANDBOX` / `SANDBOX_IMAGE` / `SANDBOX_WORKSPACE_READONLY` 可配置；
-- **浏览器工具**：已接入 Playwright MCP（`browser_navigate` / `browser_type` /
-  `browser_screenshot` 等），设置页可启停；
-- **HITL 流程（原生 interrupt 挂起）**：Agent 请求敏感操作时，本轮在工具节点
-  以 `interrupt()` 挂起——SSE 以 `run_suspended{ops}` 收尾（一次收齐本轮全部敏感操作，
-  同轮同命令只问一次）；前端消息卡片内渲染审批框（展示命令/路径/内容预览，
-  可逐个批准/拒绝并附备注），全部决定后自动经 `POST /api/agent/resume` 提交，
-  以**新 SSE 流**续跑同一条回答（内部 `Command(resume=...)`，回复仍渲染在同一气泡）。
-  计划确认（模型 `exit_plan_mode` 提交的步骤）走同一套挂起/恢复：载荷里带 `plan`，
-  确认（可编辑）后**同一轮直接开始执行**；拒绝则留在计划模式，模型可调整后重新提交。
-  挂起期间该会话的新消息会被闸门拒绝（前端输入框同步禁用）；
-  刷新页面或切回会话时经 `GET /api/agent/pending/{conversation_id}` 恢复审批卡/计划卡；
-  浏览器断开/关闭页面不结束挂起，回来再批即可；
-  拒绝原因会回传给模型，模型向用户解释影响并给出替代方案；
-- **快捷审批交互**：审批卡片即选项卡——数字键 `1/2/3` 直接选择（批准 / 拒绝 /
-  批准并永久记住）、`↑↓` 移动高亮、`Enter` 确认、`Esc` 返回输入框；
-  出现审批时焦点自动跳到卡片，处理完回到输入框继续打字机输出；
-  批准/拒绝后卡片自动折叠为一行紧凑状态条，不占对话空间；
-- **记住命令（类 Claude Code "下次不用询问"）**：批准时可选「本会话记住」
-  （同会话同命令不再询问）或「永久记住」（写入命令白名单、全局自动放行），
-  都可在设置页撤销；
-- **失败不烧预算**：工具失败（路径/权限/参数错误、命令非零退出码）不消耗迭代次数，
-  并自动注入"换一种方式继续尝试"的引导（先列目录确认现状 → 修正参数 →
-  目标不可达时向用户说明并给替代方案）；连续失败超过上限（默认 3 次）才强制收尾。
-  这修复了"一次路径错误耗尽 6 次预算导致任务半途而废"的问题；
-- **路径容错**：绝对路径落在工作目录内自动接受；落在外部返回可操作错误
-  （告知工作目录根 + 改用相对路径 + 修改工作目录的建议）；
-- **自动分步拆解**：要不要拆、怎么拆由主 Agent 自己判断（复杂任务声明子任务或进入计划
-  模式），拆解结果落成任务清单并实时展示；执行时每完成一步前端自动打对钩
-  （任务清单与计划进度联动），每完成一个小阶段先汇报进度再继续，全部完成后再给最终总结。
-- **计划模式（模型自主 + 用户可关）**：涉及写文件/命令、影响面大的任务，
-  模型可自行 `enter_plan_mode` 只读探索，再用 `exit_plan_mode` 提交结构化步骤；
-  前端渲染成**可编辑的确认卡**，确认（或改完步骤）后**同一轮直接继续执行**
-  （原生挂起 + 恢复，不再重发新 run），清单同时成为任务列表；拒绝则留在计划模式，
-  模型可调整后重新提交。**键盘可达**：卡片出现即自动聚焦，Enter / Ctrl+Enter 确认、Esc 取消；
-  审批卡同样支持键盘（数字键 1/2/3 批准/拒绝/记住，无需先把焦点点进卡片）。
-  设置页的"计划模式"开关是**硬否决**：关掉后对应工具根本不注册，模型物理上无法进入。
-- 命令白名单（如 `python, git status`）= **自动放行前缀**，命中无需确认；
-  未命中命令在 `ask` 模式下仍弹窗批准。模式可切换为 `allow`（全自动批准，
-  等价 Claude Code 的 `--dangerously-skip-permissions`，谨慎使用）；
-- 等待确认超时默认 0 = 无限等待（类 Claude Code；`PERMISSION_TIMEOUT>0` 时由后端
-  watchdog 到点以“全部拒绝（超时）”自动续跑收尾）；挂起期间点停止 = 全拒 + 立即收尾；
-- **崩溃续跑**：进程被杀/异常退出的半成品一轮会留在原生检查点里——重开会话时前端提示
-  「继续执行 / 丢弃这一轮」，后端 `POST /api/agent/continue/{conversation_id}` 以
-  `invoke(None)` 让框架把没跑完的节点重跑完（只重跑未完成节点，前缀缓存不断）；
-  被中断节点会从头重跑，副作用可能重复一次（窗口=进程恰好死在节点执行中）；
-  挂起中的确认跨重启同样存活（sqlite 检查点），回来继续批即可；
-- **快照时间线**：会话头部「快照」列出最近的检查点（消息数 / 计划进度 / 来源数，
-  最新在前），可一键回滚消息与任务清单到任意快照；每会话保留条数在设置页
-  「记忆 → 检查点」调整（默认 20，`CHECKPOINT_KEEP_PER_THREAD` 可配）；
-- **设置页按功能域分区**：外观 / 模型 / 技能 / 工具 / 审批 / 检索 / 记忆 七个标签——
-  命令白名单是标签编辑器（回车添加、点建议、粘贴逗号串自动拆分）、工作目录与
-  知识库数据目录带「浏览」目录选择器（后端只列目录、仅本机可访问）、
-  工具预算/派发轮数/看门狗、检索门槛、上下文与记忆阈值、检查点保留数等
-  均可在页内调整并即时生效；
-- 安全边界：文件操作限制在 `tool_workspace`（默认项目根）内、拒绝路径穿越；
-  命令带超时（默认 60s）与输出截断；删除不物理销毁，移入 `.agent_trash/` 可恢复；
-  写文件使用原子写入（临时文件 + 替换），避免半截文件；
-- 可在设置页「工具与集成」配置工作目录、白名单、确认模式与超时，或关闭总开关。
+![Agent 对话](docs/screenshots/02-agent-chat.png)
 
-### 对话记忆与上下文工程（类 DeepSeek 网页端）
+**知识库管理** — 文档上传与增量索引状态
 
-- MySQL 持久化会话（`conversations`）与消息（`messages`），左侧会话列表可新建/切换/重命名/删除；
-- **会话滚动摘要（粘滞窗口）**：窗口起点跟随摘要边界、不随总行数滑动；行数超上限 1.5 倍
-  （默认 400→600 行）**或** token 超预算 1.25 倍才压缩一次、压到预算内（默认通用/知识库 64k、
-  编程/写作 400k，`HISTORY_BUDGET_*` 可覆盖；最终会被模型上下文窗口自动夹紧）——
-  压一次前缀缓存稳定多轮，不再每轮改写历史开头；
-- **长期事实记忆**：每轮对话自动提取并**分类**（用户画像/喜好偏好/工作项目/重要决定/教训与应对/其他）；
-  用户说"记住…"时**强制提取**（提取约束"不记可推导的事实、只以用户消息为依据"）；
-  可在「记忆」面板查看/编辑/新增/**归档（可恢复）**/删除，条目显示命中次数；
-- **自动整合整理**：活跃记忆达到阈值后自动整合——**只合并重复、只归档被新事实明确覆盖的旧项**
-  （不做"看起来琐碎"的价值裁量；命中次数不作归档依据）；整合前写审计快照
-  （`opensearch_meta/memory_audit/`），误归档可用 `backend/scripts/dev/restore_archived_memories.py` 恢复；
-  生成常驻**用户画像摘要**；
-- **按需注入**：用户画像摘要（常驻）+ 语义召回（**全库向量精排**，向量按 id+updated_at 缓存；
-  注入带 `[分类|录入日期]` 时效锚点、近似重复贪心去重；仅在零命中时用最近录入的记忆兜底，
-  按 token 预算裁剪；命中即累加 hit_count，仅作观测）；
-- **分层上下文**：时间/热点 → 画像摘要 → 相关记忆 → 会话摘要 → 图片理解 → 历史（预算裁剪）→ 当前问题。
-- **Prompt caching（纯追加链，前缀缓存友好）**：DeepSeek 等提供商的自动前缀缓存
-  要求请求前缀从 token 0 逐字节一致（无显式断点 API），因此消息链设计为：
-  `[静态核心（模板+工具规则）, 技能目录+文档清单, 历史, D块（项目记忆/todos/摘要/记忆/时间）, 问题]`——
-  静态部分跨轮字节级稳定；每轮变化的内容（D 块与轮内进度提示）统一收在链尾，
-  且 finalize 把问题之后的**全部消息（含 system 行）**落库，下一轮从 DB 重建的
-  历史与上一轮实际发送逐字节一致（纯追加：请求 = 上一请求 + [D块, 问题]）；
-  工具定义哈希跨轮监测（失效即告警：MCP/技能/用户工具变更会让整段前缀作废）、
-  消息链逐条指纹遥测（定位"第几条起断链"）、MCP 工具 schema 落盘（连接失败
-  降级为同定义占位，工具数组跨状态字节稳定）、项目记忆"变化才注入 + 人工维护区"、
-  强制收尾保持 bind_tools（tools 数组参与缓存键）、工具结果进历史前瘦身（2500 字符）——
-  长会话/多轮工具循环的输入成本大幅下降
-  （token 记录含 cache_hit/cache_miss 与逐调用 `calls` 遥测可验证；
-  实测轮内中位约 94%、run 级约 92%、跨轮首调 80–97%）。
+![知识库管理](docs/screenshots/03-knowledge.png)
 
-### 多供应商模型管理（参考 cc-switch）
+**运行记录** — 逐轮用时、token 用量与缓存命中
 
-- 对话模型与视觉模型各自支持**多个供应商**（OpenAI 兼容 + Anthropic 兼容两种 API 格式），
-  设置页可添加/删除/启停/设为当前；
-- **API 格式判定**：供应商 `api_format` 字段显式指定，未填则按 `base_url` 推断——
-  路径含 `/anthropic` 即走 Anthropic 格式（`langchain-anthropic` 的 ChatAnthropic），
-  如 DeepSeek 的 `https://api.deepseek.com/anthropic`（模型名支持 `deepseek-v4-flash[1m]`
-  长窗口后缀；该端点 `cache_control` 断点被忽略，仍是自动前缀缓存，命中量记在
-  `cache_read_input_tokens`，遥测面板照常统计）；
-- API Key 脱敏展示，`****last4` 回传表示"保持不变"；旧 `deepseek_*` / `sensenova_*` 键值自动同步；
-- 切换供应商无需重启，立即生效（模型懒加载缓存刷新）。
+![运行记录](docs/screenshots/04-runs.png)
 
-### RAG 检索质量
+**设置** — 多供应商管理（OpenAI / Anthropic 兼容）
 
-- Parent-Child 切分：child（约 320 字，重叠 64）精确检索，parent（段落分组约 600 字）完整上下文；
-- 查询扩展：Multi-Query + HyDE + 多轮补全；**简单问题自动跳过扩展**（≤16 字、无复杂词、无指代；
-  含《》书名号的书名/篇名题强制扩展）；
-- 混合检索：kNN + BM25 → RRF 融合 → Small-to-Big 聚合 → 本地 bge-reranker 精排；
-- 支持 txt / md / csv / doc / docx / xlsx / pdf / epub；
-- 增量索引（按文件粒度）：文件没变直接复用，新增/修改只嵌入该文件，删除秒级移除其向量块（零嵌入）；
-  全量重建仅首次运行/换嵌入模型/手动触发（蓝绿：新物理索引 + 别名原子切换，见
-  [docs/INDEX_REDESIGN_PLAN.md](docs/INDEX_REDESIGN_PLAN.md)）；
-- 布局感知 PDF 解析（PyMuPDF4LLM），可选扫描页视觉 OCR（需 SenseNova key）。
-- **CUDA 容错**：embedding / reranker 遇到 CUDA 异步错误（unknown error /
-  illegal memory access / OOM）时自动降级到 CPU 完成本次检索，
-  并在 5 分钟冷却后自动探测 GPU 是否恢复；显卡瞬时故障不会让知识库查询持续失败。
-- **提速**：查询扩展并行化（Multi-Query / HyDE / 多轮补全并发）+ 同问题 10 分钟缓存 +
-  单次查询上限收敛到 4 条；CRAG 联网兜底只在用户本轮开启“联网”开关时生效，
-  纯知识库模式不再静默爬网（实测 KB 单题 17~25s，此前可到 50~218s）。
-
-### 视觉能力（SenseNova）
-
-- 上传/粘贴图片自动识图并注入上下文（主模型无视觉时）；
-- `image_to_text` 工具允许 Agent 在对话中按需对任意 base64 图片做 OCR/图表解读。
-
-### 联网可信度
-
-- 每条联网结果自动标注 `credibility`（high / medium / low）与原因：
-  政府/教育/权威媒体/学术为 high，门户/技术社区为 medium，
-  社交/论坛/个人来源为 low，未知域名提示交叉验证；
-- 系统提示词强制要求：引用优先 high，medium 需交叉验证，low 不作为事实依据；
-  结论仅来自 low/medium 来源时向用户说明“可信度有限”；
-- 网页内容视为外部不可信数据，忽略其中要求执行操作、输出凭据、隐瞒用户的指令。
-
-### 技能（Skills）
-
-- 扫描本机 **Codex / Claude / Hermes**（含 optional-skills）技能，去重后数百个（随本机目录动态变化）；
-- 设置页支持搜索、**按功能筛选**（文档/写作/研究/效率/设计/编程/GitHub/数据/媒体/邮件）、来源筛选、
-  启用开关与"从本助手移除"（只影响本助手，不修改其他 Agent 的文件）；
-- **目录索引 + 按需加载（类 Anthropic Agent Skills）**：系统提示词常驻"技能目录"
-  （名字 + 一句话，内容经清洗防注入），模型认为需要某技能时主动调用
-  `skill_lookup` 工具取回全文；不再每轮自动注入匹配技能的全文——避免每轮
-  内容变化破坏 DeepSeek 前缀缓存；
-- Agent 的 `skill_lookup` 只检索已启用技能，返回 **分节目录**；
-- **防注入**：技能内容视为不可信参考数据，高风险指令行（覆盖指令、索要凭据、
-  绕过审批、外传数据、破坏性命令）会被过滤替换，系统提示词中固化安全边界；
-- 默认精选手集 26 个（文档/写作/研究/设计/编程/数据），集成类（notion、
-  google-workspace、github 全家桶等）默认关闭，可在设置页按需开启。
-
-### 可观测性
-
-- `agent_runs`：每次运行的 question / plan / tool_trace（含耗时）/ answer_len / latency / status / error / **token 用量**（含逐调用 `calls` 缓存遥测：每次主循环调用的 input / cache_read / output / 耗时，定位轮内断链）；
-- 结构化 trace：`opensearch_meta/traces/YYYY-MM-DD.jsonl`（线程级 token 聚合，含流式调用补记与逐调用 `calls` 遥测）；
-- `/api/metrics`：请求量、错误率、检索/生成/扩展平均耗时；
-- 预留 Langfuse 接入点（当前本地 JSONL，隐私友好）。
-
-### 前端
-
-- Vue 3 + Element Plus，浅色/深色/跟随系统主题，内容宽度按窗口比例调节（55%/70%/85%/全宽）；
-- 设置面板：居中圆角卡片 + 背景模糊 + 顶部横向导航（外观 / 模型与供应商 / 技能）；
-- 欢迎页每日建议（知识库 / 热点新闻 / 通用，每天轮换并缓存）；
-- 提示词模板管理、长期记忆管理、知识库上传/重建/删除。
-
-## 架构设计
-
-### 后端分层
-
-```text
-api/           FastAPI 路由：agent / chat / conversations / templates / memories /
-               documents / vision / settings / skills / suggestions / runs / health
-agent/         LangGraph 编排（langgraph_agent）＋ 上下文工程（context）＋ 工具（tools）＋ 提示词（prompts）
-rag/           检索管道：embedding / reranker / store(OpenSearch) / retriever /
-               query_expander / splitter / loader / service
-db/            MySQL 数据层：models / repository（会话、消息、记忆、模板、运行记录）
-runtime_config 运行时配置（多供应商、技能偏好，DB 覆盖优先）
-tracing        线程级 token 聚合 + JSONL trace
-config.py      全局配置（环境变量可覆盖）
-```
-
-### LangGraph 编排图
-
-```text
-START ──> prepare ──> agent ──> tools ──> agent ──> ...
-                        │            ▲
-                        ├──有工具调用──┘   （循环，直到无工具调用 / 超限 / 停止）
-                        ├──声明了子任务──> dispatch ──> subagent（Send 并行分支）──> merge ──┐
-                        │                                                                  │
-                        └──────────────────────────── agent <───────────────────────────────┘
-                    无工具调用 / 停止 ──> finalize ──> END
-```
-
-- **prepare**：会话/历史/滚动摘要、标题后台线程、KB 文档清单、记忆召回（GPU 锁内）、
-  视觉识别、时间注入，组装分层消息与工具；广播 `session/vision`。
-  （计划不再由独立的 planner 生成——2026-09-25 移除：它只看单条问题、
-  不知道对话与磁盘现状，却决定了派发与预算；现在计划由主 Agent 自己声明。）
-- **dispatch / subagent / merge**：主 Agent 声明子任务后（`dispatch_subtasks`），
-  dispatch 受理并落任务清单，用 LangGraph `Send` 把每个子任务派给独立上下文的
-  子代理并行执行（research=只读，execute=可写、敏感操作走人工确认），merge 把结果
-  **按 tool_call 一一对应回填成 `ToolMessage`**（子代理自述 + 结构化产物证据），
-  来源重编号、同步任务清单；
-- **agent**：LLM 并发锁内流式生成（token 聚合），有 `tool_calls` 走 tools，否则收尾。
-- **tools**：执行工具、回填 `ToolMessage`、注入计划进度、检查调用上限、空参数兜底；广播 `tool_start/tool_result`。
-- **finalize**：来源去重、联网附录、持久化消息、运行记录 + trace、标题事件、`done`。
-
-状态通过 `AgentState`（TypedDict）传递；节点经 `EventBus` 推送事件。SSE 协议向后兼容地新增
-`stream_delta`（正文增量）与 `stream_end{keep}`（保留/撤回本轮增量）：`token` 仍是全文事件，
-CLI / `run_json` / 评测脚本无需改动。
-`recursion_limit=110`（与工具上限 50×2 + 派发分支配套），超限/异常走兜底收尾，保证有最终回答与运行记录。
-
-### 一次问答的数据流
-
-```text
-前端提问 ─> /api/agent/stream
-  ─> prepare：会话/摘要/记忆/视觉/计划/时间，组装 messages 与 tools
-  ─> agent  ：模型流式生成（token 事件）
-        │ 有工具调用
-        ▼
-     tools：knowledge_base_search（GPU 锁内检索）→ 结果回填 ToolMessage
-        │ 回到 agent
-        ▼
-     agent 无工具调用 ─> finalize：去重/附录/持久化/运行记录/trace ─> done
-  ─> 后台：长期记忆提取（显式"记住"时强制）＋ 自动整合
-```
-
-## 项目结构
-
-```text
-rag_knowledge_base/
-├── backend/
-│   ├── app/
-│   │   ├── main.py                  # FastAPI 入口（MySQL 初始化、路由注册）
-│   │   ├── config.py                # 全局配置（环境变量可覆盖）
-│   │   ├── runtime_config.py        # 运行时配置（多供应商、技能偏好）
-│   │   ├── tracing.py               # token 聚合 + JSONL trace
-│   │   ├── schemas.py               # API 请求/响应模型
-│   │   ├── api/                     # 路由：health / chat / agent / conversations / templates /
-│   │   │                            #        documents / memories / vision / settings / skills /
-│   │   │                            #        suggestions / runs
-│   │   ├── agent/
-│   │   │   ├── langgraph_agent.py   # LangGraph 编排（7 节点 + 条件路由）
-│   │   │   ├── agent.py             # AgentService 基础（模型/上下文/视觉懒加载）
-│   │   │   ├── context.py           # 记忆/摘要/记忆提取/上下文工程
-│   │   │   ├── tools.py             # @tool 工具（KB / Web / Vision / Skill）
-│   │   │   ├── prompts.py           # 模板 + 工具规则 + 系统提示组装
-│   │   │   └── skills.py            # 本机 Skills 扫描/去重/启停/结构化目录
-│   │   ├── db/                      # MySQL：database / models / repository
-│   │   └── rag/                     # embedding / reranker / store / retriever / llm /
-│   │                                # query_expander / splitter / loader / service
-│   ├── run.py                       # 开发启动脚本
-│   └── requirements.txt
-├── frontend/
-│   ├── src/
-│   │   ├── api/                     # axios + SSE 封装
-│   │   ├── views/                   # ChatView（会话+Agent）/ KnowledgeView（知识库）
-│   │   ├── components/              # MarkdownContent（渲染 + 引用角标）
-│   │   ├── styles/theme.css         # 设计令牌（浅/深主题）
-│   │   ├── router/                  # 路由
-│   │   └── App.vue                  # 布局 + 设置面板
-│   ├── package.json
-│   └── vite.config.js               # 开发代理 /api -> 127.0.0.1:8000
-├── data/                            # 知识库文档目录（可配置 DATA_DIR）
-├── opensearch_meta/                 # 索引账本 + traces/
-├── docs/                            # 索引方案与评测体系文档
-├── Dockerfile                       # 后端镜像（lite/full 两档，见下方 Docker 章节）
-├── docker-compose.yml               # 一键启动（lite 模式）
-├── docker-compose.full.yml          # full 模式覆盖（本地模型 + GPU）
-├── .env.example                     # docker compose 环境变量模板
-└── README.md
-```
-
-## 环境要求
-
-1. **OpenSearch** 已启动（测试环境配置）：
-
-   ```yaml
-   network.host: 0.0.0.0
-   http.port: 9200
-   discovery.type: single-node
-   plugins.security.disabled: true
-   ```
-
-   本机为 zip 解压安装（如 `D:\opensearch\opensearch-3.5.0`），
-   启动方式：后台运行其 `bin\opensearch.bat`（不是 Docker 容器）。
-
-2. **MySQL** 已启动，能创建数据库/表（默认 `rag_assistant`，首次启动自动建库建表、写入内置模板）。
-
-3. 本地模型（与 day5_2 共用，位于项目上一级的 `local_models/`）：
-   - `bge-base-zh-v1.5`（Embedding，768 维，CUDA 下默认 fp16）
-   - `models--BAAI--bge-reranker-v2-m3`（Reranker）
-
-4. Python 3.10+ 与 Node.js 18+（依赖含 `langgraph`，见 `backend/requirements.txt`）。
+![设置](docs/screenshots/05-settings.png)
 
 ## 快速开始
 
-> 不想装 Python / Node / OpenSearch / MySQL 环境？直接看 [Docker 一键启动](#docker-一键启动推荐开箱即用)。
+### Docker 一键启动（推荐）
 
-### 1. 安装依赖
+无需本机安装 Python / Node / OpenSearch / MySQL，五个服务一条命令拉起：
 
-```powershell
-cd backend
-pip install -r requirements.txt
-cd ..\frontend
-npm install
+```bash
+cp .env.example .env          # 填 DEEPSEEK_API_KEY（必填）；EMBEDDING_API_KEY 推荐填（不填无法建知识库索引）
+docker compose up -d --build  # 首次构建 5~10 分钟
+# 打开 http://localhost:5173 · 接口文档 http://localhost:5173/docs
 ```
 
-### 2. 配置环境变量（PowerShell 示例）
+> 本地 BGE 模型 + GPU 的 full 模式、无 N 卡的 CPU 用法、镜像分层与数据卷说明见
+> [docs/GUIDE.md · Docker](docs/GUIDE.md#docker-一键启动推荐)。
+
+### 本机开发
 
 ```powershell
-# 必填：对话模型 API Key（OpenAI 兼容，可在设置页改供应商）
+# 依赖
+cd backend; pip install -r requirements.txt
+cd ..\frontend; npm install
+# 环境变量（必填 DEEPSEEK_API_KEY；本机还需 OpenSearch 9200 / MySQL 3306）
 $env:DEEPSEEK_API_KEY = "sk-..."
-
-# 可选：视觉模型（SenseNova Token Plan，识图/OCR）
-$env:SENSENOVA_API_KEY = "sk-..."
-
-# 可选：MySQL 连接串（默认 root 空密码连本机 rag_assistant 库）
-$env:MYSQL_URL = "mysql+pymysql://root:你的密码@127.0.0.1:3306/rag_assistant?charset=utf8mb4"
+# 启动（或双击 start_all.bat 一键拉起全部组件）
+cd backend; python run.py        # 127.0.0.1:8000
+cd ..\frontend; npm run dev      # http://localhost:5173
 ```
 
-> 注意：`SENSENOVA_API_KEY` 未写入注册表，重启后端时需在启动它的终端里保留该环境变量。
+详细步骤（环境要求 / 终端客户端 / 测试 / 评测）见 [docs/GUIDE.md](docs/GUIDE.md)。
 
-### 3. 启动
+## 文档
 
-```powershell
-# 后端（127.0.0.1:8000，接口文档 /docs）
-cd backend
-python run.py
+| 文档 | 内容 |
+|---|---|
+| [docs/GUIDE.md](docs/GUIDE.md) | **完整使用指南**：功能细节、架构设计、环境变量、API 一览、注意事项 |
+| [docs/EVALUATION.md](docs/EVALUATION.md) | 评测体系（RAGAS 指标口径与实测基线） |
+| [docs/INDEX_REDESIGN_PLAN.md](docs/INDEX_REDESIGN_PLAN.md) | 索引重构方案（蓝绿别名切换 / 增量账本） |
+| [LICENSE](LICENSE) | MIT 许可证 |
 
-# 前端（http://localhost:5173）
-cd ..\frontend
-npm run dev
-```
+## 许可证
 
-> Windows 一键启动：双击根目录 `start_all.bat`——自动检查/启动 MySQL、OpenSearch、
-> 后端、前端，就绪后打开浏览器；已在运行的组件自动跳过。
-
-## Docker 一键启动（推荐，开箱即用）
-
-> 不需要本机装 Python / Node / OpenSearch / MySQL：五个服务（opensearch / mysql /
-> backend / frontend+nginx / searxng）由 docker compose 拉起。
-> 所有密钥经 `.env` 注入，代码内无任何硬编码；`data/`、`opensearch_meta/`、MySQL 均用独立数据卷。
-
-### lite 模式（默认，镜像最小）
-
-嵌入/重排走 OpenAI 兼容 API（默认 SiliconFlow 免费档 `bge-m3`），镜像**不包含 torch 与本地模型**，只有对话模型需要 API Key：
-
-```bash
-cp .env.example .env                  # 填 DEEPSEEK_API_KEY（必填）；EMBEDDING_API_KEY 推荐填（不填则无法建知识库索引）
-docker compose up -d --build          # 首次构建约 5~10 分钟
-# 打开 http://localhost:5173
-```
-
-- 后端 API 文档：http://localhost:8000/docs
-- OpenSearch：http://localhost:9200；MySQL：`127.0.0.1:3306`（密码见 `.env` 的 `MYSQL_ROOT_PASSWORD`）
-
-### full 模式（本地 BGE 模型 + GPU）
-
-需要仓库上一级的 `local_models/` 目录（`bge-base-zh-v1.5` + `models--BAAI--bge-reranker-v2-m3`），嵌入与重排全部本地执行：
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
-```
-
-无 GPU 时也可用（自动 CPU 推理）；GPU 直通依赖 Docker Desktop 的 WSL2 + NVIDIA 驱动。
-lite/full 切换后若提示索引维度冲突（768 vs 1024），`docker compose down -v` 清卷重来。
-
-> **镜像分层**：基础依赖与 torch 层（full 深度学习栈）分开构建，lite↔full 切换不会触
-> 发重装；torch 套件较大（约 3.6GB），构建时从 `PIP_INDEX_URL` 拉取，网络不佳可先运行
-> `bash scripts/download_torch_wheels.sh` 预下载 wheel 到 `torch_wheels/`（已 gitignore，
-> 构建时作为离线兜底）。
-> **务必用上面的完整命令启动 full**：裸 `docker compose up -d --build` 会以 lite 重构建，
-> 覆盖 `latest` 镜像标签（此前 10GB 的 full 镜像即因此被顶掉后遭清理）。
-> 切换回 lite 同样只需换回默认命令，镜像已拆层不会重复下载。
-
-### 停止与清理
-
-```bash
-docker compose down       # 保留数据卷
-docker compose down -v    # 连同数据卷删除（会话、索引全部清空）
-```
-
-> 备注：Linux 宿主机需先 `sudo sysctl -w vm.max_map_count=262144`（Windows/Mac 的 Docker Desktop 无需处理）；
-> nginx 已配置 SSE 关缓冲，打字机流式正常。
-
-### 终端客户端（类 Claude CLI 体验）
-
-```powershell
-# 任意终端直接输入（首次运行 scripts\install-zhiwen.ps1 安装）
-zhiwen --tool auto
-```
-
-安装后在任何 cmd / PowerShell 里敲 `zhiwen` 即可启动（类似 `claude` 命令）；
-未安装时可用项目根的 `.\agent.ps1` 兜底。
-
-终端内命令：`/new` 新会话、`/tools auto|knowledge|web|none` 切换模式、
-`/todos` 查看任务清单、`/status` 查看状态、`/init` 在当前目录创建 AGENTS.md、
-`/resume` 恢复本目录上次会话、`/cost` 查看本会话 tokens、`/memory` 查看
-AGENTS.md 加载链、`/clear` 清屏、`/help` 帮助；
-审批用带边框弹窗的数字键 1/2/3/4 选择（回车=批准，Esc=拒绝），
-流式文本按终端宽度自动换行并渲染 Markdown（标题/列表/代码块/表格）。
-输入 `/` 会在下方实时列出可用命令，Tab 自动补全。
-
-**快捷键（类 Claude Code）**：`Ctrl+C`/`Esc` 即时打断生成（后端主动停止，
-已生成的部分保留）、`Ctrl+L` 清屏、`Ctrl+R` 重发上一问、`Ctrl+D` 空输入退出、
-`↑/↓` 历史（持久化到 `.zhiwen_history.json`）、`←/→` 光标移动。
-生成期间照样打字，内容会留到下一轮输入。
-
-**按目录记忆（类 CLAUDE.md）**：CLI 会把启动目录传给后端，自动加载该目录下的
-`AGENTS.md` 并逐级向上合并父目录的 `AGENTS.md`，最后追加用户级
-`~/.zhiwen/AGENTS.md`（不存在时可用 `/init` 创建当前目录版本）；
-会话记录在目录内 `.zhiwen_session.json`，`/resume` 列出最近 10 轮对话供选择，
-换目录即换上下文。
-
-项目级任务（如“完成整个项目”）会自动进入 task_mode：工具预算 12→30、
-失败上限 3→6；预算用尽时输出“进度汇报”并保留进度，回复“继续”即可接着做，
-而不是被硬停。
-
-## 测试
-
-```powershell
-cd backend
-pip install -r requirements-dev.txt
-python -m pytest tests -q
-```
-
-当前 434 个用例覆盖：编排（声明式派发解析/路由/上限、merge 回填 ToolMessage、
-计划模式进入与结构化提交、工具轮链序不变量）、健壮性（空正文重试、流式看门狗、
-tool_trace 截断、bash 后台进程不挂死）、供应商兼容（Anthropic 思考块回传）、
-任务清单（播种/同步/跨轮刷新/模糊完成/修订/进度）、文件工具安全边界与命令白名单、
-CUDA 降级逻辑、技能内容清洗、联网可信度标注、RAG 工具纯函数、
-CLI 交互（Ctrl+C/行编辑/审批弹窗）、文档文件服务、取消机制（run_id 注入 + 逐帧停流）、
-hooks 门禁、用户工具加载、run_verify 写后验证等。测试不依赖 GPU / MySQL / 网络。
-
-提交前自动跑测试：已安装 pre-commit 钩子（`scripts/install-git-hooks.ps1`），
-`git commit` 前会自动执行 pytest，失败则阻止提交（`--no-verify` 可跳过）。
-
-CI（`.github/workflows/ci.yml`）：push / PR 自动跑全量 pytest（3.11 + 3.12，lite 依赖，
-不需要 GPU / MySQL / 外网）、前端 `npm ci && npm run build`、裸 hex 与对比度守门。
-钩子只做本地提前反馈（找不到解释器时告警放行），**CI 才是唯一权威**。
-
-另有三个守门脚本（CI 与 pre-commit 都跑，防止约定漂移）：
-`scripts/check_frontend_hex.py`（前端裸 hex 基线）、
-`scripts/check_effective_default.py`（配置读取不得忽略环境变量）、
-`scripts/check_sse_protocol.py`（后端 SSE 事件必须在前端有处理分支）。
-
-前端另有三组 Node 单测（`cd frontend && npm run check`，无浏览器/后端依赖）：
-`check_stream_handlers.mjs`（SSE 事件→状态映射）、`check_typewriter.mjs`
-（打字机/增量流状态机）、`check_api_sse.mjs`（api 导出面快照 + SSE 帧解析与错误处理）。
-
-## 评测
-
-- `backend/eval_questions.json`：14 题种子集（知识库/通用/联网/工具/安全/规划）；
-- `backend/evaluate_agent.py`：逐题调用 Agent 流式接口，记录延迟/工具/计划/
-  token/状态到 `eval_report.jsonl`，改动前后对比可发现回归；
-- `backend/eval_ragas.py`：RAGAS 四指标基线（faithfulness / answer_correctness /
-  context_precision / context_recall，DeepSeek 裁判，8 道 KB 题），
-  结果写入 `ragas_baseline.jsonl`（2026-08-26 最新基线：context_recall 0.792 /
-  context_precision 0.769 / faithfulness 0.971 / answer_correctness 0.464）；
-- 评测方案与开源集建议（RAGAS / BEIR / C-MTEB / GAIA / AgentBench）见
-  [docs/EVALUATION.md](docs/EVALUATION.md)。
-
-## 环境变量（均有默认值）
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `DEEPSEEK_API_KEY` | 空（必须设置） | 对话模型 API Key |
-| `DEEPSEEK_MODEL` | `deepseek-v4-flash` | 对话模型名 |
-| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | OpenAI 兼容接口地址 |
-| `MAIN_MODEL_VISION` | `0` | 主对话模型是否原生支持视觉 |
-| `SENSENOVA_API_KEY` | 空 | SenseNova Token Plan Key（识图/OCR） |
-| `SENSENOVA_BASE_URL` | `https://token.sensenova.cn/v1` | 视觉模型接口 |
-| `SENSENOVA_MODEL` | `sensenova-6.8-flash-lite` | 视觉模型名 |
-| `VISION_AUTO_DESCRIBE` / `VISION_MAX_IMAGES` | `1` / `6` | 自动识图开关 / 单次最多图片数 |
-| `MYSQL_URL` | `mysql+pymysql://root:@127.0.0.1:3306/rag_assistant?charset=utf8mb4` | MySQL 连接串 |
-| `WEB_SEARCH_PROVIDER` | `duckduckgo` | `duckduckgo` / `tavily` / `searxng` / `off` |
-| `TAVILY_API_KEY` | 空 | 使用 Tavily 时填写 |
-| `WEB_SEARCH_MAX_RESULTS` | `6` | 单次联网搜索结果条数 |
-| `SEARXNG_BASE_URL` / `SEARXNG_ENGINES` | `http://localhost:8888` / 空 | 自托管 SearXNG 地址 / 指定引擎（如 bing,baidu,sogou） |
-| `AGENT_MAX_ITERATIONS` | `20` | 工具调用循环上限（参考 Claude Code 单轮约 10 次） |
-| `AGENT_TASK_MAX_ITERATIONS` | `50` | 项目级任务（task_mode）的工具调用上限 |
-| `AGENT_TASK_MAX_FAILURES` | `6` | 项目级任务的连续失败上限 |
-| `TASK_MODE_DETECT` | `1` | 自动识别项目级任务并使用独立预算 |
-| `AGENT_SUBAGENTS_ENABLED` | `1` | 子代理派发总开关（关闭=不注册 dispatch_subtasks） |
-| `AGENT_SUBAGENT_MAX_ROUNDS` | `2` | research 子代理最多 LLM 轮数 |
-| `AGENT_SUBAGENT_EXEC_MAX_ROUNDS` | `6` | execute 子代理最多 LLM 轮数（写→验→修至少三轮） |
-| `AGENT_MAX_DISPATCH_ROUNDS` | `3` | 单轮对话内最多派发几轮（防失控扇出） |
-| `AGENT_LLM_STALL_TIMEOUT_S` | `150` | 流式看门狗：多久没收到任何 chunk 判定卡死并报错收尾 |
-| `VERIFY_COMMAND` | 空 | 写/改文件后自动运行的验证命令（显式配置优先，空=按类型自动检测） |
-| `VERIFY_AUTO_DETECT` | `1` | 未配置 VERIFY_COMMAND 时按扩展名自动验证（.py→py_compile / .js→node --check / .json/.yaml 语法） |
-| `VERIFY_MAX_RETRIES` | `1` | 验证失败后允许模型继续修复并复验的次数，超过则要求如实说明 |
-| `PERMISSION_TIMEOUT` | `0` | 等待人工确认超时（秒），0=无限等待；>0 由 watchdog 到点全拒续跑 |
-| `AGENT_MAX_FAILURES` | `3` | 工具失败重试上限（失败不占迭代预算） |
-| `AGENT_RECURSION_LIMIT` | `110` | LangGraph 图执行最大步数（超限友好收尾） |
-| `CHAT_TEMPERATURE` | `0.5` | 回答温度 |
-| `AGENT_TITLE_MODEL` | `deepseek-v4-flash` | 标题生成模型 |
-| `HISTORY_MAX_MESSAGES` | `400` | 历史窗口行数上限（超 1.5× 才压缩到该条数，粘滞窗口） |
-| `HISTORY_MAX_TOKENS` | `64000` | 历史 token 预算兜底（未绑定模板/未知模板类别） |
-| `HISTORY_BUDGET_GENERAL` / `_KNOWLEDGE` / `_CODING` / `_WRITING` / `_TRANSLATE` | `64000` / `64000` / `400000` / `400000` / `64000` | 按模板类别的历史 token 预算（压缩与裁剪同一口径；会被模型窗口夹紧——见 `MODEL_CONTEXT_WINDOW` / `CONTEXT_WINDOW_RESERVE`） |
-| `MODEL_CONTEXT_WINDOW` / `CONTEXT_WINDOW_RESERVE` | `0`（自动）/ `32000` | 模型窗口（0=按模型名推断，`[1m]` 后缀→1M，其余 128K）/ 窗口内为静态区+工具+D块预留的 token |
-| `SUMMARY_ENABLED` / `SUMMARY_MAX_CHARS` | `1` / `800` | 滚动摘要开关 / 最大字符 |
-| `MEMORY_ENABLED` / `MEMORY_TOP_K` | `1` / `3` | 长期记忆开关 / 每次注入条数 |
-| `MEMORY_MIN_SCORE` / `MEMORY_MAX_TOKENS` | `0.35` / `600` | 记忆召回阈值 / token 预算 |
-| `MEMORY_CANDIDATE_LIMIT` / `MEMORY_RECENT_FALLBACK` | `100` / `50` | 记忆粗筛候选 / 最近补位 |
-| `MEMORY_CONSOLIDATE_INTERVAL_HOURS` / `MEMORY_CONSOLIDATE_THRESHOLD` | `24` / `10` | 自动整合间隔 / 触发条数 |
-| `PLAN_MODE_ALLOWED` | `1` | 计划模式总开关（设置页可改；关闭=不注册 enter/exit_plan_mode） |
-| `CRAG_FALLBACK_ENABLED` / `CRAG_MIN_SCORE` | `1` / `0.45` | 知识库不足时补联网 |
-| `QUERY_EXPANSION_ENABLED` / `EXPANSION_*` | `1` | 查询扩展各开关（含简单问题自动跳过） |
-| `PARENT_CHUNK_SIZE` / `PARENT_MAX_CHUNK_SIZE` | `600` / `900` | Parent 切分参数 |
-| `CHILD_CHUNK_SIZE` / `CHILD_OVERLAP` | `320` / `64` | Child 切分参数 |
-| `MAX_PARENTS` | `10` | 返回给模型的 Parent 数量 |
-| `RECALL_K` / `CANDIDATE_POOL` / `RERANK_TOP_K` | `60` / `32` / `6` | 召回/融合/精排参数 |
-| `PDF_LAYOUT_ENABLED` / `PDF_VISION_OCR_ENABLED` | `1` / `0` | 布局 PDF 解析 / 扫描件视觉 OCR |
-| `EMBEDDING_FP16` / `EMBED_BATCH_SIZE` | `1` / `128` | 嵌入精度 / 批大小 |
-| `MAX_CONCURRENCY` | `4` | GPU（检索/重排）并发上限 |
-| `LLM_MAX_CONCURRENCY` | `8` | LLM API 调用并发上限 |
-| `TRACING_ENABLED` | `1` | JSONL trace 开关 |
-| `ADVANCED_TOOLS_ENABLED` | `1` | 文件/命令受控执行工具总开关 |
-| `TOOL_WORKSPACE` / `COMMAND_ALLOWLIST` | 空 | 文件工作目录（空=项目根）/ 命令自动放行前缀 |
-| `COMMAND_TIMEOUT` | `60` | 命令执行超时（秒） |
-| `COMMAND_SANDBOX` | `subprocess` | 命令执行环境：`subprocess`（本机）/ `docker`（容器沙箱） |
-| `SANDBOX_IMAGE` | `python:3.11-slim` | Docker 沙箱镜像 |
-| `TOOL_PERMISSION_MODE` | `ask` | 敏感操作确认：`ask`（每次确认）/ `allow`（自动批准） |
-| `OPENSEARCH_URL` / `OPENSEARCH_INDEX` | `http://localhost:9200` / `zhiwen_kb_current` | OpenSearch 地址 / 索引逻辑名（别名；物理索引由服务自动管理，见 docs/INDEX_REDESIGN_PLAN.md） |
-| `DATA_DIR` / `META_DIR` | `rag_knowledge_base/data` / `opensearch_meta` | 文档目录 / 账本目录 |
-| `EMBEDDING_MODEL_DIR` / `RERANKER_CACHE_DIR` | `../local_models/...` | 本地模型目录 |
-| `CORS_ORIGINS` | `http://localhost:5173,...` | 前端跨域白名单 |
-
-## API 一览
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/health` | 健康检查 |
-| GET | `/api/settings/schema` | 可调项元数据（类型/区间/枚举/分组/展示名；设置页表单与校验用） |
-| POST | `/api/agent/chat` | Agent 问答（JSON：question / conversation_id / tool_mode / template_id / images） |
-| POST | `/api/agent/stream` | Agent 流式问答（SSE：session / status / plan / plan_progress / todos / reasoning_delta / vision / tool_start / tool_result / hook / run_suspended / permission_resolved / stream_delta / stream_end / token / title / done / error；空闲 15s 发 `: keepalive`） |
-| POST | `/api/agent/resume` | 恢复挂起的运行（提交审批决定），返回新 SSE 流续跑同一条回答 |
-| POST | `/api/agent/continue/{conversation_id}` | 续跑被中断的运行（进程被杀/异常退出留下的未完成任务） |
-| POST | `/api/agent/abandon/{conversation_id}` | 丢弃未完成的运行（删除该会话的原生检查点线程） |
-| GET | `/api/agent/pending/{conversation_id}` | 该会话挂起中的审批载荷（刷新/切换会话后恢复审批卡） |
-| GET | `/api/fs/browse` | 列出某路径下的子目录（设置页目录选择器用；仅本机可访问、只返回目录名） |
-| GET/PUT | `/api/todos/{conversation_id}` | 读取 / 保存某会话的 TodoWrite 任务清单 |
-| GET/POST | `/api/conversations` | 会话列表 / 新建 |
-| PATCH/DELETE | `/api/conversations/{id}` | 重命名 / 删除会话 |
-| GET | `/api/conversations/{id}/messages` | 会话历史消息 |
-| GET/POST | `/api/templates` | 模板列表 / 新建 |
-| PATCH/DELETE | `/api/templates/{id}` | 编辑 / 删除自定义模板 |
-| GET/POST | `/api/memories` | 长期记忆列表 / 新增 |
-| PATCH/DELETE | `/api/memories/{id}` | 编辑 / 删除记忆 |
-| POST | `/api/memories/consolidate` | 手动整合整理记忆 |
-| GET | `/api/documents` | 知识库文档列表 |
-| POST | `/api/documents/upload` | 上传文档（multipart） |
-| DELETE | `/api/documents/{path}` | 删除文档并移除其向量块（per-doc，无需重建） |
-| POST/GET | `/api/index/rebuild` / `/api/index/status` | 重建索引 / 索引状态 |
-| GET/PUT | `/api/settings` | 读取（脱敏）/ 保存运行时配置（供应商、温度、联网、技能开关） |
-| GET/PUT | `/api/hooks` | 生命周期 hooks 配置（PreToolUse / PostToolUse 用户脚本回调） |
-| GET | `/api/conversations/{id}/timeline[/{checkpoint_id}]` | 原生 checkpointer 快照时间线 / 快照详情 |
-| POST | `/api/conversations/{id}/timeline/{checkpoint_id}/rollback` | 回滚会话消息与任务清单到该快照，下次提问从该状态继续 |
-| GET | `/api/skills` | 技能列表（含启停/隐藏状态与偏好） |
-| GET | `/api/skills/search` | 按语义/关键词检索技能 |
-| PUT | `/api/skills` | 保存技能偏好（enabled / hidden） |
-| POST | `/api/skills/reset` | 恢复默认精选手集 |
-| GET | `/api/suggestions` | 每日建议（知识库 / 热点 / 通用） |
-| GET | `/api/runs` | Agent 运行记录（决策可观测性） |
-| GET/POST | `/api/vision/status` / `/api/vision/describe` | 视觉状态 / 识图 |
-| GET | `/api/vision/models` | 视觉平台模型列表 |
-| POST | `/api/chat` / `/api/chat/stream` | 旧版 RAG 问答（兼容保留） |
-| GET | `/api/metrics` | 监控指标（请求量 / 错误率 / 平均耗时） |
-
-## 注意事项
-
-- **版本保护**：项目已初始化 git（仓库根 = `rag_knowledge_base/`），
-  运行数据（`data/`、`opensearch_meta/`、日志）已加入 `.gitignore` 不入库；
-- **单实例契约**：同一 `META_DIR` 只允许一个后端进程——启动时取 OS 文件锁
-  （`opensearch_meta/backend.lock`），拿不到直接拒绝启动，进程退出/崩溃时由内核
-  自动释放（不会残留死锁）。原因：会话并发闸门、审批超时 watchdog、挂起用量
-  快照都在进程内存，多开共享同一 meta_dir 会静默破坏"挂起期间拒绝新消息 /
-  审批超时自动拒绝"的语义。要跑第二份实例请用**不同的 `META_DIR`**
-  （检查点随之独立）；`GET /api/health` 的 `instance_lock` 字段可查持锁状态；
-- **提示词模板**：预设模板已按 Claude Code 风格重写（角色/原则/流程/安全边界），
-  含“学习助手”模板；后端启动时自动同步到数据库（系统模板只读，用户模板不受影响）；
-- **MySQL 直启**：`python run.py` 会读取 gitignore 的 `backend/.env.local`
-  （本机 MYSQL_URL）；或使用 `start_backend.ps1`；
-- **SenseNova DeepSeek-V4 flash**：base_url 必须带 `/v1`（已修正）；
-  免费档有 RPM/额度限流，超限时请在设置中切回 DeepSeek 官方供应商；
-- **长期记忆提取**：默认只对“≥400 字回答或显式‘记住’”的对话做提取
-  （`MEMORY_AUTO_EXTRACT_MIN_CHARS` 可调），短问答不再每轮多花一次 LLM 调用；
-- **MySQL 未连接时自动降级**：普通对话仍可用，但会话记忆、模板、运行记录不可用（日志给出明确错误）；
-- 联网搜索默认 DuckDuckGo（免 key），国内网络可能需要代理；也可配置 Tavily 或自托管 SearXNG；
-- 问答必须配置对话模型 API Key（可在设置页添加/切换供应商）；知识库检索与重排序全程本地；
-- 索引按文件粒度维护：上传/修改只嵌入该文件，删除秒级移除其向量块；
-  仅首次运行、换嵌入模型或手动重建时做全量（蓝绿切换，旧物理索引确认后可手动删除）；
-- EPUB 本质是 ZIP 压缩包（XHTML 章节 + OPF 元数据），用 ebooklib + BeautifulSoup 按章节解析；
-- 老式二进制 `.doc` 使用 `doc2txt`（内置 antiword）解析，失败时回退 `legacy-doc`；
-- 技能"移除"只影响本助手（skill_lookup 不再使用），不会修改其他 Agent 的技能文件。
+本项目基于 [MIT License](LICENSE) 开源。

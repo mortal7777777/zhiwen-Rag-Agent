@@ -32,7 +32,7 @@ class Settings:
     """应用全局配置。"""
 
     app_name: str = "知问 ZhiWen"
-    version: str = "1.0.0"
+    version: str = "0.2.0"
 
     # ---- 路径 ----
     data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data")
