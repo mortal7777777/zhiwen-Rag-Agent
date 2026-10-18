@@ -9,6 +9,7 @@
    - source_recall@k  正确书目进入 top-k 的比例（书名路由 S1 的效果）
    - keyword_recall@k 关键实词句进入 top-k 的比例（内容召回 S2/S3 的效果）
    - MRR              正确书目首个命中的名次倒数（排名质量）
+   - multi_source_all@k 多来源题（expect_sources ≥2）全部书目进入 top-k 的比例（多跳效果）
    无 LLM 裁判、秒级完成，作为检索迭代的内环指标；RAGAS 做验收外环。
 
 用法：
@@ -136,13 +137,22 @@ def run_batch(args: argparse.Namespace) -> int:
             continue
         dt = time.perf_counter() - t0
 
-        want_src = normalize(item.get("expect_source") or "")
+        # expect_sources（多跳题，列表）优先；否则回退单来源 expect_source
+        raw_srcs = item.get("expect_sources") or (
+            [item["expect_source"]] if item.get("expect_source") else []
+        )
+        want_srcs = [normalize(s) for s in raw_srcs if s]
         src_rank = 0
-        if want_src:
+        hit_srcs: set[str] = set()
+        if want_srcs:
             for i, doc in enumerate(docs, 1):
-                if want_src in normalize(doc.metadata.get("source") or ""):
-                    src_rank = i
-                    break
+                src_norm = normalize(doc.metadata.get("source") or "")
+                for ws in want_srcs:
+                    if ws and ws in src_norm:
+                        hit_srcs.add(ws)
+                        if not src_rank:
+                            src_rank = i
+        all_src = (len(hit_srcs) == len(want_srcs)) if len(want_srcs) > 1 else None
         kws = item.get("expect_keywords") or []
         kw_hit = None
         if kws:
@@ -152,14 +162,19 @@ def run_batch(args: argparse.Namespace) -> int:
         rows.append(
             {
                 "id": qid,
+                "question": question,
                 "rank": src_rank,
-                "has_src": bool(want_src),
+                "has_src": bool(want_srcs),
+                "multi": len(want_srcs) > 1,
+                "all_src": all_src,
                 "kw": kw_hit,
                 "dt": dt,
                 "k": len(docs),
             }
         )
-        src_txt = f"源#{src_rank}" if src_rank else ("源×" if want_src else "源-")
+        src_txt = f"源#{src_rank}" if src_rank else ("源×" if want_srcs else "源-")
+        if all_src is not None:
+            src_txt += "全" if all_src else "缺"
         kw_txt = "词√" if kw_hit else ("词×" if kw_hit is not None else "词-")
         print(f"[{qid}] {src_txt} {kw_txt} {dt:5.1f}s  {question[:30]}")
 
@@ -172,6 +187,12 @@ def run_batch(args: argparse.Namespace) -> int:
         sum(1 for r in kw_rows if r["kw"]) / len(kw_rows) if kw_rows else None
     )
     avg_dt = sum(r["dt"] for r in ok) / max(1, len(ok))
+    multi_rows = [r for r in ok if r.get("all_src") is not None]
+    multi_all = (
+        sum(1 for r in multi_rows if r["all_src"]) / len(multi_rows)
+        if multi_rows
+        else None
+    )
 
     print("\n===== 汇总 =====")
     print(f"题数 {len(ok)}/{len(items)} · 平均检索 {avg_dt:.1f}s/题")
@@ -179,12 +200,40 @@ def run_batch(args: argparse.Namespace) -> int:
     print(f"MRR(源)              = {mrr:.3f}")
     if kw_recall is not None:
         print(f"keyword_recall@{args.k} = {sum(1 for r in kw_rows if r['kw'])}/{len(kw_rows)} = {kw_recall:.2f}")
+    if multi_all is not None:
+        print(f"multi_source_all@{args.k} = {sum(1 for r in multi_rows if r['all_src'])}/{len(multi_rows)} = {multi_all:.2f}")
     missed_src = [r["id"] for r in src_rows if not r["rank"]]
     missed_kw = [r["id"] for r in kw_rows if not r["kw"]]
     if missed_src:
         print("未命中书目：" + ", ".join(missed_src))
     if missed_kw:
         print("关键词未命中：" + ", ".join(missed_kw))
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(
+                {
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "k": args.k,
+                    "no_expansion": bool(args.no_expansion),
+                    "n_items": len(items),
+                    "summary": {
+                        "source_recall": sum(hits) / max(1, len(src_rows)),
+                        "mrr": mrr,
+                        "keyword_recall": kw_recall,
+                        "multi_all": multi_all,
+                        "avg_dt": avg_dt,
+                    },
+                    "rows": rows,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print("逐题结果已写入：", out_path)
     return 0
 
 
@@ -242,6 +291,11 @@ def main() -> int:
     )
     parser.add_argument("--k", type=int, default=6, help="判定用的 top-k（默认 6，与线上 rerank_top_k 一致）")
     parser.add_argument("--no-expansion", action="store_true", help="批模式关查询扩展（隔离索引/精排层）")
+    parser.add_argument(
+        "--out",
+        default="",
+        help="批模式：把逐题结果写入该 JSON（供 scripts/paired_compare.py 做配对显著性对比）",
+    )
     args = parser.parse_args()
 
     if args.batch:

@@ -16,7 +16,7 @@ backend/logs_e2e.txt
 backend/ragas_baseline.jsonl
 backend/ragas_retrieval_cache.json
 backend/ragas_baselines.json
-backend/retrieval_annotations.json
+backend/retrieval_annotations.json*
 .git/pytest-tmp/
 .pytest_cache/
 backend/.playwright-mcp/

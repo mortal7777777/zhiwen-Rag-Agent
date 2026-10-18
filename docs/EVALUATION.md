@@ -128,14 +128,20 @@ python evaluate_agent.py --approve              # 自动化：临时切 allow �
 
 **快指标（迭代内环）**：`python evaluate_retrieval.py --batch` 读
 `backend/retrieval_annotations.json`（gitignored；每题带 expect_source 书目 +
-expect_keywords 实词），走完整检索管道（service.retrieve）计算三项确定性指标，
-无 LLM 裁判、约 3.6s/题：source_recall@k（书名路由效果）、keyword_recall@k
-（内容召回）、MRR（书目排名）。当前基线（30 题，top_k=6，2026-09-11 S6 后）：
-**source_recall=1.00 · MRR≈0.92 · keyword_recall≈0.77（单轮 ±1 题波动）**。
-未命中清单：l1-kb-002/003/005/008/009、l1-kb-016（新增边界）——其中
-l1-kb-003 与 l1-kb-005 的目标句已用书内排名实测确认**不可达**（书内第 60+
-名 / 第 107 名，问题驱动的检索无从命中），l1-kb-016 为单点出现的特殊句式；
-该套题 keyword_recall 的实际上限约 0.75~0.80。
+expect_keywords 实词；多跳题用 expect_sources 列出 ≥2 本书），走完整检索管道
+（service.retrieve）计算四项确定性指标，无 LLM 裁判、约 3.6s/题（`--no-expansion`
+约 0.9s/题）：source_recall@k（书名路由效果）、keyword_recall@k（内容召回）、
+MRR（书目排名）、multi_source_all@k（多跳题全部书目进入 top-k）。
+当前基线（**68 题**，top_k=6，2026-10-18 扩题后，`--no-expansion` 确定性口径）：
+**source_recall=1.00 · MRR=0.926 · keyword_recall=0.79 · multi_source_all=0.67**。
+未命中清单：l1-kb-002/003/005/008/009/016/017/023/033、
+l2-kb-006/022/028/031/033——其中 l1-kb-003 与 l1-kb-005 的目标句已用书内
+排名实测确认**不可达**（书内第 60+ 名 / 第 107 名，问题驱动的检索无从命中），
+l1-kb-016 为单点出现的特殊句式；该套题 keyword_recall 的实际上限约 0.75~0.80。
+**配对显著性对比**：`python scripts/paired_compare.py fast --a armA.json --b armB.json`
+（两臂 `--out` 结果按题号配对，逐题 Δ + bootstrap 95% CI，CI 不含 0 才算显著；
+RAGAS 口径用 `ragas --tag-a/--tag-b`）。对照实验建议加 `--no-expansion`
+固定检索前段（消除查询扩展的 LLM 波动），只变待测环节。
 流程：改检索先看快指标（秒级；注意 ±1 题波动，对照实验建议固定扩展结果做
 方差受控比较），改善后再跑 RAGAS（LLM 裁判，慢）做验收。
 
