@@ -48,15 +48,23 @@ from .agent_skills import (  # noqa: F401
     delete_agent_skill,
     agent_skill_content,
 )
-from .structure import (  # noqa: F401
-    _PRIORITY_SECTIONS,
-    skill_structure,
-)
 from .sanitize import (  # noqa: F401
     RISK_PATTERNS,
     sanitize_skill_text,
 )
+from .structure import (  # noqa: F401
+    _PRIORITY_SECTIONS,
+    skill_sections,
+    skill_structure,
+)
 from .catalog import (  # noqa: F401
-    build_skill_catalog,
-    matching_skills_for_injection,
+    SkillIndex,
+    build_skill_index,
+)
+from .usage import (  # noqa: F401
+    ledger_path as skill_usage_ledger_path,
+    record_patch,
+    record_view,
+    set_pinned,
+    snapshot as skill_usage_snapshot,
 )

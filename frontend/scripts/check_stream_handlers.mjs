@@ -142,6 +142,10 @@ console.log('useAgentStream 事件序列检查')
   check('tool_result 回填详情', entry.detail === '详情')
   check('tool_result 追加来源', h.state.streamMsg.sources.length === 1)
   check('tool_result 后状态条连续', h.state.currentTool.value === '继续思考…')
+
+  // 旧版子代理事件会把编号数组塞进 sources：必须过滤，不能渲染成空卡片
+  h.handlers.onToolResult({ name: 'subagent', summary: 'x', sources: [2, 3] })
+  check('tool_result 过滤非来源对象', h.state.streamMsg.sources.length === 1)
 }
 
 // 6) 思考链增量按段聚合
@@ -192,6 +196,15 @@ console.log('useAgentStream 事件序列检查')
   check('done 结束流式态', h.state.streamMsg._streaming === false)
   check('done 冲刷打字机', h.called('flushTypewriter'))
   check('done 空回答兜底', h.state.streamMsg.content === '（未生成回答内容）')
+}
+
+// 10b) done 带 sources：用后端去重结果覆盖增量拼接
+{
+  const h = makeHarness()
+  h.state.streamMsg.sources.push(3, 4) // 模拟子代理事件的编号数组污染
+  h.handlers.onDone({ sources: [{ index: 1 }, { index: 2 }] })
+  check('done 覆盖来源列表', h.state.streamMsg.sources.length === 2)
+  check('done 保留来源对象', h.state.streamMsg.sources[1].index === 2)
 }
 
 if (failures.length) {

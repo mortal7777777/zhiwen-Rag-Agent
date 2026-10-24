@@ -13,6 +13,7 @@ from ..agent.langgraph_agent import LangGraphAgentService
 from ..config import get_settings
 from ..db import get_db
 from ..db import repository as repo
+from ..mcp_secrets import mask_mcp_servers, merge_mcp_secrets
 from ..project_memory import export_project_memory, load_project_memory, project_memory_path
 from ..runtime_config import effective_or, load_overrides
 from .deps import get_agent_service
@@ -72,7 +73,7 @@ def list_mcp_servers(
     """MCP 服务器配置列表 + 各服务器运行状态。"""
     raw = repo.get_meta(db, "mcp_servers")
     servers = json.loads(raw) if raw else []
-    return {"servers": servers, "status": agent.mcp_status()}
+    return {"servers": mask_mcp_servers(servers), "status": agent.mcp_status()}
 
 
 @router.put("/mcp")
@@ -105,11 +106,18 @@ def save_mcp_servers(
                 },
             }
         )
+    raw_old = repo.get_meta(db, "mcp_servers")
+    existing = json.loads(raw_old) if raw_old else []
+    cleaned = merge_mcp_secrets(cleaned, existing)
     repo.set_meta(db, "mcp_servers", json.dumps(cleaned, ensure_ascii=False))
     agent.refresh()
     # 保存即应用：为启用项立即发起连接、关闭禁用项；状态回传面板
     connect = agent.connect_mcp_servers(db)
-    return {"ok": True, "servers": cleaned, "status": connect.get("status", {})}
+    return {
+        "ok": True,
+        "servers": mask_mcp_servers(cleaned),
+        "status": connect.get("status", {}),
+    }
 
 
 @router.post("/mcp/test")

@@ -18,11 +18,59 @@
       <div class="skill-master-text">
         <div class="skill-master-title">启用技能工具</div>
         <div class="skill-master-desc">
-          Agent 通过 skill_lookup 按需检索下方已启用的技能指令
+          Agent 会看到下方已启用技能的全量索引，并按名称用 skill_view 加载完整步骤
         </div>
       </div>
       <el-switch v-model="skillsEnabled" @change="saveSkillsEnabled" />
     </div>
+
+    <el-collapse class="skill-advanced">
+      <el-collapse-item title="索引与加载参数（高级）" name="advanced">
+        <el-form label-width="190px" size="small" class="skill-advanced-form">
+          <el-form-item label="索引字符预算">
+            <el-input-number
+              v-model="toolsForm.skills_index_max_chars"
+              :min="2000"
+              :max="100000"
+              :step="1000"
+            />
+            <span class="skill-advanced-hint">超出后按类目降 names-only，名称不隐藏</span>
+          </el-form-item>
+          <el-form-item label="全文返回上限（字符）">
+            <el-input-number
+              v-model="toolsForm.skills_full_view_max_chars"
+              :min="4000"
+              :max="200000"
+              :step="1000"
+            />
+            <span class="skill-advanced-hint">超过此大小的技能返回章节目录</span>
+          </el-form-item>
+          <el-form-item label="重复查看去重">
+            <el-switch v-model="toolsForm.skills_view_dedup" />
+          </el-form-item>
+          <el-form-item label="记录技能用量">
+            <el-switch v-model="toolsForm.skills_usage_tracking" />
+          </el-form-item>
+          <el-form-item label="自创技能归档阈值（天）">
+            <el-input-number
+              v-model="toolsForm.skills_curator_stale_days"
+              :min="7"
+              :max="3650"
+            />
+          </el-form-item>
+          <el-form-item>
+            <el-button
+              type="primary"
+              size="small"
+              :loading="toolsSaving"
+              @click="saveToolsSettings"
+            >
+              保存参数
+            </el-button>
+          </el-form-item>
+        </el-form>
+      </el-collapse-item>
+    </el-collapse>
 
     <div class="skill-filter-row">
       <el-input
@@ -170,6 +218,8 @@
 import { inject } from 'vue'
 import { Hide, MagicStick, Search } from '@element-plus/icons-vue'
 
+const { toolsForm, toolsSaving, saveToolsSettings } = inject('settingsForm')
+
 const {
   skills,
   hiddenSkills,
@@ -201,3 +251,20 @@ const {
   handleResetSkills,
 } = inject('settingsSkills')
 </script>
+
+<style scoped>
+.skill-advanced {
+  margin: 4px 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  padding: 0 12px;
+}
+.skill-advanced-form :deep(.el-form-item) {
+  margin-bottom: 10px;
+}
+.skill-advanced-hint {
+  margin-left: 10px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+</style>

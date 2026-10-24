@@ -40,6 +40,16 @@
           />
         </div>
         <div class="generic-row">
+          <span class="generic-label">子代理调用总上限</span>
+          <el-input-number
+            v-model="toolsForm.agent_subagent_max_llm_calls"
+            :min="1"
+            :max="200"
+            size="small"
+          />
+          <span class="generic-hint">单次运行内所有并行子代理共享的 LLM 调用次数</span>
+        </div>
+        <div class="generic-row">
           <span class="generic-label">写后验证命令</span>
           <el-input
             v-model="toolsForm.verify_command"
@@ -237,7 +247,10 @@
             placeholder="Authorization=Bearer gho_xxxxxxxx"
           />
         </el-form-item>
-        <div class="settings-tip">修改命令/凭据会触发该服务器重连；令牌等敏感值仅存本机数据库。</div>
+        <div class="settings-tip">
+          修改命令/凭据会触发该服务器重连；令牌等敏感值仅存本机数据库，接口回显为
+          __MASKED__（保持原样即保留已存值，删除该行则清除）。
+        </div>
       </el-form>
       <template #footer>
         <el-button @click="mcpDialogVisible = false">取消</el-button>

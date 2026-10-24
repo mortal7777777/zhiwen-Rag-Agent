@@ -30,7 +30,7 @@
         <div class="generic-row">
           <span class="generic-label">轨迹压缩摘要</span>
           <el-switch v-model="toolsForm.trajectory_compress_enabled" size="small" />
-          <span class="generic-hint">工具调用 ≥3 次的长任务生成过程摘要，下一轮注入</span>
+          <span class="generic-hint">工具调用 ≥3 次的长任务生成过程摘要，下一轮注入（默认关闭）</span>
         </div>
       </div>
       <div class="settings-tip">

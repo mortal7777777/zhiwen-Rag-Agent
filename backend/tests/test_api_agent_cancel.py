@@ -10,8 +10,8 @@ import anyio
 from app.api.agent import (
     agent_cancel,
     agent_stream,
-    register_active_run,
     request_cancel,
+    try_register_active_run,
     unregister_active_run,
 )
 from app.schemas import AgentChatRequest
@@ -30,7 +30,8 @@ class DummyService:
 
 def test_register_and_cancel_sets_event():
     stop = threading.Event()
-    run_id = register_active_run(stop)
+    run_id = try_register_active_run(stop)
+    assert run_id is not None
     try:
         assert not stop.is_set()
         assert request_cancel(run_id) == (True, "")

@@ -424,7 +424,10 @@ def _tools_node(state: AgentState, runtime) -> dict:
         # 中间省略（Hermes proactive_prune 思路）。模型已在本轮看过完整
         # 输出，下一轮只需 summary + 关键片段；小输出原样保留，
         # 不破坏工具已发的缓存前缀。
-        slim_result = _slim_tool_result(result)
+        # 技能全文必须完整进历史（后续轮次还要照着步骤做），不参与通用瘦身
+        slim_result = _slim_tool_result(
+            result, content_limit=None if name == "skill_view" else 2500
+        )
         messages.append(
             ToolMessage(
                 content=json.dumps(slim_result, ensure_ascii=False),

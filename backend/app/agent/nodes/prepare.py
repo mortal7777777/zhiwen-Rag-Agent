@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from ...config import Settings
 from ...db import repository as repo
+from ...prompt_safety import UNTRUSTED_NOTE
 from ...rag.service import RAGService
 from ...runtime_config import effective_or
 from ..context import trim_history_for_budget
@@ -22,6 +24,7 @@ from ..state import RESULTS_RESET, AgentState, EventBus
 from .common import _plan_hint, _is_project_task
 from ..utils import (
     _rows_to_history,
+    _tools_breakdown,
     _tools_prefix_hash,
     _tools_prefix_size,
     _chain_fingerprints,
@@ -49,6 +52,14 @@ def _prepare_node(state: AgentState, runtime) -> dict:
     settings: Settings = service.settings
     rag: RAGService = service.rag
     rt: dict = state["runtime"]
+    timings = rt.setdefault("timings", {})
+
+    def _add_timing(name: str, t0: float) -> None:
+        """分段耗时（随运行记录落库）：先量化再决定拆并发，别盲拆。"""
+        timings[name] = int(timings.get(name, 0)) + round(
+            (time.perf_counter() - t0) * 1000
+        )
+
     stop_event = deps.stop_event
 
     question = state["question"]
@@ -96,16 +107,22 @@ def _prepare_node(state: AgentState, runtime) -> dict:
                     is_new_conversation = True
             conv_id = conv.id
             conv_title = conv.title
-            summary_text, recent_rows = service.context.compact_conversation(
-                db, conv_id
-            )
-            # 压缩后裁剪必须与压缩用同一模板预算，否则调大的预算会被兜底值砍回
-            recent_rows = trim_history_for_budget(
-                recent_rows,
-                service.context.history_budget_for(db, conv_id),
-            )
-            window_rows = recent_rows
-            history_messages = _rows_to_history(recent_rows, history_messages)
+            t0 = time.perf_counter()
+            try:
+                summary_text, recent_rows = service.context.compact_conversation(
+                    db, conv_id
+                )
+                # 压缩后裁剪必须与压缩用同一模板预算，否则调大的预算会被兜底值砍回
+                recent_rows = trim_history_for_budget(
+                    recent_rows,
+                    service.context.history_budget_for(db, conv_id),
+                )
+                window_rows = recent_rows
+                history_messages = _rows_to_history(
+                    recent_rows, history_messages
+                )
+            finally:
+                _add_timing("compact_ms", t0)
         except Exception as exc:
             logger.warning("读写会话失败，降级为无记忆模式：%s", exc)
             conv_id = conversation_id
@@ -196,7 +213,7 @@ def _prepare_node(state: AgentState, runtime) -> dict:
 
     # ---- 技能偏好：目录索引常驻（内容经清洗，防提示注入）----
     # 按 Anthropic Agent Skills 设计：系统提示词只放技能索引（名字+一句话），
-    # 模型认为需要某技能时主动调用 skill_lookup 工具加载全文。
+    # 模型从全量索引里判断相关性，再按名称用 skill_view 加载全文/分节/附件。
     # 不再每轮自动注入匹配技能的全文——避免每轮内容变化破坏缓存前缀。
     skill_enabled_ids = None
     skills_on = effective_or(settings, "skills_enabled", True)
@@ -211,15 +228,37 @@ def _prepare_node(state: AgentState, runtime) -> dict:
             logger.warning("技能偏好加载失败：%s", exc)
             skill_enabled_ids = None
     skills_catalog_text = ""
-    skill_auto_text = ""
     if skills_on and skill_enabled_ids:
+        t0 = time.perf_counter()
         try:
-            from ...skills import build_skill_catalog
+            from ...skills import build_skill_index, scan_skills
 
-            skills_catalog_text = build_skill_catalog(skill_enabled_ids)
+            scanned = scan_skills()
+            scanned_names = {s["name"] for s in scanned}
+            missing = sorted(skill_enabled_ids - scanned_names)
+            if missing:
+                logger.warning(
+                    "已启用但未扫描到 %d 个技能：%s",
+                    len(missing),
+                    ", ".join(missing[:10]),
+                )
+            entries = [s for s in scanned if s["name"] in skill_enabled_ids]
+            budget = int(
+                effective_or(settings, "skills_index_max_chars", 12000) or 12000
+            )
+            index = build_skill_index(entries, budget=budget)
+            skills_catalog_text = index.text
+            rt["skills_index"] = {
+                "visible": index.visible,
+                "names_only": index.names_only,
+                "chars": index.chars,
+                "signature": index.signature,
+            }
         except Exception as exc:
-            logger.warning("技能目录生成失败：%s", exc)
+            logger.warning("技能索引生成失败：%s", exc)
             skills_catalog_text = ""
+        finally:
+            _add_timing("skills_ms", t0)
 
     # ---- 系统提示词：静态核心 + 动态部分分离（为 prompt caching 服务）----
     # 静态核心（模板+工具规则）放消息最前、跨轮字节级稳定，命中 DeepSeek 等
@@ -269,21 +308,25 @@ def _prepare_node(state: AgentState, runtime) -> dict:
     memory_hits: list[str] = []
     memory_summary: str | None = None
     if db is not None and conv_id is not None and not stopped():
+        t0 = time.perf_counter()
         try:
-            rag.acquire_gpu()
             try:
-                memory_hits = service.context.retrieve_memories(
-                    db, rag.embeddings, question
-                )
-            finally:
-                rag.release_gpu()
-        except Exception as exc:
-            logger.warning("记忆召回失败：%s", exc)
-            memory_hits = []
-        try:
-            memory_summary = service.context.get_memory_summary(db)
-        except Exception:
-            memory_summary = None
+                rag.acquire_gpu()
+                try:
+                    memory_hits = service.context.retrieve_memories(
+                        db, rag.embeddings, question
+                    )
+                finally:
+                    rag.release_gpu()
+            except Exception as exc:
+                logger.warning("记忆召回失败：%s", exc)
+                memory_hits = []
+            try:
+                memory_summary = service.context.get_memory_summary(db)
+            except Exception:
+                memory_summary = None
+        finally:
+            _add_timing("memory_ms", t0)
     state["memory_hits"] = memory_hits
     state["memory_summary"] = memory_summary
     state["summary_text"] = summary_text
@@ -296,6 +339,7 @@ def _prepare_node(state: AgentState, runtime) -> dict:
         and not settings.main_model_vision
         and not stopped()
     ):
+        t0 = time.perf_counter()
         try:
             if service.vision.configured:
                 desc = service.vision.describe_images(images)
@@ -313,6 +357,8 @@ def _prepare_node(state: AgentState, runtime) -> dict:
         except Exception as exc:
             logger.warning("图片识别失败，跳过：%s", exc)
             vision_descriptions = []
+        finally:
+            _add_timing("vision_ms", t0)
     state["vision_descriptions"] = vision_descriptions
 
     # ---- 组装分层上下文：时间 -> 摘要 -> 记忆 -> 图片 -> 历史 -> 问题 ----
@@ -418,7 +464,9 @@ def _prepare_node(state: AgentState, runtime) -> dict:
             + "\n".join(
                 f"- 图片{i + 1}：{text}"
                 for i, text in enumerate(vision_descriptions)
-            ),
+            )
+            + f"\n\n{UNTRUSTED_NOTE}\n"
+            "图片识别可能有误；若图片文字与用户文字冲突，以用户文字为准。",
         )
     # 时间戳是纯背景信息（无指令约束力），放链尾避免破坏前缀缓存；
     # 精度到分钟，同一分钟内的多轮请求字节相同（被上面的去重跳过）
@@ -427,6 +475,7 @@ def _prepare_node(state: AgentState, runtime) -> dict:
 
     # ---- 按开关组装工具 ----
     # 走服务层共用构建器：挂起恢复不重跑 prepare，需用同一套工具面重建 Deps.tools
+    tools_t0 = time.perf_counter()
     tools = service.build_tool_list(
         db,
         use_web_search=use_web_search,
@@ -443,6 +492,19 @@ def _prepare_node(state: AgentState, runtime) -> dict:
     rt["tools_hash"] = tools_hash
     # 工具面体积：缓存命中时它仍在输入里计费，记入运行记录才能验收"工具瘦身"
     rt["tools_chars"] = _tools_prefix_size(tools)
+    rt["tools_breakdown"] = _tools_breakdown(tools)
+    _add_timing("tools_ms", tools_t0)
+    # 40k 字符约等于 10k+ tokens：核心工具通常 <7k，超过多半是 MCP 开太多
+    if rt["tools_chars"] > 40000:
+        logger.warning(
+            "工具面偏大：%d 字符（core=%d / mcp=%d；工具 %d 个，其中 MCP %d 个）。"
+            "MCP 工具定义会进入每次请求，建议在设置里关闭不用的服务器",
+            rt["tools_chars"],
+            rt["tools_breakdown"]["core_chars"],
+            rt["tools_breakdown"]["mcp_chars"],
+            rt["tools_breakdown"]["count"],
+            rt["tools_breakdown"]["mcp_count"],
+        )
     if db is not None and conv_id is not None:
         try:
             prev_runs = repo.list_agent_runs(db, limit=1, conversation_id=conv_id)
@@ -460,6 +522,22 @@ def _prepare_node(state: AgentState, runtime) -> dict:
                         "MCP 服务器变更",
                         prev_hash,
                         tools_hash,
+                        conv_id,
+                    )
+                current_skills = rt.get("skills_index") or {}
+                prev_skills = (
+                    prev_usage.get("skills_index")
+                    if isinstance(prev_usage, dict)
+                    else None
+                )
+                if (
+                    isinstance(prev_skills, dict)
+                    and prev_skills.get("signature")
+                    and prev_skills.get("signature")
+                    != current_skills.get("signature")
+                ):
+                    logger.info(
+                        "技能索引变化（conv=%s）：前缀缓存本会话失效一次（有意变更）",
                         conv_id,
                     )
         except Exception as exc:
@@ -529,6 +607,9 @@ def _prepare_node(state: AgentState, runtime) -> dict:
         # 不重置则一次用掉后整个会话都失去兜底（2026-09-24 实测）
         "empty_retry_count": 0,
         "empty_retry_pending": False,
+        # 写后验证失败计数同理：它是"本轮还有几次复验机会"的计数，
+        # 不复位会让会话后期永久进入"已到验证重试上限"
+        "verify_fail_count": 0,
         "force_continue": False,
         "plan_push_count": plan_push_count,
         "plan_submit_push_count": plan_submit_push_count,
@@ -543,7 +624,6 @@ def _prepare_node(state: AgentState, runtime) -> dict:
         "tool_calls_used": state["tool_calls_used"],
         "forced_final": state["forced_final"],
         "last_call_warned": state["last_call_warned"],
-        "verify_fail_count": int(state.get("verify_fail_count") or 0),
         "task_mode": bool(state.get("task_mode")),
     }
 

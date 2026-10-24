@@ -18,14 +18,18 @@ APP_DIR = BACKEND / "app"
 SKILLS_DIR = APP_DIR / "skills"
 
 PACKAGE = "app.skills"
-MODULES = ["prefs", "scan", "agent_skills", "structure", "sanitize", "catalog"]
+MODULES = [
+    "prefs", "scan", "agent_skills", "structure", "sanitize", "catalog", "usage",
+]
 
 # 历史导入面（api/skills.py、agent/tools.py、tests 用）：必须仍可从此包导入
 EXPECTED_EXPORTS = [
     "scan_skills", "search_skills", "load_prefs", "save_prefs", "reset_prefs",
     "share_agent_skill", "unshare_agent_skill", "delete_agent_skill", "agent_skill_content",
-    "sanitize_skill_text", "skill_structure", "build_skill_catalog",
-    "matching_skills_for_injection", "AGENT_SKILLS_DIR", "HERMES_SKILLS_DIR", "AGENT_SOURCE",
+    "sanitize_skill_text", "skill_structure", "skill_sections",
+    "build_skill_index", "SkillIndex",
+    "record_view", "record_patch", "skill_usage_snapshot",
+    "AGENT_SKILLS_DIR", "HERMES_SKILLS_DIR", "AGENT_SOURCE",
     "DEFAULT_ROOTS", "DEFAULT_ENABLED", "_cache", "_scanned_at", "_parse_frontmatter",
 ]
 

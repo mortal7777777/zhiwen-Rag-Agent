@@ -100,10 +100,10 @@ class Settings:
     # ---- 记忆与上下文工程 ----
     summary_enabled: bool = True        # 会话滚动摘要（压缩早期对话）
     summary_max_chars: int = 800        # 摘要最大字符数
-    history_max_tokens: int = 64000     # 历史 token 预算兜底（未绑定模板/未知类别时；按模板类别见 history_budget_*）
+    history_max_tokens: int = 128000    # 历史 token 预算兜底（未绑定模板/未知类别时；按模板类别见 history_budget_*）
     # 历史窗口 token 预算（按提示词模板类别取用，检索型可小、编码/写作需要更长原始上下文）
-    history_budget_general: int = 64000
-    history_budget_knowledge: int = 64000
+    history_budget_general: int = 128000
+    history_budget_knowledge: int = 128000
     # 编码/写作给足长上下文（配合 [1m] 长窗口模型；非长窗口模型会被
     # _clamp_to_context_window 自动夹回 窗口−预留，不会超窗报错）
     history_budget_coding: int = 400000
@@ -113,7 +113,8 @@ class Settings:
     # 模型时预算超窗报错。0 = 按模型名自动推断（[1m] 后缀 → 1M，其余 128K）
     model_context_window: int = 0
     # 窗口内为其他内容预留的 token：静态区 + 工具定义 + D 块 + 输出
-    context_window_reserve: int = 32000
+    # 32K 只够输出；加上静态/工具/D 块约 10~16K，默认留 64K 更稳
+    context_window_reserve: int = 64000
     memory_enabled: bool = True         # 长期事实记忆
     # 自动提取记忆的最小回答长度：短问答不触发记忆提取 LLM 调用（省钱提速）
     memory_auto_extract_min_chars: int = 400
@@ -188,6 +189,7 @@ class Settings:
     max_concurrency: int = 4              # 同时处理的问答请求数（GPU/检索保护）
     llm_max_concurrency: int = 8          # LLM API 调用并发上限（生成阶段不占 GPU 锁）
     tracing_enabled: bool = True          # 结构化 trace（JSONL，本地可观测性）
+    usd_cny_rate: float = 7.2             # 用量面板 USD→CNY 汇率（成本估算用）
 
     # ---- 高级工具（P0：受控执行 / MCP / checkpoint / 记忆文件）----
     # 默认开启：读取自动执行，写入/编辑/删除/命令默认走人工确认（ask），
@@ -197,6 +199,9 @@ class Settings:
     agent_subagent_max_rounds: int = 2     # research 子代理最多 LLM 轮数
     # execute 子代理：写文件→验证→修复至少三轮，2 轮做不完，故单独给预算
     agent_subagent_exec_max_rounds: int = 6
+    # 单次运行内所有子代理的 LLM 调用总上限（并行分支共享计数）：
+    # 3 轮派发 × 4 子任务 × (6 轮 + 总结) 最坏可达 80+ 次，必须有运行级闸门
+    agent_subagent_max_llm_calls: int = 24
     agent_max_dispatch_rounds: int = 3     # 单轮对话内最多派发几轮（防失控扇出）
     # 计划模式总开关（设置页可改）：关闭时不注册 enter/exit_plan_mode 工具，
     # 模型物理上无法进入计划模式——硬否决，不靠提示词自觉
@@ -223,7 +228,7 @@ class Settings:
     # 注入的是"节选"——记忆库再涨也不会让每次请求的上下文无限膨胀
     project_memory_max_chars: int = 2600
     mcp_enabled: bool = True              # MCP 工具接入总开关
-    trajectory_compress_enabled: bool = True  # 长任务轨迹摘要压缩
+    trajectory_compress_enabled: bool = False  # 长任务轨迹摘要压缩（每次多一轮 LLM，默认关闭）
     checkpoint_keep_per_thread: int = 20  # finalize 收尾时每线程保留的原生快照数
 
     # ---- CORS（前端开发服务器地址）----
@@ -296,14 +301,14 @@ class Settings:
             agent_title_model=_env("AGENT_TITLE_MODEL", "deepseek-v4-flash"),
             summary_enabled=_env("SUMMARY_ENABLED", "1") == "1",
             summary_max_chars=int(_env("SUMMARY_MAX_CHARS", "800")),
-            history_max_tokens=int(_env("HISTORY_MAX_TOKENS", "64000")),
-            history_budget_general=int(_env("HISTORY_BUDGET_GENERAL", "64000")),
-            history_budget_knowledge=int(_env("HISTORY_BUDGET_KNOWLEDGE", "64000")),
+            history_max_tokens=int(_env("HISTORY_MAX_TOKENS", "128000")),
+            history_budget_general=int(_env("HISTORY_BUDGET_GENERAL", "128000")),
+            history_budget_knowledge=int(_env("HISTORY_BUDGET_KNOWLEDGE", "128000")),
             history_budget_coding=int(_env("HISTORY_BUDGET_CODING", "400000")),
             history_budget_writing=int(_env("HISTORY_BUDGET_WRITING", "400000")),
             history_budget_translate=int(_env("HISTORY_BUDGET_TRANSLATE", "64000")),
             model_context_window=int(_env("MODEL_CONTEXT_WINDOW", "0")),
-            context_window_reserve=int(_env("CONTEXT_WINDOW_RESERVE", "32000")),
+            context_window_reserve=int(_env("CONTEXT_WINDOW_RESERVE", "64000")),
             memory_enabled=_env("MEMORY_ENABLED", "1") == "1",
             memory_auto_extract_min_chars=int(
                 _env("MEMORY_AUTO_EXTRACT_MIN_CHARS", "400")
@@ -349,11 +354,15 @@ class Settings:
             max_concurrency=int(_env("MAX_CONCURRENCY", "4")),
             llm_max_concurrency=int(_env("LLM_MAX_CONCURRENCY", "8")),
             tracing_enabled=_env("TRACING_ENABLED", "1") == "1",
+            usd_cny_rate=float(_env("USD_CNY_RATE", "7.2")),
             advanced_tools_enabled=_env("ADVANCED_TOOLS_ENABLED", "1") == "1",
             agent_subagents_enabled=_env("AGENT_SUBAGENTS_ENABLED", "1") == "1",
             agent_subagent_max_rounds=int(_env("AGENT_SUBAGENT_MAX_ROUNDS", "2")),
             agent_subagent_exec_max_rounds=int(
                 _env("AGENT_SUBAGENT_EXEC_MAX_ROUNDS", "6")
+            ),
+            agent_subagent_max_llm_calls=int(
+                _env("AGENT_SUBAGENT_MAX_LLM_CALLS", "24")
             ),
             agent_max_dispatch_rounds=int(
                 _env("AGENT_MAX_DISPATCH_ROUNDS", "3")
@@ -377,7 +386,7 @@ class Settings:
             reasoning_summary_enabled=_env("REASONING_SUMMARY_ENABLED", "0") == "1",
             project_memory_file=_env("PROJECT_MEMORY_FILE", ""),
             mcp_enabled=_env("MCP_ENABLED", "1") == "1",
-            trajectory_compress_enabled=_env("TRAJECTORY_COMPRESS_ENABLED", "1") == "1",
+            trajectory_compress_enabled=_env("TRAJECTORY_COMPRESS_ENABLED", "0") == "1",
             checkpoint_keep_per_thread=int(_env("CHECKPOINT_KEEP_PER_THREAD", "20")),
             cors_origins=origins,
         )

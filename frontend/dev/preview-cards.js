@@ -68,7 +68,7 @@ const previewToolName = (name) => {
       knowledge_base_search: '知识库检索',
       web_search: '联网搜索',
       image_to_text: '图片识别',
-      skill_lookup: '查找技能',
+      skill_view: '查看技能',
     }[name] || name
   )
 }

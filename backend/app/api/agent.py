@@ -31,12 +31,18 @@ _ACTIVE_CONVS: dict[int, str] = {}
 _RUNS_LOCK = threading.Lock()
 
 
-def register_active_run(
+def try_register_active_run(
     stop_event: threading.Event, conversation_id: int | None = None
-) -> str:
-    """登记一次流式运行，返回 run_id。"""
+) -> str | None:
+    """原子地「检查 + 登记」一次运行；会话已有运行中的流时返回 None。
+
+    端点层的 `_reject_if_busy` 只是提前给出友好的 409；真正防并发靠这里
+    （检查与登记在同一把锁内，不存在两个请求都通过的 TOCTOU 窗口）。
+    """
     run_id = uuid.uuid4().hex
     with _RUNS_LOCK:
+        if conversation_id is not None and conversation_id in _ACTIVE_CONVS:
+            return None
         _ACTIVE_RUNS[run_id] = stop_event
         if conversation_id is not None:
             _ACTIVE_CONVS[conversation_id] = run_id
@@ -81,6 +87,11 @@ def agent_chat(
 ) -> dict:
     """非流式 Agent 问答：工具调用（按需）+ 记忆 + 最终回答。"""
     _reject_if_busy(request.conversation_id, service)
+    # 非流式同样要占住会话：否则它会与流式请求并发写同一个检查点线程
+    stop_event = threading.Event()
+    run_id = try_register_active_run(stop_event, request.conversation_id)
+    if run_id is None:
+        raise HTTPException(status_code=409, detail="该会话已有正在进行的回复")
     try:
         return service.run_json(
             question=request.question,
@@ -90,6 +101,7 @@ def agent_chat(
             template_id=request.template_id,
             system_prompt=request.system_prompt,
             tool_mode=request.tool_mode,
+            stop_event=stop_event,
             images=request.images,
             plan_only=request.plan_only,
             project_dir=request.project_dir,
@@ -98,6 +110,8 @@ def agent_chat(
     except Exception as exc:
         logger.exception("Agent 问答失败")
         raise HTTPException(status_code=500, detail=f"问答失败：{exc}")
+    finally:
+        unregister_active_run(run_id)
 
 
 def _reject_if_busy(conversation_id: int | None, service: AgentService) -> None:
@@ -135,7 +149,21 @@ def _sse_response(make_iterator, conversation_id: int | None) -> StreamingRespon
     async def event_generator():
         queue: Queue = Queue()
         stop_event = threading.Event()
-        run_id = register_active_run(stop_event, conversation_id)
+        # 原子「检查 + 登记」放在生成器真正被迭代时：
+        # ① 消除端点检查与登记之间的 TOCTOU（两个请求可能都通过早期检查）；
+        # ② 客户端尚未连接就断开时不会永久占住会话（没登记就无需清理）。
+        run_id = try_register_active_run(stop_event, conversation_id)
+        if run_id is None:
+            yield _sse(
+                {
+                    "event": "error",
+                    "data": {
+                        "message": "该会话已有正在进行的回复",
+                        "code": "conversation_busy",
+                    },
+                }
+            )
+            return
         # SSE 心跳：工具执行可能 10~20 秒无事件，注释行让前端/代理知道连接存活
         HEARTBEAT_INTERVAL = 15
 

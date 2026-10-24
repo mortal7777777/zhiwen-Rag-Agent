@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage
 
 from .db import repository as repo
 from .llm_text import message_text
+from .prompt_safety import UNTRUSTED_NOTE
 
 logger = logging.getLogger(__name__)
 
@@ -34,15 +35,23 @@ def compress_trajectory(
     """用 LLM 把一轮任务的计划+工具轨迹压缩成过程摘要并持久化。"""
     if not tool_trace or len(tool_trace) < 3:
         return None
+    # 长任务的前 4 条（意图/计划）与后 6 条（结果/收尾）信息量最大；旧实现
+    # 只取前 10 条，往往把决定性的最终结果截掉。
+    selected = (
+        tool_trace
+        if len(tool_trace) <= 10
+        else list(tool_trace[:4]) + list(tool_trace[-6:])
+    )
     steps = "\n".join(
         f"{i + 1}. {t.get('name')}({json.dumps(t.get('arguments') or {}, ensure_ascii=False)[:120]})"
-        f" -> {str(t.get('summary') or '')[:120]}"
-        for i, t in enumerate(tool_trace[:10])
+        f" -> {str(t.get('summary') or '')[:160]}"
+        for i, t in enumerate(selected)
     )
     prompt = (
         "把下面一次任务的执行轨迹压缩成一份不超过"
         f"{max_chars} 字的'任务过程摘要'（第三人称，说明做了什么、得到什么结论、"
         "还有哪些未完成/存疑的点；之后同类问题可直接复用该摘要，不用重新完整执行）。\n\n"
+        f"{UNTRUSTED_NOTE}\n\n"
         f"任务：{question[:300]}\n"
         f"计划：{'；'.join(plan) if plan else '（无）'}\n"
         f"工具轨迹：\n{steps}\n\n只输出摘要本身。"

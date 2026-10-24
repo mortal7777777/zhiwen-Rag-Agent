@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from pathlib import Path
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool, tool
 from pydantic import BaseModel, Field
 
 from ..rag.retriever import KnowledgeBaseRetriever
+from ..runtime_config import effective_or
 
 logger = logging.getLogger(__name__)
 
@@ -618,59 +621,226 @@ def make_vision_tool(vision) -> BaseTool:
     return image_to_text
 
 
-def make_skill_lookup_tool(
+SKILL_VIEW_TOOL_NAME = "skill_view"
+
+_SKILL_FILE_MAX_BYTES = 256 * 1024
+_MAX_SECTION_DIGEST = 60
+_SECTION_SUMMARY_CHARS = 160
+
+
+def _match_skill(skills: list[dict], name: str) -> dict | None:
+    """按技能名（或目录名）匹配，大小写不敏感。"""
+    target = (name or "").strip().lower()
+    if not target:
+        return None
+    for skill in skills:
+        if str(skill.get("name") or "").lower() == target:
+            return skill
+    for skill in skills:
+        if str(skill.get("dir_name") or "").lower() == target:
+            return skill
+    return None
+
+
+def _match_section(sections: list[dict], section: str) -> dict | None:
+    target = (section or "").strip().lower()
+    if not target:
+        return None
+    for item in sections:
+        if item["heading"].strip().lower() == target:
+            return item
+    for item in sections:
+        if target in item["heading"].strip().lower():
+            return item
+    return None
+
+
+def _safe_skill_file(skill_dir: Path, file_path: str) -> Path:
+    """把技能目录内的相对路径解析为绝对路径；越界/绝对路径/穿越一律拒绝。"""
+    rel = (file_path or "").strip().replace("\\", "/")
+    if not rel:
+        raise ValueError("file_path 不能为空")
+    if rel.startswith("/") or re.match(r"^[a-zA-Z]:", rel):
+        raise ValueError("只允许技能目录内的相对路径（不接受绝对路径或盘符）")
+    if any(part in ("", "..") for part in rel.split("/")):
+        raise ValueError("路径不合法（不允许 .. 或空路径段）")
+    root = skill_dir.resolve()
+    candidate = (root / rel).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise ValueError("路径超出技能目录")
+    if not candidate.is_file():
+        raise ValueError("文件不存在")
+    return candidate
+
+
+def _section_digest(sections: list[dict]) -> tuple[list[dict], bool]:
+    """章节目录瘦身：最多 60 条、每条摘要 160 字，避免目录本身撑爆上下文。"""
+    digest = [
+        {
+            "heading": s.get("heading", ""),
+            "summary": (s.get("summary") or "")[:_SECTION_SUMMARY_CHARS],
+        }
+        for s in sections[:_MAX_SECTION_DIGEST]
+    ]
+    return digest, len(sections) > _MAX_SECTION_DIGEST
+
+
+def _skill_payload(entry: dict, content: str, sanitize, full_max: int, extra=None) -> dict:
+    body = sanitize(content, full_max) if content else ""
+    payload = {
+        "ok": True,
+        "name": entry.get("name"),
+        "source": entry.get("source"),
+        "category": entry.get("category"),
+        "group": entry.get("group"),
+        "path": entry.get("path"),
+        "skill_dir": entry.get("dir_path"),
+        "linked_files": entry.get("linked_files") or {},
+        "content": body,
+        "content_chars": len(content),
+        "truncated": False,
+        "summary": f"技能 {entry.get('name')}（{len(body)} 字符）",
+        "usage_hint": "附件可用 skill_view(name, file_path='references/...') 读取。",
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def make_skill_view_tool(
     rag_service,
     enabled_ids: set[str] | None = None,
+    *,
+    conv_id: int | None = None,
+    full_max_chars: int = 24000,
+    dedup: bool = True,
+    usage: bool = True,
 ) -> BaseTool:
-    """技能检索工具：按需取回本助手已启用的 Agent Skills 指令。"""
+    """技能加载工具：按名称取回 SKILL.md 全文、章节或附件。
+
+    替代旧的向量 top-k 检索入口——L0 索引已把全部启用技能名交给模型，
+    这里按准确名称做渐进披露（L1 全文/分节、L2 附件）。同一轮重复查看
+    未变化的内容返回短 stub，避免重复注入撑爆上下文。
+    """
+    seen: dict[tuple[str, str, str], str] = {}
 
     @tool
-    def skill_lookup(query: str) -> dict:
-        """检索本机可复用的 Agent 技能（Skills）。当用户要求"用某个技能/方法处理任务"、
-        或当前任务看起来属于某个专业流程（写作、设计、部署、研究等）时调用。
-        返回匹配技能的名称、描述与 SKILL.md 摘要，供按步骤执行。"""
+    def skill_view(name: str, file_path: str = "", section: str = "") -> dict:
+        """查看一个已启用技能（Skills）的完整内容或附件。
+        name 必须是系统提示词技能目录中的技能名；任务与某技能部分相关就应调用。
+        file_path 可选：技能目录内的相对路径（如 references/api.md），用于读附件。
+        section 可选：按章节标题读取大技能的一部分（如 "When to Use"）。"""
         try:
-            from ..skills import search_skills
-            from ..skills import skill_structure
+            from ..skills import sanitize_skill_text, scan_skills, skill_sections
 
-            hits = search_skills(
-                query,
-                embeddings=rag_service.embeddings,
-                top_k=3,
-                enabled_ids=enabled_ids,
-            )
-            if not hits:
-                return {"summary": "未找到匹配的技能", "skills": []}
-            from ..skills import sanitize_skill_text
-
-            items = [
-                {
-                    "name": h["name"],
-                    "source": h["source"],
-                    "description": sanitize_skill_text(h["description"], 300),
-                    "instructions": sanitize_skill_text(h["excerpt"], 1200),
-                    "structure": [
-                        {
-                            "heading": s["heading"],
-                            "summary": sanitize_skill_text(s["summary"], 300),
-                        }
-                        for s in skill_structure(h["path"])
-                    ],
-                }
-                for h in hits
+            skills = [
+                s
+                for s in scan_skills()
+                if enabled_ids is None or s["name"] in enabled_ids
             ]
-            return {
-                "summary": (
-                    f"找到 {len(items)} 个匹配技能："
-                    f"{'、'.join(i['name'] for i in items)}"
-                    "（structure 中为分段摘要：使用时机/前置条件/步骤）"
-                ),
-                "skills": items,
-            }
-        except Exception as exc:
-            return {"summary": f"技能检索失败：{exc}", "skills": []}
+            entry = _match_skill(skills, name)
+            if entry is None:
+                return {
+                    "ok": False,
+                    "error": f"未找到已启用技能「{name}」",
+                    "available_names": [s["name"] for s in skills][:50],
+                }
+            skill_md = Path(str(entry.get("path") or ""))
+            skill_dir = Path(str(entry.get("dir_path") or skill_md.parent))
 
-    return skill_lookup
+            if file_path:
+                target = _safe_skill_file(skill_dir, file_path)
+                size = target.stat().st_size
+                if size > _SKILL_FILE_MAX_BYTES:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"附件过大（{size} 字节，上限 {_SKILL_FILE_MAX_BYTES}），"
+                            "请改读 references/ 下更小的文件"
+                        ),
+                    }
+                text = target.read_text(encoding="utf-8", errors="ignore")
+                return _skill_payload(
+                    entry,
+                    text,
+                    sanitize_skill_text,
+                    full_max_chars,
+                    extra={"file_path": file_path},
+                )
+
+            text = skill_md.read_text(encoding="utf-8", errors="ignore")
+            sections = skill_sections(str(skill_md))
+
+            if section:
+                hit = _match_section(sections, section)
+                if hit is None:
+                    return {
+                        "ok": False,
+                        "error": f"未找到章节「{section}」",
+                        "sections": _section_digest(sections)[0],
+                    }
+                return _skill_payload(
+                    entry,
+                    text[hit["start"] : hit["end"]],
+                    sanitize_skill_text,
+                    full_max_chars,
+                    extra={"section": hit["heading"]},
+                )
+
+            if len(text) <= full_max_chars:
+                payload = _skill_payload(
+                    entry, text, sanitize_skill_text, full_max_chars
+                )
+            else:
+                digest, digest_truncated = _section_digest(sections)
+                payload = _skill_payload(
+                    entry,
+                    "",
+                    sanitize_skill_text,
+                    full_max_chars,
+                    extra={
+                        "truncated": True,
+                        "content_chars": len(text),
+                        "sections": digest,
+                        "sections_truncated": digest_truncated,
+                        "summary": (
+                            f"技能 {entry.get('name')} 较大（{len(text)} 字符），"
+                            f"已返回章节目录（{len(digest)} 节），用 section 读取指定章节"
+                        ),
+                        "usage_hint": (
+                            "技能较大，已返回章节目录；用 "
+                            "skill_view(name, section='<标题>') 读取指定章节。"
+                        ),
+                    },
+                )
+                if not sections:
+                    payload["content"] = sanitize_skill_text(text, full_max_chars)
+
+            key = (str(entry.get("name")), file_path, section)
+            if dedup and seen.get(key) == payload.get("content"):
+                return {
+                    "ok": True,
+                    "name": entry.get("name"),
+                    "path": str(skill_md),
+                    "skill_dir": str(skill_dir),
+                    "deduplicated": True,
+                    "summary": f"技能 {entry.get('name')} 内容本轮已返回且未变化，未重复注入。",
+                    "usage_hint": "如需重读请换 section/file_path，或直接使用已加载内容。",
+                }
+            seen[key] = payload.get("content") or ""
+
+            if usage:
+                try:
+                    from ..skills import record_view
+
+                    record_view(str(entry.get("name")))
+                except Exception:
+                    pass
+            return payload
+        except Exception as exc:
+            return {"ok": False, "error": f"技能加载失败：{exc}"}
+
+    return skill_view
 
 
 # ---------------- 技能创作（把重复流程沉淀为可复用 SKILL.md）----------------
@@ -698,8 +868,8 @@ class _WriteSkillArgs(BaseModel):
     )
 
 
-def make_write_skill_tool() -> BaseTool:
-    """技能创作工具：把重复执行的流程沉淀成 SKILL.md，下次 skill_lookup 即可取回。
+def make_write_skill_tool(settings=None) -> BaseTool:
+    """技能创作工具：把重复执行的流程沉淀成 SKILL.md，下次 skill_view 即可取回。
 
     写入自创技能库 data/agent_skills/<category>/<name>/SKILL.md（与 Hermes
     个人技能层隔离；设置 → 技能 → 自创 里可启用 / 共享给 Hermes 使用）。
@@ -713,9 +883,10 @@ def make_write_skill_tool() -> BaseTool:
         content: str,
         category: str = "other",
     ) -> dict:
-        """把一个可复用的任务流程写成技能文件（SKILL.md），下次同类任务用 skill_lookup 取回。
+        """把一个可复用的任务流程写成技能文件（SKILL.md），下次同类任务用 skill_view 取回。
         适合：刚走通、以后会重复的多步流程；不适合：一次性任务与 1-2 步操作。
-        name 小写连字符，description 一句话，content 为不含 frontmatter 的正文，category 默认 other。"""
+        name 小写连字符，description 一句话，content 为不含 frontmatter 的正文，category 默认 other。
+        正文建议包含 When to Use / Prerequisites / Procedure / Pitfalls / Verification 章节。"""
         try:
             import os
             import re
@@ -759,7 +930,7 @@ def make_write_skill_tool() -> BaseTool:
             with open(skill_md_path, "w", encoding="utf-8") as f:
                 f.write(full_content)
 
-            # force 刷新 scan_skills 缓存，使新技能在下一次 skill_lookup 时可见
+            # force 刷新 scan_skills 缓存，使新技能在下一次 skill_view 时可见
             try:
                 from ..skills import scan_skills
 
@@ -767,12 +938,22 @@ def make_write_skill_tool() -> BaseTool:
             except Exception:
                 pass  # 缓存刷新失败不影响写入成功
 
+            if settings is None or bool(
+                effective_or(settings, "skills_usage_tracking", True)
+            ):
+                try:
+                    from ..skills import record_patch
+
+                    record_patch(clean_name)
+                except Exception:
+                    pass
+
             return {
                 "summary": (
                     f"技能 {clean_name} 已{'覆盖' if existed else '创建'}"
                     f"（自创技能库 {clean_cat}/{clean_name}/SKILL.md，"
                     f"{len(full_content)} 字符，当前为待启用状态）。"
-                    "在 设置 → 技能 → 自创 里可启用（启用后 skill_lookup 才能检索到）；"
+                    "在 设置 → 技能 → 自创 里可启用（启用后 skill_view 才能查到）；"
                     "如需给 Hermes 使用，可在同一处点「共享」。"
                 ),
                 "name": clean_name,
@@ -800,6 +981,7 @@ def build_tools(
     skill_enabled_ids: set[str] | None = None,
     searxng_base_url: str = "",
     searxng_engines: str = "",
+    conv_id: int | None = None,
 ) -> list[BaseTool]:
     """根据前端开关组装工具列表（都不开则返回空列表 = 纯对话）。"""
     tools: list[BaseTool] = []
@@ -838,14 +1020,28 @@ def build_tools(
             from ..skills import scan_skills
 
             if scan_skills():
+                settings = getattr(rag_service, "settings", None)
                 tools.append(
-                    make_skill_lookup_tool(
+                    make_skill_view_tool(
                         rag_service,
                         enabled_ids=skill_enabled_ids,
+                        conv_id=conv_id,
+                        full_max_chars=int(
+                            effective_or(
+                                settings, "skills_full_view_max_chars", 24000
+                            )
+                            or 24000
+                        ),
+                        dedup=bool(
+                            effective_or(settings, "skills_view_dedup", True)
+                        ),
+                        usage=bool(
+                            effective_or(settings, "skills_usage_tracking", True)
+                        ),
                     )
                 )
                 # 技能创作工具：让 agent 把重复流程沉淀为 SKILL.md（敏感操作走 HITL）
-                tools.append(make_write_skill_tool())
+                tools.append(make_write_skill_tool(settings))
         except Exception as exc:
             logger.warning("技能工具注册失败：%s", exc)
     return tools

@@ -59,6 +59,10 @@ class Deps:
     # 新会话标题：后台线程生成，写入 title_holder，finalize 读取后发 title 事件
     title_holder: list[str] = field(default_factory=list)
     title_thread: threading.Thread | None = None
+    # 子代理 LLM 调用预算：并行 Send 分支共享同一 Deps（请求级活对象）。
+    # 计数器/锁不能放 state（要进检查点，锁不可序列化）。
+    subagent_llm_calls: int = 0
+    subagent_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 def runtime_of(deps: "Deps") -> SimpleNamespace:

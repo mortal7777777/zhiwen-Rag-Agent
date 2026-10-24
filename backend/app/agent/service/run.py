@@ -131,6 +131,8 @@ class RunMixin(ServiceBaseMixin):
             # 一次用掉就整个会话再也享受不到空正文兜底（2026-09-24 实测）
             "empty_retry_count": 0,
             "empty_retry_pending": False,
+            # 本轮的复验机会计数（prepare 也会复位；这里保证新会话/无检查点时初值一致）
+            "verify_fail_count": 0,
             "early_created": early_created,
             "dispatch_rounds": 0,
             "task_mode": False,

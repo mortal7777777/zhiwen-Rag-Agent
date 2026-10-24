@@ -139,3 +139,6 @@ backend/cmrc2018_eval_result.jsonl
 
 # 独立 venv 的 MCP server（本地运行时产物）
 backend/.mcp-servers/
+
+# 公开基准数据/结果（CRAG、tau2、BFCL；不含生产数据）
+benchmarks/

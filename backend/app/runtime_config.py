@@ -77,6 +77,9 @@ _SPECS: dict[str, FieldSpec] = {
     "agent_subagent_max_rounds": FieldSpec(
         "int", 2, 1, 20, label="research 子代理最多 LLM 轮数", group="agent"
     ),
+    "agent_subagent_max_llm_calls": FieldSpec(
+        "int", 24, 1, 200, label="单次运行子代理 LLM 调用总上限", group="agent"
+    ),
     "agent_llm_stall_timeout_s": FieldSpec(
         "float", 150.0, 10.0, 1800.0, label="流式卡死看门狗（秒）", group="agent"
     ),
@@ -109,7 +112,7 @@ _SPECS: dict[str, FieldSpec] = {
         "int", 400, 8, 500, label="历史窗口条数", group="context"
     ),
     "history_max_tokens": FieldSpec(
-        "int", 64000, 1000, 200000, label="历史 token 预算", group="context"
+        "int", 128000, 1000, 200000, label="历史 token 预算", group="context"
     ),
     "vision_max_images": FieldSpec(
         "int", 6, 1, 10, label="单次最多识图数", group="context"
@@ -131,11 +134,26 @@ _SPECS: dict[str, FieldSpec] = {
         "int", 2600, 500, 20000, label="项目记忆注入上限（字符）", group="memory"
     ),
     "trajectory_compress_enabled": FieldSpec(
-        "bool", True, label="长任务轨迹摘要", group="memory"
+        "bool", False, label="长任务轨迹摘要", group="memory"
     ),
     # ---- 技能与工具 ----
     "skills_enabled": FieldSpec(
         "bool", True, label="技能总开关", group="skills"
+    ),
+    "skills_index_max_chars": FieldSpec(
+        "int", 12000, 2000, 100000, label="技能索引字符预算", group="skills"
+    ),
+    "skills_full_view_max_chars": FieldSpec(
+        "int", 24000, 4000, 200000, label="技能全文返回上限", group="skills"
+    ),
+    "skills_view_dedup": FieldSpec(
+        "bool", True, label="技能重复查看去重", group="skills"
+    ),
+    "skills_usage_tracking": FieldSpec(
+        "bool", True, label="记录技能用量", group="skills"
+    ),
+    "skills_curator_stale_days": FieldSpec(
+        "int", 90, 7, 3650, label="自创技能归档阈值（天）", group="skills"
     ),
     "advanced_tools_enabled": FieldSpec(
         "bool", True, label="受控执行工具（文件/命令）", group="tools"
@@ -933,6 +951,51 @@ def _fallback_chat_anthropic_class():
     return _fallback_chat_anthropic_cls
 
 
+_CHAT_OPENAI_CLS = None
+
+
+def _chat_openai_cls():
+    """ChatOpenAI 子类：把流式 delta.reasoning_content 保留进 additional_kwargs。
+
+    langchain_openai 1.4.1 的 `_convert_delta_to_message_chunk` 不认
+    `reasoning_content`（DeepSeek/OpenCode Go 的思考增量），导致 agent 节点
+    的思考链提取永远拿不到内容。这里在标准转换后补一次映射，未识别的
+    字段仍按原逻辑忽略，不影响正文与工具调用。
+    """
+    global _CHAT_OPENAI_CLS
+    if _CHAT_OPENAI_CLS is not None:
+        return _CHAT_OPENAI_CLS
+    from langchain_openai import ChatOpenAI
+
+    class _ReasoningChatOpenAI(ChatOpenAI):
+        def _convert_chunk_to_generation_chunk(
+            self, chunk, default_chunk_class, base_generation_info=None
+        ):
+            generation_chunk = super()._convert_chunk_to_generation_chunk(
+                chunk, default_chunk_class, base_generation_info
+            )
+            if generation_chunk is None:
+                return None
+            try:
+                choices = chunk.get("choices") or (chunk.get("chunk") or {}).get(
+                    "choices"
+                ) or []
+                delta = (choices[0].get("delta") or {}) if choices else {}
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                if reasoning:
+                    message = generation_chunk.message
+                    message.additional_kwargs = {
+                        **(message.additional_kwargs or {}),
+                        "reasoning_content": str(reasoning),
+                    }
+            except Exception:
+                pass
+            return generation_chunk
+
+    _CHAT_OPENAI_CLS = _ReasoningChatOpenAI
+    return _CHAT_OPENAI_CLS
+
+
 def build_chat_model(
     cfg: dict,
     *,
@@ -984,7 +1047,7 @@ def build_chat_model(
             kwargs["default_headers"] = extra_headers
         # 用带回退客户端的子类（Clash 关闭后不再 "Connection error."）
         return _AnthropicSystemNormalizer(_fallback_chat_anthropic_class()(**kwargs))
-    from langchain_openai import ChatOpenAI
+    ChatOpenAI = _chat_openai_cls()
 
     from .network import make_async_httpx_client, make_httpx_client
 

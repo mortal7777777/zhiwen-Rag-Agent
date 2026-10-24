@@ -153,6 +153,35 @@ class BudgetSettings:
     summary_max_chars = 800
 
 
+class WindowSettings(BudgetSettings):
+    model_context_window = 128000
+    context_window_reserve = 64000
+
+
+class BigWindowSettings(BudgetSettings):
+    model_context_window = 1_000_000
+    context_window_reserve = 64000
+
+
+def test_token_high_water_is_capped_by_model_window():
+    """压缩触发线不得超过"窗口 − 预留"。
+
+    回归：coding 预算 400K 在 128K 窗口下被夹到 64K 后，旧实现仍按
+    64K × 1.25 = 80K 触发；而 80K 历史 + 64K 预留已超过 128K 窗口。
+    """
+    svc = ContextService(WindowSettings(), chat=None)
+    assert svc.context_ceiling() == 64000
+    assert svc._clamp_to_context_window(400000) == 64000
+    assert svc.token_high_water(64000) == 64000   # 不再放大到 80K
+    assert svc.token_high_water(32000) == 40000   # 预算低于上限时保留 1.25×
+
+
+def test_token_high_water_keeps_headroom_on_big_window():
+    svc = ContextService(BigWindowSettings(), chat=None)
+    assert svc._clamp_to_context_window(400000) == 400000
+    assert svc.token_high_water(400000) == 500000
+
+
 def test_history_budget_follows_template_category(monkeypatch):
     """模板类别 -> 预算：coding 用更大预算（压缩与裁剪同一口径）。"""
     svc = ContextService(BudgetSettings(), chat=None)

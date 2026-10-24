@@ -225,7 +225,9 @@ def _state(**overrides) -> dict:
     return state
 
 
-def _run_prepare(monkeypatch, tmp_path, window_rows, memory_summary, ledger):
+def _run_prepare(
+    monkeypatch, tmp_path, window_rows, memory_summary, ledger, **overrides
+):
     """跑一次真实的 _prepare_node（repo / 项目记忆用替身，不碰真库与真文件）。"""
     monkeypatch.setattr(prepare_module, "repo", _FakeRepo(window_rows))
     monkeypatch.setattr(
@@ -240,9 +242,41 @@ def _run_prepare(monkeypatch, tmp_path, window_rows, memory_summary, ledger):
         _bus=bus,
         project_dir=str(tmp_path),
         dblock_versions=dict(ledger),
+        **overrides,
     )
     result = _prepare_node(state, runtime_from_state(state))
     return state, result
+
+
+def test_prepare_records_stage_timings(monkeypatch, tmp_path):
+    """prepare 的分段耗时随运行记录落库（先量化再决定拆并发）。"""
+    state, _ = _run_prepare(
+        monkeypatch, tmp_path, window_rows=[], memory_summary=None, ledger={}
+    )
+    timings = state["runtime"]["timings"]
+    assert {"compact_ms", "memory_ms", "tools_ms"} <= set(timings)
+    assert all(isinstance(v, int) and v >= 0 for v in timings.values())
+
+
+def test_prepare_resets_per_turn_retry_counters(monkeypatch, tmp_path):
+    """空正文重试与写后复验计数必须每轮从 0 开始。
+
+    检查点按 conv:<id> 携带 state；只靠"新会话初值"会让计数在整个会话里
+    单调累积——空正文兜底用一次就失效（已修），复验机会同样会被永久耗掉。
+    """
+    _, result = _run_prepare(
+        monkeypatch,
+        tmp_path,
+        window_rows=[],
+        memory_summary=None,
+        ledger={},
+        empty_retry_count=2,
+        empty_retry_pending=True,
+        verify_fail_count=3,
+    )
+    assert result["empty_retry_count"] == 0
+    assert result["empty_retry_pending"] is False
+    assert result["verify_fail_count"] == 0
 
 
 def test_prepare_returns_ledger_and_renders_time_block(monkeypatch, tmp_path):

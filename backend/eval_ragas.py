@@ -134,7 +134,11 @@ def load_judge(use_async: bool = False):
     否则会回退到环境变量里的旧 key(常见坑:设置页换了新 key,评测仍打
     旧账户报 402 Insufficient Balance)。"""
     from app.config import get_settings
-    from app.runtime_config import chat_provider_config, load_overrides
+    from app.runtime_config import (
+        chat_provider_config,
+        load_overrides,
+        provider_extra_headers,
+    )
 
     try:
         from run import load_local_env
@@ -165,9 +169,14 @@ def load_judge(use_async: bool = False):
     if "/anthropic" in base_url:
         base_url = re.sub(r"/(?:api/|apps/)?anthropic/?$", "", base_url.rstrip("/"))
     model = re.sub(r"\[1m\]", "", model)
+    # OpenCode Zen/Go 网关要求自报会话身份：缺 x-opencode-session 直接 400
+    # MissingSessionID。项目内 ChatOpenAI 由 build_chat_model 注入，评测脚本
+    # 是独立 OpenAI 客户端，必须在这里同样补上。
+    extra_headers = provider_extra_headers(cfg, base_url)
     client = OpenAI(
         api_key=api_key,
         base_url=base_url,
+        default_headers=extra_headers or None,
         # 直连 api.deepseek.com（trust_env=False 绕开系统代理）：httpx 默认
         # trust_env 会走 Clash(127.0.0.1:7890)，代理挂起时请求卡死在
         # FIN_WAIT_2 且无输出（实测全量评测卡 0/84 十四分钟）
@@ -186,6 +195,7 @@ def load_judge(use_async: bool = False):
         client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
+            default_headers=extra_headers or None,
             http_client=httpx.AsyncClient(trust_env=False),
             timeout=httpx.Timeout(120.0, connect=15.0),
             max_retries=2,

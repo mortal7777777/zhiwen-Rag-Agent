@@ -46,8 +46,10 @@ def _result(task: str, call_id: str = "c1") -> dict:
 
 
 def _state(results: list[dict], merged: int) -> dict:
+    queue: Queue = Queue()
     return {
-        "bus": EventBus(Queue()),
+        "bus": EventBus(queue),
+        "_events": queue,
         "db": None,
         "runtime": {"subagent_merged": merged},
         "messages": [],
@@ -62,6 +64,13 @@ def _state(results: list[dict], merged: int) -> dict:
 
 def _tool_rows(messages: list) -> list[ToolMessage]:
     return [m for m in messages if isinstance(m, ToolMessage)]
+
+
+def _drain_events(state: dict) -> list[dict]:
+    out: list[dict] = []
+    while not state["_events"].empty():
+        out.append(state["_events"].get())
+    return out
 
 
 def test_merge_emits_tool_messages_with_evidence():
@@ -87,6 +96,55 @@ def test_merge_groups_multiple_subtasks_of_one_call():
     assert len(rows) == 1
     payload = json.loads(rows[0].content)
     assert [r["task"] for r in payload["results"]] == ["A", "B"]
+
+
+def test_merge_remaps_citation_indices_in_summary():
+    """来源重编号后，摘要正文里的 [n] 必须指向同一全局编号。
+
+    子代理各自从 1 起编号；两个并行分支都写"见[1]"时，第二个分支的正文
+    要改写成全局编号，否则主 agent 的引用会指向别的分支的来源。
+    """
+    first = _result("任务A", "c1")
+    first["sources"] = [{"index": 1, "type": "kb", "content": "A"}]
+    first["summary"] = "根据[1]，结论是 A；另见[9]"
+    second = _result("任务B", "c2")
+    second["sources"] = [{"index": 1, "type": "kb", "content": "B"}]
+    second["summary"] = "参见[1]"
+
+    st = _state([first, second], merged=0)
+    out = _merge_node(st, runtime_from_state(st))
+    rows = _tool_rows(out["messages"])
+    payloads = [json.loads(r.content) for r in rows]
+
+    assert payloads[0]["results"][0]["summary"] == "根据[1]，结论是 A；另见[9]"
+    assert payloads[1]["results"][0]["summary"] == "参见[2]"
+    assert payloads[0]["results"][0]["sources"] == [1]
+    assert payloads[1]["results"][0]["sources"] == [2]
+
+
+def test_sse_tool_result_carries_source_objects_not_indices():
+    """SSE 事件必须发完整来源对象；模型侧 payload 才用编号数组。
+
+    前端 onToolResult 会把这些对象直接放进来源列表，发整数会渲染成空卡片。
+    """
+    first = _result("任务A", "c1")
+    first["sources"] = [
+        {"index": 1, "type": "kb", "content": "A", "source": "a.md", "page": 3}
+    ]
+    second = _result("任务B", "c2")
+    second["sources"] = [{"index": 1, "type": "kb", "content": "B"}]
+
+    st = _state([first, second], merged=0)
+    _merge_node(st, runtime_from_state(st))
+
+    events = [e for e in _drain_events(st) if e["event"] == "tool_result"]
+    assert [e["data"]["name"] for e in events] == ["subagent", "subagent"]
+    assert events[0]["data"]["sources"] == [
+        {"index": 1, "type": "kb", "content": "A", "source": "a.md", "page": 3}
+    ]
+    assert events[1]["data"]["sources"] == [
+        {"index": 2, "type": "kb", "content": "B"}
+    ]
 
 
 def test_merge_skips_already_consumed_results():
@@ -137,6 +195,21 @@ def test_results_reducer_reset_then_append():
 
 
 # ---------------- 契约：Send 载荷覆盖 merge 硬读键 ----------------
+
+
+def test_dispatch_send_payload_carries_conversation_id():
+    """子代理分支 state 需要会话号：skill_view 的用量归因读 conversation_id。"""
+    sends = _dispatch_tasks(
+        {
+            "pending_subtasks": [{"task": "t", "mode": "research", "call_id": "c1"}],
+            "question": "q",
+            "runtime": {},
+            "project_dir": None,
+            "conversation_id": 42,
+        }
+    )
+    assert len(sends) == 1 and sends[0].node == "subagent"
+    assert sends[0].arg["conversation_id"] == 42
 
 
 def test_merge_send_payload_covers_required_keys():

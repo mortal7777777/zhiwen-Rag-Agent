@@ -15,7 +15,7 @@ RRF_K = 60  # RRF 平滑常数：排名越靠前，融合分越高
 
 # 检索代码版本：改检索逻辑时 +1（eval_ragas 检索缓存指纹的一部分，
 # 保证代码改动后评测不会命中旧检索缓存）。
-RETRIEVAL_VERSION = 6
+RETRIEVAL_VERSION = 7
 
 # ---- 书名感知路由（S1，2026-09-11）----
 # 问题含《书名》时，命中该书的候选在跨查询融合中加权（TITLE_BOOST），且在
@@ -39,8 +39,22 @@ TITLE_RERANK_BONUS = 0.1
 #    强降权实测命中 7/7→2/7）。
 TOC_DEMOTE_RRF = 0.7
 TOC_RERANK_PENALTY = 0.08
+# 书内检索（S3′）：每本逻辑书取 top-k child；最终选择每书至少 2 条、
+# 单书最多占 k - 2*(n-1) 条，避免多书题被一本垄断。
+BOOK_SCOPED_TOP_K = 6
+BOOK_QUOTA_MIN_PER_BOOK = 2
+BOOK_QUOTA_MAX_FOREIGN = 1
+BROAD_CONTEXT_BUDGET = 8
+# 序言/前言块在内容型问题里常抢走正文名额（l1-kb-023），但版本/作者/
+# 写作过程类问题必须保留它们，所以只在非 meta 问题上轻惩罚。
+FRONT_MATTER_RERANK_PENALTY = 0.03
 _TOC_MARK_RE = re.compile(r"第[一二三四五六七八九十百零0-9]+[章节篇卷]")
-_ENUM_KEYWORDS = ("哪些", "哪几", "列举", "包括")
+_ENUM_KEYWORDS = (
+    "哪些", "哪几", "列举", "包括",
+    "分别收录", "收录了", "收录内容", "收录哪些",
+    "目录", "篇目", "附录", "清单",
+    "有哪些内容", "有什么内容", "包含哪些", "列一下",
+)
 
 
 def is_toc_like(text: str) -> bool:
@@ -74,10 +88,53 @@ def _norm_text(text: str) -> str:
     return _TITLE_STRIP.sub("", str(text or "")).lower()
 
 
+# 中文书名与源文件名不一致的确定性别名。S1/S3′/最终配额都只按文件名
+# 匹配，若不补这层，《造物的七个奥秘》匹配不到 The Seven Mysteries，
+# 毛选篇名也匹配不到《毛泽东选集》容器文件。
+_TITLE_ALIASES = {
+    "造物的七个奥秘": ("The Seven Mysteries",),
+    "实践论": ("毛泽东选集",),
+    "矛盾论": ("毛泽东选集",),
+    "湖南农民运动考察报告": ("毛泽东选集",),
+    "论持久战": ("毛泽东选集",),
+    "个人与群体事件的本质": ("群体实相",),
+}
+
+
 def title_matches_source(title: str, source: str) -> bool:
-    """书名与来源文件名的归一化子串匹配（兼容"春_桥文录"这类下划线/括号差异）。"""
+    """书名与来源文件名的归一化子串匹配（兼容下划线/括号/中文别名）。"""
     t = _norm_text(title)
-    return bool(t) and t in _norm_text(source)
+    s = _norm_text(source)
+    if not t:
+        return False
+    if t in s:
+        return True
+    return any(_norm_text(alias) in s for alias in _TITLE_ALIASES.get(t, ()))
+
+
+_BROAD_KEYWORDS = (
+    "主要观点", "主要讲", "主题", "核心", "如何写成", "异同", "分别",
+    "关系", "概括", "讲了什么", "主要内容", "综述", "简要", "如何分析",
+    "论述",
+)
+_META_KEYWORDS = (
+    "版本", "序言", "前言", "作者", "译者", "出版", "时间跨度", "收录",
+    "目录", "附录", "如何写成", "与谁", "写作过程",
+)
+_FRONT_MATTER_RE = re.compile(r"(序言|前言|译者序|导读|引言|出版说明|扉页)")
+
+
+def is_broad_question(question: str) -> bool:
+    return any(k in (question or "") for k in _BROAD_KEYWORDS)
+
+
+def is_meta_question(question: str) -> bool:
+    """版本/作者/写作过程类问题需要序言块，不能按内容题降权。"""
+    return any(k in (question or "") for k in _META_KEYWORDS)
+
+
+def is_front_matter_like(text: str) -> bool:
+    return bool(text) and bool(_FRONT_MATTER_RE.search(text[:200]))
 
 
 def match_book_paths(titles: list[str], relative_paths: list[str]) -> list[str]:
@@ -88,6 +145,47 @@ def match_book_paths(titles: list[str], relative_paths: list[str]) -> list[str]:
         if any(title_matches_source(t, name) for t in titles):
             matched.append(rel)
     return matched
+
+
+def group_book_paths(titles: list[str], relative_paths: list[str]) -> list[list[str]]:
+    """把命中的库内路径按“逻辑书”分组。
+
+    同一本书可能有上/下卷或多个格式；问题中的多个书名也可能落在同一本文集
+    里（如两个篇名同属一本选集）。共享书名匹配的路径应视为同一本书，后续
+    书内检索按组取 top_k，避免同一本书的多个文件挤占其他书。
+    """
+    matched = [
+        rel
+        for rel in relative_paths
+        if any(title_matches_source(t, rel) for t in titles)
+    ]
+    if not matched:
+        return []
+    path_titles = {
+        rel: {t for t in titles if title_matches_source(t, rel)}
+        for rel in matched
+    }
+    parent = {rel: rel for rel in matched}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i, a in enumerate(matched):
+        for b in matched[i + 1:]:
+            if path_titles[a] & path_titles[b]:
+                union(a, b)
+    groups: dict[str, list[str]] = {}
+    for rel in matched:
+        groups.setdefault(find(rel), []).append(rel)
+    return list(groups.values())
 
 
 def book_scoped_children(
@@ -128,6 +226,44 @@ def book_scoped_children(
     for item in ranked[:top_k]:
         doc = item["doc"]
         doc.metadata["hybrid_score"] = round(item["rrf"], 4)
+        result.append(doc)
+    return result
+
+
+def merge_scoped_children(
+    per_query_docs: list[list[Document]],
+    top_k: int = BOOK_SCOPED_TOP_K,
+) -> list[Document]:
+    """合并同一本逻辑书、多条查询的书内检索结果。
+
+    每条查询内部已做 kNN+BM25 RRF；这里按 parent 去重后把跨查询分数相加，
+    避免同一 parent 的多个 child 占满名额。返回值带 `query_merge_score`
+    （与全局候选同一量级），供 small_to_big 与最终精排使用。
+    """
+    merged: dict[str, dict] = {}
+    for docs in per_query_docs:
+        for doc in docs:
+            key = str(
+                doc.metadata.get("parent_id")
+                or doc.metadata.get("_id")
+                or (doc.page_content or "")[:64]
+            )
+            score = float(doc.metadata.get("hybrid_score") or 0.0)
+            item = merged.get(key)
+            if item is None:
+                merged[key] = {"doc": doc, "score": score, "best": score}
+            else:
+                item["score"] += score
+                if score > item["best"]:
+                    item["best"] = score
+                    item["doc"] = doc
+    ranked = sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:top_k]
+    result: list[Document] = []
+    for item in ranked:
+        doc = item["doc"]
+        doc.metadata["query_merge_score"] = round(
+            item["score"] * TITLE_BOOST, 4
+        )
         result.append(doc)
     return result
 
@@ -323,6 +459,124 @@ def ensure_parents(
         kept.sort(key=lambda d: float(d.metadata.get("parent_score") or 0.0))
         kept.pop(0)
     return kept + add
+
+
+def select_contexts_with_book_quota(
+    ranked: list[Document],
+    titles: list[str],
+    k: int,
+    min_per_book: int = BOOK_QUOTA_MIN_PER_BOOK,
+    max_foreign: int = BOOK_QUOTA_MAX_FOREIGN,
+) -> list[Document]:
+    """最终 top-k 选择：点名书目优先，多书题按书保底/限流。
+
+    - 无书名：保持纯精排序；
+    - 单书：点名书优先，外书最多 max_foreign 条（仅在点名书不足 k 时补位）；
+    - 多书：每个逻辑书至少 min_per_book 条（候选足够时），单书最多
+      max(min_per_book, k - min_per_book*(n-1))，防止一本垄断 top-k。
+    """
+    if not titles or k <= 0:
+        return ranked[:k]
+
+    # 书名 -> 实际命中的 source 集合；共享 source 的书名合并成一个逻辑书
+    # （同一本书的上/下卷、多个格式，或同属一本选集的多个篇名）。
+    title_sources: dict[str, set[str]] = {}
+    for doc in ranked:
+        src = str(doc.metadata.get("source") or "")
+        for title in titles:
+            if title_matches_source(title, src):
+                title_sources.setdefault(title, set()).add(src)
+    groups: list[dict] = []
+    for title, srcs in title_sources.items():
+        merged = False
+        for group in groups:
+            if group["sources"] & srcs:
+                group["titles"].add(title)
+                group["sources"] |= srcs
+                merged = True
+                break
+        if not merged:
+            groups.append({"titles": {title}, "sources": set(srcs)})
+    if not groups:
+        return ranked[:k]
+
+    def group_of(doc: Document) -> int | None:
+        src = str(doc.metadata.get("source") or "")
+        for gi, group in enumerate(groups):
+            if src in group["sources"]:
+                return gi
+        return None
+
+    def key(doc: Document) -> str:
+        return str(
+            doc.metadata.get("parent_id")
+            or doc.metadata.get("_id")
+            or id(doc)
+        )
+
+    selected: list[Document] = []
+    seen: set[str] = set()
+
+    def add(doc: Document) -> bool:
+        doc_key = key(doc)
+        if doc_key in seen or len(selected) >= k:
+            return False
+        seen.add(doc_key)
+        selected.append(doc)
+        return True
+
+    if len(groups) == 1:
+        for doc in ranked:
+            if group_of(doc) == 0:
+                add(doc)
+        # 点名书候选不足 k 时，外书最多补 max_foreign 条
+        foreign_added = 0
+        for doc in ranked:
+            if foreign_added >= max_foreign or len(selected) >= k:
+                break
+            if group_of(doc) is None and add(doc):
+                foreign_added += 1
+    else:
+        min_per_book = max(1, min(min_per_book, k // len(groups)))
+        max_per_book = max(
+            min_per_book, k - min_per_book * (len(groups) - 1)
+        )
+        counts = [0] * len(groups)
+        # 每书保底
+        for gi in range(len(groups)):
+            for doc in ranked:
+                if counts[gi] >= min_per_book:
+                    break
+                if group_of(doc) == gi and add(doc):
+                    counts[gi] += 1
+        # 按精排补位，单书不超过 max_per_book
+        for doc in ranked:
+            if len(selected) >= k:
+                break
+            gi = group_of(doc)
+            if gi is None or counts[gi] >= max_per_book:
+                continue
+            if add(doc):
+                counts[gi] += 1
+        # 仍有空位时，用外书补足（只在点名书候选不足时发生）
+        for doc in ranked:
+            if len(selected) >= k:
+                break
+            if group_of(doc) is None:
+                add(doc)
+
+    order = {key(doc): i for i, doc in enumerate(ranked)}
+    if len(groups) == 1:
+        # 单书题：点名书排在外书之前，组内仍按精排序
+        selected.sort(
+            key=lambda doc: (
+                group_of(doc) is None,
+                order.get(key(doc), len(ranked)),
+            )
+        )
+    else:
+        selected.sort(key=lambda doc: order.get(key(doc), len(ranked)))
+    return selected[:k]
 
 
 class KnowledgeBaseRetriever(BaseRetriever):

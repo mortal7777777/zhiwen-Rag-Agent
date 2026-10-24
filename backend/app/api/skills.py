@@ -64,7 +64,7 @@ def skills_search(
 ) -> dict:
     """按语义/关键词检索技能（设置页浏览用，返回全部未隐藏技能）。
 
-    Agent 的 skill_lookup 只检索已启用技能，由 tools.py 传入 enabled_ids 过滤。
+    Agent 的 skill_view 只加载已启用技能，由 tools.py 传入 enabled_ids 过滤。
     """
     hits = search_skills(
         q,
@@ -83,7 +83,7 @@ def update_skills(
 ) -> dict:
     """保存技能偏好：enabled=本助手启用的技能，hidden=从本助手移除的技能。
 
-    只影响本助手的 skill_lookup，绝不修改其他 Agent 的技能文件。
+    只影响本助手的技能索引与 skill_view，绝不修改其他 Agent 的技能文件。
     """
     prefs = save_prefs(db, enabled=payload.enabled, hidden=payload.hidden)
     return {

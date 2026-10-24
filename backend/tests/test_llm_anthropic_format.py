@@ -182,7 +182,10 @@ def test_build_chat_model_picks_client_by_format():
     op = build_chat_model(
         {"api_key": "k", "base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"}
     )
-    assert type(op).__name__ == "ChatOpenAI"
+    # OpenAI 格式用 ChatOpenAI 子类（补 reasoning_content 流式映射），仍是同一基类
+    from langchain_openai import ChatOpenAI
+
+    assert isinstance(op, ChatOpenAI)
 
 
 def test_build_chat_model_uses_proxy_fallback_clients():

@@ -127,8 +127,12 @@ export function createStreamHandlers({ state, actions, live }) {
         // 完整输出（截断版）：工具卡可展开查看
         if (data.detail) trace.detail = data.detail
       }
-      if (data.sources && data.sources.length) {
-        streamMsg.sources.push(...data.sources)
+      if (Array.isArray(data.sources) && data.sources.length) {
+        // 只接受来源对象；旧版子代理事件发过编号数组，不能让整数污染列表
+        const items = data.sources.filter(
+          (src) => src && typeof src === 'object' && !Array.isArray(src),
+        )
+        if (items.length) streamMsg.sources.push(...items)
       }
       scrollToBottom()
     },
@@ -183,7 +187,12 @@ export function createStreamHandlers({ state, actions, live }) {
       pendingText.value += token
       startTypewriter()
     },
-    onDone: () => {
+    onDone: (data) => {
+      // done 携带 finalize 去重后的完整来源，作为权威结果覆盖增量拼接：
+      // 子代理事件曾把编号数组当来源对象推送，且主/子代理来源可能重复或乱序。
+      if (Array.isArray(data?.sources)) {
+        streamMsg.sources = data.sources
+      }
       closeThinkingSegment()
       currentTool.value = ''
       flushTypewriter()

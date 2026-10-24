@@ -193,7 +193,7 @@ export function useSkillsAdmin() {
   async function hideSkill(s) {
     try {
       await ElMessageBox.confirm(
-        `确定从本助手移除技能「${s.name}」吗？\n这只影响本助手（skill_lookup 不再使用它），不会修改其他 Agent 的技能文件。`,
+        `确定从本助手移除技能「${s.name}」吗？\n这只影响本助手（技能索引与 skill_view 不再包含它），不会修改其他 Agent 的技能文件。`,
         '提示',
         { type: 'info', confirmButtonText: '移除', cancelButtonText: '取消' },
       )

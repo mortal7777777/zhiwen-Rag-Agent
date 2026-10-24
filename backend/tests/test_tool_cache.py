@@ -18,7 +18,7 @@ _NON_CACHEABLE = {
 
 def test_cacheable_tools_classification():
     # 纯查询类应全部在缓存集合内
-    for name in ("knowledge_base_search", "web_search", "list_dir", "read_file", "grep_search", "skill_lookup"):
+    for name in ("knowledge_base_search", "web_search", "list_dir", "read_file", "grep_search", "skill_view"):
         assert name in _CACHEABLE_TOOLS, f"{name} 应可缓存"
     # 副作用类绝不在缓存集合内
     for name in _NON_CACHEABLE:
@@ -34,6 +34,17 @@ def test_cache_key_deterministic_and_order_independent():
     assert k1 != _tool_cache_key("knowledge_base_search", {"query": "文艺座谈会"})
     # 不同工具同名参数 → 不同键
     assert k1 != _tool_cache_key("web_search", {"query": "春桥文录", "top_k": 3})
+
+
+def test_slim_tool_result_can_preserve_skill_content():
+    """skill_view 的全文不能被 2500 字通用瘦身截断（否则后续轮次拿不到步骤）。"""
+    from app.agent.utils import _slim_tool_result
+
+    content = "步骤" * 5000
+    kept = _slim_tool_result({"content": content}, content_limit=None)
+    assert kept["content"] == content
+    slimmed = _slim_tool_result({"content": content})
+    assert len(slimmed["content"]) < len(content)
 
 
 def test_cache_key_none_args_and_unserializable():

@@ -185,7 +185,7 @@ _CACHEABLE_TOOLS = frozenset(
         "list_dir",
         "read_file",
         "grep_search",
-        "skill_lookup",
+        "skill_view",
     }
 )
 
@@ -274,12 +274,15 @@ def _strip_xml_tool_tags(text: str) -> str:
     return cleaned
 
 
-def _slim_tool_result(result: dict, content_limit: int = 2500) -> dict:
+def _slim_tool_result(result: dict, content_limit: int | None = 2500) -> dict:
     """工具结果进历史前瘦身：大 content 字段保留首尾、中间省略。
 
     借鉴 Hermes 的 proactive_prune 思路：模型在本轮已看过完整输出，
     历史里只需要 summary + 关键片段供下一轮决策；小输出原样保留，
     不破坏 provider 已建立的缓存前缀。返回新 dict，不改原 result。
+
+    content_limit=None 表示不截断字符串内容（技能全文必须完整留在历史里，
+    否则后续轮次拿不到步骤，skill_view 的改造就失去意义）。
     """
 
     if not isinstance(result, dict):
@@ -287,7 +290,11 @@ def _slim_tool_result(result: dict, content_limit: int = 2500) -> dict:
     slim = dict(result)
     for key in ("content", "output", "entries", "matches"):
         val = slim.get(key)
-        if isinstance(val, str) and len(val) > content_limit:
+        if (
+            content_limit is not None
+            and isinstance(val, str)
+            and len(val) > content_limit
+        ):
             head = val[: int(content_limit * 0.6)]
             tail = val[-int(content_limit * 0.3) :]
             slim[key] = (
@@ -371,6 +378,24 @@ def _tools_prefix_size(tools) -> int:
     且防止日后无意识膨胀。
     """
     return len("\n".join(_tool_definition_parts(tools)))
+
+
+def _tools_breakdown(tools) -> dict:
+    """工具面分项统计：MCP 工具（mcp_ 前缀）与核心工具分开计价。
+
+    生产环境 MCP 往往是工具面的主要来源（实测 104 个 MCP 工具约 10 万
+    字符），只看 tools_chars 难以定位；分项能直接指出是谁把体积撑大。
+    """
+    mcp = [t for t in tools if str(getattr(t, "name", "")).startswith("mcp_")]
+    core = [t for t in tools if not str(getattr(t, "name", "")).startswith("mcp_")]
+    return {
+        "count": len(tools),
+        "chars": _tools_prefix_size(tools),
+        "core_count": len(core),
+        "core_chars": _tools_prefix_size(core),
+        "mcp_count": len(mcp),
+        "mcp_chars": _tools_prefix_size(mcp),
+    }
 
 
 def _window_has_same(rows: list[dict], content: str, role: str = "system") -> bool:

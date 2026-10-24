@@ -14,14 +14,16 @@
 
 from __future__ import annotations
 
+from ...prompt_safety import UNTRUSTED_NOTE
+
 # ---------------- agent 节点 ----------------
 
 #: 预算将尽（还剩最后一次工具调用，且有计划步骤）
+#: 动作无关：剩余工作可能是写文件/执行命令，不能假定应去检索。
 LAST_CALL_WARNING = (
-    "你只剩最后一次工具调用机会。若信息仍不完整，"
-    "请利用这次机会做一次补充检索（优先 knowledge_base_search"
-    " 或 web_search）；之后必须给出最终回答。"
-    "若仍不足，明确告诉用户缺少什么，不要编造。"
+    "你只剩最后一次工具调用机会。仅在仍缺少完成任务所必需的关键信息时，"
+    "用这次机会补充检索或执行最关键的一步；否则直接给出最终回答。"
+    "若信息仍不足，明确告诉用户缺少什么，不要编造。"
 )
 
 #: XML 工具调用标记解析失败的有界重试提示
@@ -102,6 +104,7 @@ def plan_remaining_notice(remaining: list) -> str:
 def plan_confirmed_notice(steps: list) -> str:
     return (
         f"用户已确认执行计划（共 {len(steps)} 步），已退出计划模式并播种任务清单，"
+        "系统提示中的计划模式（只读）限制自本条起解除，"
         "请立即按顺序开始执行（不要重新规划）：\n"
         + "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
         + "\n每完成一步立即用 todo_update complete 标记；"
@@ -110,7 +113,11 @@ def plan_confirmed_notice(steps: list) -> str:
 
 
 def hook_context_notice(contexts: list) -> str:
-    return "PostToolUse hook 附加信息：\n" + "\n".join(contexts)
+    return (
+        "PostToolUse hook 附加信息：\n"
+        + "\n".join(contexts)
+        + f"\n\n{UNTRUSTED_NOTE}"
+    )
 
 
 def tool_failure_notice(name: str, error: str) -> str:

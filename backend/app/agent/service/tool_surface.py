@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import logging
+import os
+
 from sqlalchemy.orm import Session
 from ...runtime_config import effective, effective_or
 
@@ -60,6 +62,7 @@ class ToolSurfaceMixin:
             skill_enabled_ids=skill_enabled_ids,
             searxng_base_url=effective(settings, "searxng_base_url") or "",
             searxng_engines=effective(settings, "searxng_engines") or "",
+            conv_id=conv_id,
         )
         # 扩展工具：MCP + 受控执行（文件/命令，敏感操作走人工确认）
         tools.extend(self.mcp_tools(db))
@@ -98,6 +101,12 @@ class ToolSurfaceMixin:
                 tools.append(make_exit_plan_mode_tool())
             except Exception as exc:
                 logger.warning("计划模式工具加载失败：%s", exc)
+        # 基准实例：只暴露指定工具（避免 todo/文件/派发等工具干扰 τ²/CRAG 评测）。
+        # 未设置环境变量时行为与原来完全一致。
+        allow = os.environ.get("ZHIWEN_BENCH_TOOL_ALLOWLIST", "").strip()
+        if allow:
+            names = {n.strip() for n in allow.split(",") if n.strip()}
+            tools = [t for t in tools if getattr(t, "name", "") in names]
         return tools
 
     def extra_tools(

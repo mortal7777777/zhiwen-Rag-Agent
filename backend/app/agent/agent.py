@@ -331,7 +331,7 @@ class AgentService:
             )
             title = message_text(response.content).strip().strip('"“”')
             if title:
-                return title[:30]
+                return title[:20]
         except Exception as exc:
             logger.warning("生成会话标题失败：%s", exc)
         return question.strip()[:20]

@@ -52,6 +52,7 @@ class QueryExpander:
         self._use_multi_turn = use_multi_turn
         # 简单内存缓存：相同问题（含近一轮历史）的扩展结果直接复用
         self._cache: dict[str, tuple[float, list[str]]] = {}
+        self._book_cache: dict[str, tuple[float, dict[str, list[str]]]] = {}
         self._cache_ttl = 600.0
 
     def expand(
@@ -125,6 +126,45 @@ class QueryExpander:
         if len(self._cache) > 128:
             self._cache.clear()
         return result
+
+    def expand_with_books(
+        self,
+        question: str,
+        history: list[dict] | None,
+        titles: list[str],
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        """全局扩展 + 每本书的 1-2 条书内查询。
+
+        书内查询用一次 LLM 调用批量生成；失败时 by_book 为空，调用方
+        退回 P0 的“原问题+全局扩展”书内检索。
+        """
+        queries = self.expand(question, history)
+        titles = [str(t).strip() for t in (titles or []) if str(t).strip()]
+        if not titles:
+            return queries, {}
+        cache_key = self._cache_key(question, history) + "|" + "|".join(titles)
+        hit = self._book_cache.get(cache_key)
+        if hit and time.time() - hit[0] < self._cache_ttl:
+            return queries, {k: list(v) for k, v in hit[1].items()}
+        try:
+            raw = self._chat.per_book_queries(question, titles, history)
+        except Exception:
+            raw = {}
+        by_book: dict[str, list[str]] = {}
+        for title in titles:
+            seen: set[str] = set()
+            cleaned: list[str] = []
+            for query in raw.get(title) or []:
+                query = str(query).strip()
+                if query and query not in seen:
+                    seen.add(query)
+                    cleaned.append(query)
+            if cleaned:
+                by_book[title] = cleaned[:2]
+        self._book_cache[cache_key] = (time.time(), by_book)
+        if len(self._book_cache) > 128:
+            self._book_cache.clear()
+        return queries, {k: list(v) for k, v in by_book.items()}
 
     @staticmethod
     def _cache_key(question: str, history: list[dict] | None) -> str:

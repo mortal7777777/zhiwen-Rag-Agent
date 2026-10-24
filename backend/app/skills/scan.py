@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 from pathlib import Path
@@ -31,17 +32,33 @@ HERMES_SKILLS_DIR = Path(os.path.expanduser("~/.hermes/skills"))
 AGENT_SOURCE = "agent"
 
 
+def _version_sort_key(path: str) -> tuple:
+    """按数字版本排序（2.10.0 > 2.2.3），非数字版本（unknown）用 mtime 兜底。
+
+    不能用字符串排序：`2.2.3` > `2.10.0`，升级后反而会扫到旧版缓存。
+    """
+    version = Path(path).parent.name
+    numbers = tuple(int(part) for part in re.findall(r"\d+", version))
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+    return numbers, mtime
+
+
 def _expand_plugin_skill_root(rel_glob: str) -> str | None:
     """把 ~/.claude/plugins/cache/<glob> 展开为实际存在的技能根目录。
 
-    插件缓存路径含版本号（如 ecc/ecc/2.0.0-rc.1），版本升级会变，
-    返回 None 表示未找到（扫描时跳过）。
+    插件缓存路径含版本号（如 ecc/ecc/2.0.0-rc.1），版本升级会变；
+    按数字版本取最新，返回 None 表示未找到（扫描时跳过）。
     """
     import glob
 
     base = os.path.expanduser("~/.claude/plugins/cache")
-    matches = sorted(glob.glob(os.path.join(base, rel_glob)))
-    return matches[-1] if matches else None
+    matches = glob.glob(os.path.join(base, rel_glob))
+    if not matches:
+        return None
+    return max(matches, key=_version_sort_key)
 
 
 DEFAULT_ROOTS = [
@@ -241,8 +258,59 @@ def _iter_skill_dirs(root: Path, layout: str):
                     yield skill_dir, cat.name
 
 
+def _parse_list_field(value: str) -> list[str]:
+    """解析 frontmatter 里的内联列表（[a, b] 或 a, b）。"""
+    raw = (value or "").strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1]
+    return [p.strip().strip("\"'") for p in raw.split(",") if p.strip()]
+
+
+# 平台门控只影响"是否进入模型索引"，不影响扫描结果（设置页仍能看到被过滤原因）
+_PLATFORM_ALIASES = {
+    "win32": {"windows", "win", "win32"},
+    "darwin": {"darwin", "macos", "mac", "osx"},
+    "linux": {"linux"},
+}
+
+
+def current_platform() -> str:
+    return sys.platform
+
+
+def platform_supported(platforms: list[str] | None) -> bool:
+    if not platforms:
+        return True
+    normalized = {str(p).strip().lower() for p in platforms if str(p).strip()}
+    aliases = _PLATFORM_ALIASES.get(sys.platform, {sys.platform})
+    return bool(normalized & (aliases | {sys.platform}))
+
+
+_LINKED_DIRS = ("references", "templates", "scripts", "assets")
+
+
+def _scan_linked_files(skill_dir: Path) -> dict[str, list[str]]:
+    """列出技能附件（相对技能目录的 POSIX 路径），供 skill_view 按需读取。"""
+    out: dict[str, list[str]] = {}
+    for sub in _LINKED_DIRS:
+        base = skill_dir / sub
+        files: list[str] = []
+        if base.is_dir():
+            for path in sorted(base.rglob("*")):
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(skill_dir)
+                if any(part.startswith(".") for part in rel.parts):
+                    continue
+                files.append(rel.as_posix())
+                if len(files) >= 100:
+                    break
+        out[sub] = files
+    return out
+
+
 def _parse_frontmatter(text: str) -> tuple[str, str, list[str], dict]:
-    """解析 SKILL.md 的 name/description/tags + 扩展字段（origin/created_at）。"""
+    """解析 SKILL.md 的 name/description/tags + 扩展字段。"""
     name = ""
     description = ""
     tags: list[str] = []
@@ -260,7 +328,13 @@ def _parse_frontmatter(text: str) -> tuple[str, str, list[str], dict]:
                         name = value
                     elif key in ("description", "desc") and not description:
                         description = value
-                    elif key in ("origin", "created_at") and value:
+                    elif key in (
+                        "origin",
+                        "created_at",
+                        "when_to_use",
+                        "when_not_to_use",
+                        "platforms",
+                    ) and value:
                         extra[key] = value
             tag_match = re.search(r"tags:\s*\[([^\]]*)\]", block)
             if tag_match:
@@ -313,9 +387,10 @@ def scan_skills(force: bool = False) -> list[dict]:
                 if not skill_md.exists():
                     continue
                 try:
-                    text = skill_md.read_text(encoding="utf-8", errors="ignore")[:4000]
+                    text = skill_md.read_text(encoding="utf-8", errors="ignore")
                     name, description, tags, extra = _parse_frontmatter(text)
                     name = name or skill_dir.name
+                    platforms = _parse_list_field(extra.get("platforms", ""))
                     item = {
                         "name": name,
                         "dir_name": skill_dir.name,
@@ -324,7 +399,14 @@ def scan_skills(force: bool = False) -> list[dict]:
                         "category": category or source,
                         "group": "",
                         "path": str(skill_md),
+                        "dir_path": str(skill_dir),
                         "excerpt": text[:1500],
+                        "content_chars": len(text),
+                        "when_to_use": extra.get("when_to_use", ""),
+                        "when_not_to_use": extra.get("when_not_to_use", ""),
+                        "platforms": platforms,
+                        "platform_ok": platform_supported(platforms),
+                        "linked_files": _scan_linked_files(skill_dir),
                         "tags": tags,
                         "origin": extra.get("origin", ""),
                         "created_at": extra.get("created_at", ""),

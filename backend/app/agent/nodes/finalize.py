@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from ...config import Settings
 from ...db import repository as repo
-from ...runtime_config import effective
+from ...runtime_config import chat_provider_config, effective
 
 logger = logging.getLogger(__name__)
 from ..state import AgentState, EventBus
@@ -224,6 +224,11 @@ def _finalize_node(state: AgentState, runtime) -> dict:
                 if rt.get("error")
                 else "ok"
             )
+            # 记录本次运行实际使用的模型：用量面板按模型/峰谷价估算成本
+            try:
+                chat_model = (chat_provider_config(settings) or {}).get("model")
+            except Exception:
+                chat_model = None
             run = repo.create_agent_run(
                 db,
                 conversation_id=conv_id,
@@ -236,6 +241,7 @@ def _finalize_node(state: AgentState, runtime) -> dict:
                 error=rt.get("error"),
                 token_usage={
                     **usage_summary_with_aux(),
+                    "model": chat_model,
                     "last_call": rt.get("token_usage"),
                     # 逐调用遥测：input/output/cache_read，定位轮内断链
                     "calls": rt.get("calls") or [],
@@ -247,6 +253,14 @@ def _finalize_node(state: AgentState, runtime) -> dict:
                     # 工具面体积（字符数）：每次调用都在输入里（缓存命中时也计费），
                     # 用于验收"工具瘦身"并防止无意识膨胀
                     "tools_chars": rt.get("tools_chars"),
+                    # 工具面分项（core vs MCP）：定位体积来源，防止 MCP 静默膨胀
+                    "tools_breakdown": rt.get("tools_breakdown"),
+                    # 技能索引统计（可见数/names-only/字符数/签名）：验证不再静默截断
+                    "skills_index": rt.get("skills_index"),
+                    # 子代理 LLM 调用数（并行分支共享预算）：与父级 token 用量分开看
+                    "subagent_llm_calls": int(
+                        getattr(deps, "subagent_llm_calls", 0) or 0
+                    ),
                     # 轮内纠偏补丁触发次数（P1-3）：按数据淘汰补丁，而不是只增不减
                     "patches": dict(rt.get("patches") or {}),
                     # 消息链指纹（缓存前缀监测）：下一轮与本轮做前缀比对，
@@ -274,6 +288,9 @@ def _finalize_node(state: AgentState, runtime) -> dict:
                     "todos": state.get("todos") or [],
                     "plan_done_count": state.get("plan_done_count", 0),
                     "subagents": int(state.get("subagent_round_count") or 0),
+                    "subagent_llm_calls": int(
+                        getattr(deps, "subagent_llm_calls", 0) or 0
+                    ),
                     "usage": usage_summary(),
                     "calls": rt.get("calls") or [],
                     "timings": dict(rt.get("timings") or {}),
@@ -282,28 +299,6 @@ def _finalize_node(state: AgentState, runtime) -> dict:
         except Exception as exc:
             db.rollback()
             logger.warning("写入 Agent 运行记录失败：%s", exc)
-
-    # 长任务轨迹压缩（P1）：工具调用 >= 3 次时生成过程摘要，下次提问注入
-    if (
-        settings.trajectory_compress_enabled
-        and db is not None
-        and conv_id is not None
-        and len(tool_trace) >= 3
-    ):
-        try:
-            from ...trajectory import compress_trajectory
-
-            compress_trajectory(
-                service.context._invoke,
-                db,
-                conv_id,
-                state["question"],
-                state.get("plan_steps") or [],
-                tool_trace,
-            )
-        except Exception as exc:
-            db.rollback()
-            logger.warning("轨迹压缩失败：%s", exc)
 
     # 原生检查点裁剪：每线程只留最近 N 条快照
     # （每 superstep 一条含完整 messages 的快照，长会话会让 checkpoints.sqlite 单调增长；
@@ -338,6 +333,30 @@ def _finalize_node(state: AgentState, runtime) -> dict:
             "tool_trace": tool_trace,
         },
     )
+
+    # 长任务轨迹压缩（P1）：工具调用 >= 3 次时生成过程摘要，下次提问注入。
+    # 放在 done **之后**：它是一次 LLM 调用，不能挡住用户看到"回答结束"
+    # （与 run.py 的长期记忆提取同理，属于收尾后的后台工作）。
+    if (
+        settings.trajectory_compress_enabled
+        and db is not None
+        and conv_id is not None
+        and len(tool_trace) >= 3
+    ):
+        try:
+            from ...trajectory import compress_trajectory
+
+            compress_trajectory(
+                service.context._invoke,
+                db,
+                conv_id,
+                state["question"],
+                state.get("plan_steps") or [],
+                tool_trace,
+            )
+        except Exception as exc:
+            db.rollback()
+            logger.warning("轨迹压缩失败：%s", exc)
     return {}
 
 

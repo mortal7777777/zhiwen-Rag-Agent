@@ -30,28 +30,30 @@ REWRITE_TEMPLATE = """你是一个检索查询改写助手。用户会给出一�
 请把它改写成 {n} 个适合向量检索和关键词检索的独立查询，要求：
 1. 保留原意，把"它""这篇""那篇文章"等指代补全成具体篇名/概念；
 2. 每个查询从不同角度表达：原意复述、具体篇名/术语、同义或补充说法；
-3. 如果问题暗指某句名言或著名论断（例如"枪杆子里面出政权""实事求是""星星之火可以燎原"），
-   必须把这句话原样写进至少一个查询；
-4. 只输出 JSON 数组，数组元素是字符串，不要任何多余解释。
-
-用户问题：{question}
+3. 如果问题指向某句名言或著名论断，保留该表述原样写进至少一个查询；
+4. 保持原语言；每条查询不超过 40 字；不得引入问题中没有的新事实；
+5. 只输出 JSON 数组，数组元素是字符串，不要任何多余解释。
 """
 
-MULTI_TURN_TEMPLATE = """根据对话历史，把用户的最新问题改写成一条不依赖上下文的独立问题。
+MULTI_TURN_TEMPLATE = """根据对话历史，把用户最新问题改写成一条不依赖上下文的独立问题。
 要求：
 1. 把"它""这篇""那篇文章""刚才说的"等指代补全成具体内容；
-2. 只输出改写后的问题本身，不要解释、不要引号、不要前缀。
-
-用户最新问题：{question}
+2. 保持原语言；不得引入对话中没有的新事实；
+3. 只输出改写后的问题本身，不要解释、不要引号、不要前缀。
 """
 
 HYDE_TEMPLATE = """请针对用户的问题，写一段 100~200 字的假设性知识库文档片段。
 要求：
 1. 内容应与用户知识库中真实文档的风格一致，直接陈述可能回答该问题的内容；
 2. 包含可能出现的专有名词、篇名、术语和关键表述；
-3. 只输出文档片段本身，不要解释、不要引号。
+3. 不要编造具体引用、页码或来源，只写可能的表述；
+4. 只输出文档片段本身，不要解释、不要引号。
+"""
 
-用户问题：{question}
+PER_BOOK_TEMPLATE = """用户问题点名了若干本书。请为每本书生成两段面向“书内检索”的文本：
+1. query：一条贴近用户问法的短查询；
+2. hyde：一段 80~150 字的假设性原文片段（HyDE），用该书可能出现的原词、术语和句式，直接陈述可能回答问题的内容；
+3. 只输出 JSON 数组，元素为 {"book": "书名", "query": "查询", "hyde": "假设原文"}，不要解释。
 """
 
 
@@ -130,7 +132,7 @@ class DeepSeekChat:
         例如"那篇关于某主题的文章讲了啥？" -> ["《具体篇名》的主要内容是什么？", ...]
         """
         messages = self._build_messages(
-            REWRITE_TEMPLATE.format(n=n, question=question),
+            REWRITE_TEMPLATE.format(n=n),
             question,
             history,
         )
@@ -157,7 +159,7 @@ class DeepSeekChat:
         if not history:
             return question
         messages = self._build_messages(
-            MULTI_TURN_TEMPLATE.format(question=question),
+            MULTI_TURN_TEMPLATE,
             question,
             history,
         )
@@ -181,7 +183,7 @@ class DeepSeekChat:
         从而缓解"问题表述"与"文档表述"不一致的问题。
         """
         messages = self._build_messages(
-            HYDE_TEMPLATE.format(question=question),
+            HYDE_TEMPLATE,
             question,
             history,
         )
@@ -193,13 +195,81 @@ class DeepSeekChat:
         except Exception:
             return question
 
+    def per_book_queries(
+        self,
+        question: str,
+        titles: list[str],
+        history: list[dict] | None = None,
+    ) -> dict[str, list[str]]:
+        """为每个点名书生成 1-2 条书内检索查询（一次 LLM 调用）。
+
+        P1：全局 rewrite/HyDE 不知道“哪本书”，抽象问题（如“信念如何塑造
+        经验”）容易与书内原句（“你透过你的信念形成实相”）错位。这里按书
+        生成查询，供 S3′ 的 book_scoped_children 使用；失败返回空 dict，
+        调用方自动退回全局扩展查询。
+        """
+        titles = [str(t).strip() for t in titles if str(t).strip()]
+        if not titles:
+            return {}
+        messages = self._build_messages(
+            PER_BOOK_TEMPLATE,
+            question,
+            history,
+            user_prefix=f"用户问题点名的书：{'、'.join(titles)}\n\n",
+        )
+        try:
+            content = message_text(
+                self._rewrite_llm.invoke(messages, config=self._config()).content
+            )
+            items = self._parse_book_queries(content)
+        except Exception:
+            return {}
+        result: dict[str, list[str]] = {}
+        for idx, item in enumerate(items):
+            book = str(item.get("book") or "").strip()
+            matched = next(
+                (
+                    t for t in titles
+                    if book == t or (book and (book in t or t in book))
+                ),
+                None,
+            )
+            if matched is None and len(items) == len(titles):
+                matched = titles[idx]
+            if matched is None:
+                continue
+            bucket = result.setdefault(matched, [])
+            for key in ("query", "hyde"):
+                text = str(item.get(key) or "").strip()
+                if text and text not in bucket and len(bucket) < 2:
+                    bucket.append(text)
+        return result
+
+    @staticmethod
+    def _parse_book_queries(content: str) -> list[dict]:
+        match = re.search(r"\[.*\]", content or "", re.DOTALL)
+        if not match:
+            return []
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
+
     def _build_messages(
         self,
         system_content: str,
         question: str,
         history: list[dict] | None,
+        user_prefix: str = "",
     ) -> list:
-        """组装 system + history + 当前问题的消息列表。"""
+        """组装 system + history + 当前问题的消息列表。
+
+        用户问题只出现在最后一条 HumanMessage（不要在 system 模板里重复），
+        避免把用户输入抬到系统指令的优先级，也少一份 token。
+        """
         messages = [SystemMessage(content=system_content)]
         for item in history or []:
             content = item.get("content", "")
@@ -207,7 +277,7 @@ class DeepSeekChat:
                 messages.append(HumanMessage(content=content))
             elif item.get("role") == "assistant":
                 messages.append(AIMessage(content=content))
-        messages.append(HumanMessage(content=question))
+        messages.append(HumanMessage(content=f"{user_prefix}{question}" if user_prefix else question))
         return messages
 
     @staticmethod

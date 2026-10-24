@@ -101,6 +101,23 @@ def test_tool_surface_stays_within_char_budget(monkeypatch):
     )
 
 
+def test_tools_breakdown_splits_mcp():
+    from types import SimpleNamespace
+
+    from app.agent.utils import _tools_breakdown
+
+    tools = [
+        SimpleNamespace(name="core_tool", description="c", args_schema=None),
+        SimpleNamespace(name="mcp_remote", description="m", args_schema=None),
+    ]
+    breakdown = _tools_breakdown(tools)
+    assert breakdown["count"] == 2
+    assert breakdown["core_count"] == 1
+    assert breakdown["mcp_count"] == 1
+    assert breakdown["mcp_chars"] > 0
+    assert breakdown["chars"] >= breakdown["core_chars"] + breakdown["mcp_chars"]
+
+
 def test_tool_descriptions_have_no_duplicated_boilerplate(monkeypatch):
     """描述里的"引用编号"约定应在系统提示里讲一次，而不是每个工具重复一遍。"""
     tools = _build(_service(monkeypatch))

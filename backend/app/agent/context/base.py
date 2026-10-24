@@ -144,17 +144,38 @@ class ContextServiceBase:
         return self._clamp_to_context_window(budget)
 
 
-    def _clamp_to_context_window(self, budget: int) -> int:
-        """把历史预算夹到模型窗口之内（窗口 − 静态区/工具/D 块/输出的预留）。"""
+    def context_ceiling(self) -> int:
+        """模型窗口扣除输出/静态区/工具/D 块预留后的历史可用上限。
+
+        返回 0 表示未配置/无法推断窗口（测试与旧配置），调用方应保守地
+        退回到"不做窗口钳制"的行为。
+        """
         window = context_window_for(self.settings)
         if window <= 0:
-            return budget
+            return 0
         reserve = int(getattr(self.settings, "context_window_reserve", 0) or 0)
-        ceiling = max(8000, window - reserve)
+        return max(8000, window - reserve)
+
+    def token_high_water(self, budget: int) -> int:
+        """token 高水位：预算的 1.25×，但**不得超过模型窗口可用上限**。
+
+        预算可能已被 `_clamp_to_context_window` 夹紧（如 coding 400K 在
+        128K 窗口下变成 64K）。若仍按夹紧后的 1.25× 计算，触发线会超过
+        窗口——压缩还没机会执行就先撞上下文长度错误（2026-10-23 修）。
+        """
+        trigger = int(budget * 1.25)
+        ceiling = self.context_ceiling()
+        return min(trigger, ceiling) if ceiling > 0 else trigger
+
+    def _clamp_to_context_window(self, budget: int) -> int:
+        """把历史预算夹到模型窗口之内（窗口 − 静态区/工具/D 块/输出的预留）。"""
+        ceiling = self.context_ceiling()
+        if ceiling <= 0:
+            return budget
         if budget > ceiling:
             logger.info(
-                "历史预算 %d 超过模型窗口可用量 %d（窗口 %d − 预留 %d），已夹紧",
-                budget, ceiling, window, reserve,
+                "历史预算 %d 超过模型窗口可用量 %d，已夹紧",
+                budget, ceiling,
             )
             return ceiling
         return budget

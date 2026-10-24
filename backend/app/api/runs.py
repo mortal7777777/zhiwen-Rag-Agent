@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
@@ -13,11 +14,73 @@ from ..config import get_settings
 from ..db import get_db
 from ..db import repository as repo
 from ..db.models import AgentRun
+from ..runtime_config import chat_provider_config
 
 router = APIRouter(tags=["runs"])
 
-# 估算成本（元/百万 token，deepseek-chat 量级；仅用于仪表盘参考，非账单）
-COST_PER_MTOKENS = {"input_miss": 2.0, "input_hit": 0.5, "output": 8.0}
+# 供应商单价：USD / 百万 token，元组为 (input_miss, input_hit, output)。
+# 来源：OpenCode Go 官方价目（DeepSeek V4.1 Flash / V4 Flash / V4 Pro 峰谷价）。
+# 仅用于仪表盘估算，不是账单；未知模型走保守兜底。
+PRICING_USD_PER_MTOKENS: dict[str, dict[str, tuple[float, float, float]]] = {
+    "deepseek-v4.1-flash": {
+        "off_peak": (0.15, 0.003, 0.60),
+        "peak": (0.30, 0.006, 1.20),
+    },
+    "deepseek-v4-flash": {
+        "off_peak": (0.15, 0.003, 0.60),
+        "peak": (0.30, 0.006, 1.20),
+    },
+    "deepseek-v4-pro": {
+        "off_peak": (0.66, 0.022, 1.98),
+        "peak": (1.32, 0.044, 3.96),
+    },
+}
+# 未知型号兜底（DeepSeek V3 量级，USD）：宁可略高估，不低估
+DEFAULT_PRICING = {"off_peak": (0.27, 0.07, 1.10), "peak": (0.27, 0.07, 1.10)}
+
+_CN_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _normalize_model(model) -> str:
+    """模型名归一化：小写、去掉 [1m] 等窗口后缀。"""
+    return str(model or "").strip().lower().split("[", 1)[0]
+
+
+def _active_model() -> str:
+    """当前激活供应商的模型名（历史运行未记录 model 时的近似）。"""
+    try:
+        return _normalize_model(
+            (chat_provider_config(get_settings()) or {}).get("model")
+        )
+    except Exception:
+        return ""
+
+
+def _is_peak(dt: datetime | None) -> bool:
+    """OpenCode Go 峰时：UTC 周一至周五 01:00-04:00、06:00-10:00。
+
+    run.created_at 是本地时间（默认按 Asia/Shanghai 解释）。
+    """
+    if dt is None:
+        return False
+    try:
+        utc = dt.replace(tzinfo=_CN_TZ).astimezone(timezone.utc)
+    except Exception:
+        return False
+    if utc.weekday() >= 5:
+        return False
+    return 1 <= utc.hour < 4 or 6 <= utc.hour < 10
+
+
+def _pricing_for(model, dt: datetime | None) -> tuple[float, float, float]:
+    key = _normalize_model(model)
+    table = PRICING_USD_PER_MTOKENS.get(key)
+    if table is None:
+        table = PRICING_USD_PER_MTOKENS.get(_active_model())
+    if table is None:
+        table = DEFAULT_PRICING
+    return table["peak" if _is_peak(dt) else "off_peak"]
+
 
 
 @router.get("/runs/stats")
@@ -30,10 +93,11 @@ def runs_stats(
 
     时间范围：period=today|3d|7d|all（自然日语义：today=今日 00:00 起，
     3d/7d=含今天往前 N 天，all=全部）；period 为空时兼容旧 days 参数。
-    成本按 deepseek-chat 量级单价估算（命中/未命中/输出分开计价），
+    成本按每次运行记录的模型单价与峰谷时段估算，再按 USD→CNY 汇率换算，
     供观察趋势用，不是账单。
     """
     now = datetime.now()
+    rate = float(getattr(get_settings(), "usd_cny_rate", 7.2) or 7.2)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if period == "today":
         since = today_start
@@ -59,6 +123,7 @@ def runs_stats(
         "latency_ms": 0,
     }
     daily: dict[str, dict] = {}
+    total_cost = 0.0
     for row in rows:
         if row.status == "ok":
             total["ok_runs"] += 1
@@ -75,6 +140,15 @@ def runs_stats(
         total["cache_hit"] += hit
         total["cache_miss"] += miss
         total["latency_ms"] += row.latency_ms or 0
+        run_cost = _estimate_cost(
+            miss,
+            hit,
+            out,
+            usage.get("model"),
+            row.created_at,
+            rate,
+        )
+        total_cost += run_cost
         day = (row.created_at or datetime.now()).strftime("%m-%d")
         slot = daily.setdefault(
             day,
@@ -95,12 +169,9 @@ def runs_stats(
         slot["output_tokens"] += out
         slot["cache_hit"] += hit
         slot["cache_miss"] += miss
-        slot["cost"] += _estimate_cost(miss, hit, out)
+        slot["cost"] += run_cost
 
     hit_all = total["cache_hit"] + total["cache_miss"]
-    cost = _estimate_cost(
-        total["cache_miss"], total["cache_hit"], total["output_tokens"]
-    )
     return {
         "days": days,
         "period": period or ("all" if since is None else f"{days}d"),
@@ -108,19 +179,30 @@ def runs_stats(
         "avg_latency_ms": round(total["latency_ms"] / total["runs"]) if total["runs"] else 0,
         "ok_rate": round(total["ok_runs"] / total["runs"], 3) if total["runs"] else None,
         "cache_hit_rate": round(total["cache_hit"] / hit_all, 3) if hit_all else None,
-        "estimated_cost_yuan": round(cost, 3),
-        "cost_unit_note": "估算（deepseek-chat 量级单价，非账单）",
+        "estimated_cost_yuan": round(total_cost, 3),
+        "cost_unit_note": (
+            f"估算（按模型单价与峰谷时段，USD→CNY {rate:g}，非账单）"
+        ),
         "daily": [{"date": day, **stats} for day, stats in sorted(daily.items())],
     }
 
 
-def _estimate_cost(miss: float, hit: float, out: float) -> float:
-    """按 deepseek-chat 量级单价估算成本（元）。"""
-    return (
-        miss / 1_000_000 * COST_PER_MTOKENS["input_miss"]
-        + hit / 1_000_000 * COST_PER_MTOKENS["input_hit"]
-        + out / 1_000_000 * COST_PER_MTOKENS["output"]
+def _estimate_cost(
+    miss: float,
+    hit: float,
+    out: float,
+    model: str | None = None,
+    created_at: datetime | None = None,
+    usd_cny: float = 7.2,
+) -> float:
+    """按模型单价与峰谷时段估算成本（人民币元）。"""
+    input_miss, input_hit, output = _pricing_for(model, created_at)
+    usd = (
+        miss / 1_000_000 * input_miss
+        + hit / 1_000_000 * input_hit
+        + out / 1_000_000 * output
     )
+    return usd * usd_cny
 
 
 def _safe_json(raw) -> dict:

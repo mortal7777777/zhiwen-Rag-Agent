@@ -24,11 +24,14 @@ EXPECTED_EDITABLE_KEYS = {
     "web_search_provider", "web_search_max_results", "tavily_api_key",
     "searxng_base_url", "searxng_engines",
     # 技能与工具
-    "skills_enabled", "advanced_tools_enabled",
+    "skills_enabled", "skills_index_max_chars", "skills_full_view_max_chars",
+    "skills_view_dedup", "skills_usage_tracking", "skills_curator_stale_days",
+    "advanced_tools_enabled",
     "agent_task_max_iterations", "agent_task_max_failures",
     "agent_max_iterations", "agent_max_failures",
     "agent_max_dispatch_rounds", "agent_llm_stall_timeout_s",
     "task_mode_detect", "agent_subagents_enabled", "agent_subagent_max_rounds",
+    "agent_subagent_max_llm_calls",
     "plan_mode_allowed",
     # 检索与上下文 / 记忆
     "kb_chat_min_score", "crag_fallback_enabled", "crag_min_score",

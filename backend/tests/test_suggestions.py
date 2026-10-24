@@ -39,6 +39,13 @@ def _raising(message: str):
     return fn
 
 
+def test_clean_question_strips_format_and_rejects_long():
+    assert sug._clean_question('  "今天有什么新鲜事？"  ') == "今天有什么新鲜事？"
+    assert sug._clean_question("## **今天的新闻**") == "今天的新闻"
+    assert sug._clean_question("字" * 31) == ""
+    assert sug._clean_question("今天\n有什么新闻？") == "今天 有什么新闻？"
+
+
 # ---------------- 新闻：多级降级 ----------------
 
 def test_news_prefers_ddgs_and_skips_baidu(monkeypatch):

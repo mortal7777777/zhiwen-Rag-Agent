@@ -64,7 +64,7 @@ defineProps({
 function toolIcon(name) {
   if (name === 'web_search') return Position
   if (name === 'image_to_text') return Picture
-  if (name === 'skill_lookup') return Reading
+  if (name === 'skill_view') return Reading
   if (name && name.startsWith('mcp_')) return Connection
   return Collection
 }

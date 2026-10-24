@@ -26,16 +26,24 @@ from ..llm import DeepSeekChat
 from ..query_expander import QueryExpander
 from ..reranker import LocalReranker
 from ..retriever import (
+    BOOK_SCOPED_TOP_K,
+    BROAD_CONTEXT_BUDGET,
+    FRONT_MATTER_RERANK_PENALTY,
     TITLE_RERANK_BONUS,
     TOC_RERANK_PENALTY,
     book_scoped_children,
     ensure_parents,
     extract_titles,
+    group_book_paths,
     hybrid_search,
+    is_broad_question,
     is_enumeration_question,
+    is_front_matter_like,
+    is_meta_question,
     is_toc_like,
-    match_book_paths,
     merge_query_results,
+    merge_scoped_children,
+    select_contexts_with_book_quota,
     small_to_big,
     title_matches_source,
 )
@@ -70,18 +78,26 @@ class RetrieveMixin:
         use_expansion = (
             self.settings.query_expansion_enabled if rewrite is None else rewrite
         )
+        titles = extract_titles(question)
         queries = [question]
+        by_book: dict[str, list[str]] = {}
         if use_expansion:
             start = time.perf_counter()
             try:
-                queries = self.query_expander.expand(question, history)
+                queries, by_book = self.query_expander.expand_with_books(
+                    question, history, titles
+                )
             except Exception as exc:
                 logger.warning("查询扩展失败，退化为原问题：%s", exc)
                 queries = [question]
+                by_book = {}
             metrics.record("expansion", time.perf_counter() - start)
             logger.info("查询扩展（%d 条）：%s", len(queries), queries)
+            if by_book:
+                logger.info("书内查询：%s", by_book)
 
         start = time.perf_counter()
+        broad = is_broad_question(question)
         # S2 目录块降权：枚举类问题（哪些/哪几/列举）豁免——清单式篇目就是答案
         demote_toc = not is_enumeration_question(question)
         # 提速：扩展查询一次性批量编码（省 N-1 次模型调用）；编码全部成功时
@@ -115,7 +131,6 @@ class RetrieveMixin:
         else:
             per_query = [_search_one(p) for p in pairs]
         # S1 书名感知路由：问题里点名的书加权 + 保底（篇名匹配不到时自动退化）
-        titles = extract_titles(question)
         candidates = merge_query_results(
             per_query,
             limit=40,
@@ -124,23 +139,79 @@ class RetrieveMixin:
         )
         # S3′ 书内检索：点名书在来源过滤下再检一次，书内 top child 直接进池
         scoped_children: list[Document] = []
+        scoped_guarantees: list[Document] = []
+        scoped_guarantee_keys: set[str] = set()
         if titles:
             try:
                 rel_paths = [
                     f.relative_to(self.settings.data_dir).as_posix()
                     for f in list_data_files(self.settings.data_dir)
                 ]
-                # 多本书共享原问题向量（queries[0] 即原问题），免重复编码
-                original_vector = vectors[0] if vectors else None
-                for rel in match_book_paths(titles, rel_paths):
+                # S3′：按逻辑书分组，用原问题 + per-book 查询 + 全局扩展
+                # 分别做书内检索；每组按 parent 去重后取 top_k。per-book
+                # 查询用一次批量 LLM 调用生成，专门补“问题词 vs 原句词”的
+                # 错位（l2-kb-031/033/034、l1-kb-023 类）。
+                vector_by_query = {q: v for q, v in pairs}
+                for group in group_book_paths(titles, rel_paths):
+                    group_titles = {
+                        t
+                        for rel in group
+                        for t in titles
+                        if title_matches_source(t, rel)
+                    }
+                    book_queries = {
+                        query
+                        for title in group_titles
+                        for query in by_book.get(title, [])
+                    }
+                    query_list: list[str] = [question]
+                    for title in group_titles:
+                        for query in by_book.get(title, []):
+                            if query not in query_list:
+                                query_list.append(query)
+                    for query in queries[1:]:
+                        if query not in query_list:
+                            query_list.append(query)
+                    query_list = query_list[:6]
+                    per_query: list[list[Document]] = []
+                    for query in query_list:
+                        vector = vector_by_query.get(query)
+                        for rel in group:
+                            docs = book_scoped_children(
+                                self.store,
+                                self.embeddings,
+                                query,
+                                rel,
+                                top_k=BOOK_SCOPED_TOP_K,
+                                demote_toc=demote_toc,
+                                query_vector=vector,
+                            )
+                            per_query.append(docs)
+                            # per-book 查询的 top parent 保底：多个查询的
+                            # RRF 相加会让“序言块”（每条查询都命中）压过
+                            # 只在一条 per-book 查询里排第一的正文块。
+                            # 短查询和 HyDE 的 RRF 分数常打平，所以不能
+                            # 只取“最高分一个”，每条 per-book 查询都保底
+                            # （每本最多 2 条，总数最多 4 条）。
+                            if query in book_queries and docs:
+                                tops = small_to_big(
+                                    docs[:1], 1, demote_toc=demote_toc
+                                )
+                                for top in tops:
+                                    top_key = str(
+                                        top.metadata.get("parent_id")
+                                        or top.metadata.get("_id")
+                                        or (top.page_content or "")[:64]
+                                    )
+                                    if (
+                                        top_key not in scoped_guarantee_keys
+                                        and len(scoped_guarantees) < 4
+                                    ):
+                                        scoped_guarantee_keys.add(top_key)
+                                        scoped_guarantees.append(top)
                     scoped_children.extend(
-                        book_scoped_children(
-                            self.store,
-                            self.embeddings,
-                            question,
-                            rel,
-                            demote_toc=demote_toc,
-                            query_vector=original_vector,
+                        merge_scoped_children(
+                            per_query, top_k=BOOK_SCOPED_TOP_K
                         )
                     )
             except Exception as exc:
@@ -154,11 +225,12 @@ class RetrieveMixin:
                 boost_titles=titles,
                 demote_toc=demote_toc,
             )
-            # S6 查询级公平：多话题问题（≥2 个书名号）时，每个话题探针（扩展
-            # 查询）的 top parent 保底进池——避免单一话题篇章垄断精排名额
-            if len(titles) >= 2:
+            # S6 查询级公平：多话题或宽泛题（主要观点/异同/如何写成等）时，
+            # 每个扩展查询的 top parent 保底进池——避免单一篇章垄断精排名额；
+            # per-book 查询的 top parent 也必须保底（见 S3′）。
+            guaranteed: list[Document] = []
+            if len(titles) >= 2 or broad:
                 try:
-                    guaranteed: list[Document] = []
                     for one_query in per_query:
                         tops = small_to_big(
                             one_query, 1, demote_toc=demote_toc
@@ -168,14 +240,19 @@ class RetrieveMixin:
                             for t in tops
                             if not (demote_toc and is_toc_like(t.page_content))
                         )
-                    candidates = ensure_parents(
-                        candidates, guaranteed, self.settings.max_parents
-                    )
                 except Exception as exc:
                     logger.warning("query 级保底失败，跳过：%s", exc)
+            guaranteed.extend(scoped_guarantees)
+            if guaranteed:
+                candidates = ensure_parents(
+                    candidates, guaranteed, self.settings.max_parents
+                )
         ranked = self.reranker.rerank(question, candidates, top_k=len(candidates))
 
-        # S1 收尾 / S2 出口：点名书来源加精排分，目录块扣精排分（枚举题豁免），再截断
+        # S1 收尾 / S2 出口：点名书加分、目录块扣分；P2-lite 序言块在内容题
+        # 上轻降权（版本/作者/写作过程题豁免），再截断。
+        meta_question = is_meta_question(question)
+
         def _adjusted(doc: Document) -> float:
             src = str(doc.metadata.get("source") or "")
             bonus = (
@@ -188,9 +265,38 @@ class RetrieveMixin:
                 if demote_toc and is_toc_like(doc.page_content)
                 else 0.0
             )
-            return float(doc.metadata.get("rerank_score") or 0.0) + bonus - penalty
+            front_penalty = (
+                FRONT_MATTER_RERANK_PENALTY
+                if not meta_question and is_front_matter_like(doc.page_content)
+                else 0.0
+            )
+            return (
+                float(doc.metadata.get("rerank_score") or 0.0)
+                + bonus
+                - penalty
+                - front_penalty
+            )
 
         ranked.sort(key=_adjusted, reverse=True)
-        docs = ranked[: self.settings.rerank_top_k]
+        # per-book 查询的最高分 top parent 直接占最终名额：只进精排池还不够，
+        # 序言块仍可能把它挤出 top-k（l1-kb-023）。
+        if scoped_guarantees:
+            def _key(doc: Document) -> str:
+                return str(
+                    doc.metadata.get("parent_id")
+                    or doc.metadata.get("_id")
+                    or (doc.page_content or "")[:64]
+                )
+
+            forced_keys = {_key(doc) for doc in scoped_guarantees}
+            forced = [doc for doc in ranked if _key(doc) in forced_keys]
+            if forced:
+                ranked = forced + [
+                    doc for doc in ranked if _key(doc) not in forced_keys
+                ]
+        final_k = self.settings.rerank_top_k
+        if broad or len(titles) >= 2 or by_book:
+            final_k = max(final_k, BROAD_CONTEXT_BUDGET)
+        docs = select_contexts_with_book_quota(ranked, titles, final_k)
         metrics.record("retrieval", time.perf_counter() - start)
         return docs

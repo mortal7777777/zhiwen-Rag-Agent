@@ -85,6 +85,12 @@ services:
       SEARXNG_BASE_URL: http://searxng:8888
       DATA_DIR: /data
       META_DIR: /meta
+      # 上下文窗口建模（仅本地预算推断，不改发给 API 的请求）
+      # 0 = 按模型名自动推断（128K；带 [1m] 后缀为 1M）；1M 模型请在 .env 显式设置
+      MODEL_CONTEXT_WINDOW: ${MODEL_CONTEXT_WINDOW:-0}
+      CONTEXT_WINDOW_RESERVE: ${CONTEXT_WINDOW_RESERVE:-64000}
+      # 用量面板成本估算汇率
+      USD_CNY_RATE: ${USD_CNY_RATE:-7.2}
       # lite 模式：嵌入/重排走 OpenAI 兼容 API（如 SiliconFlow 免费档 bge-m3）
       EMBEDDING_PROVIDER: api
       EMBEDDING_API_BASE_URL: ${EMBEDDING_API_BASE_URL:-https://api.siliconflow.cn/v1}

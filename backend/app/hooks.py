@@ -113,15 +113,19 @@ def _run_one(
         }
 
 
-def run_hooks(
-    db,
+def run_hooks_from(
+    hooks: list[dict],
     event: str,
     tool_name: str,
     payload: dict,
 ) -> list[dict]:
-    """运行订阅了该事件的所有 hooks，返回结果列表。"""
+    """在**已快照**的 hook 列表上运行（不发 DB 查询）。
+
+    供子代理等并行分支使用：hooks 在主线程/节点入口读一次，分支内只读内存，
+    避免每个工具调用都开短会话读配置。
+    """
     results = []
-    for hook in load_hooks(db):
+    for hook in hooks or []:
         if event not in (hook.get("events") or []):
             continue
         result = _run_one(hook, event, tool_name, payload)
@@ -134,3 +138,13 @@ def run_hooks(
             result["decision"],
         )
     return results
+
+
+def run_hooks(
+    db,
+    event: str,
+    tool_name: str,
+    payload: dict,
+) -> list[dict]:
+    """运行订阅了该事件的所有 hooks，返回结果列表。"""
+    return run_hooks_from(load_hooks(db), event, tool_name, payload)

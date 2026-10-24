@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from app.api.agent import (
     agent_resume,
     agent_stream,
-    register_active_run,
+    try_register_active_run,
     unregister_active_run,
 )
 from app.schemas import (
@@ -229,7 +229,8 @@ def test_pending_endpoint_reports_interrupted():
 
 def test_stream_rejected_while_conversation_active():
     stop = threading.Event()
-    run_id = register_active_run(stop, conversation_id=42)
+    run_id = try_register_active_run(stop, conversation_id=42)
+    assert run_id is not None
     try:
         with pytest.raises(HTTPException) as exc:
             anyio.run(

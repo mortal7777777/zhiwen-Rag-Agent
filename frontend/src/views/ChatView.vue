@@ -1091,7 +1091,7 @@ function toolName(name) {
       todo_update: '任务清单',
       subagent: '子代理',
       add_document: '添加知识库文档',
-      skill_lookup: '查找技能',
+      skill_view: '查看技能',
       write_skill: '沉淀技能',
       dispatch_subtasks: '并行子任务',
       enter_plan_mode: '进入计划模式',
@@ -1585,13 +1585,18 @@ function handleMessageClick(event) {
   const msg = messages.value[index]
   if (!msg) return
   const no = Number(citeEl.dataset.cite)
-  if (!msg.sources || no < 1 || no > msg.sources.length) return
+  if (!Array.isArray(msg.sources) || msg.sources.length === 0 || no < 1) return
+
+  // 按来源自身的 index 定位（数组下标不一定等于引用编号）
+  let pos = msg.sources.findIndex((src) => Number(src?.index) === no)
+  if (pos < 0 && no <= msg.sources.length) pos = no - 1
+  if (pos < 0) return
 
   // 展开来源面板并高亮对应条目
   msg._sourcesOpen = true
   nextTick(() => {
     const items = msgEl.querySelectorAll('.source-item')
-    const target = items[no - 1]
+    const target = items[pos]
     if (!target) return
     target.scrollIntoView({ behavior: 'smooth', block: 'center' })
     target.classList.add('flash')
