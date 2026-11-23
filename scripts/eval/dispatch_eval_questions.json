@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "questions": [
+    {
+      "id": "simple-arithmetic",
+      "category": "simple-no-tools",
+      "question": "17 乘以 23 等于多少？只回答数字与一句验算。",
+      "expect": "给出 391，并简单说明 17×23=391；不需要任何工具或子代理。",
+      "roi": "inline"
+    },
+    {
+      "id": "single-file-lookup",
+      "category": "single-file",
+      "question": "查看 backend/app/agent/context_pack.py，说明它对外暴露的主要函数与常量，并给出文件路径。",
+      "expect": "指出 build_context_pack 与 MAX_CONTEXT_PACK_CHARS 等，路径正确；单文件任务。",
+      "roi": "inline"
+    },
+    {
+      "id": "directory-map",
+      "category": "explore-map",
+      "question": "查看 backend/app/agent/nodes 目录，列出每个 .py 文件的主要职责，并指出 subagent.py 的关键函数。",
+      "expect": "覆盖 7 个业务文件的职责，指出 subagent.py 的 dispatch/subagent/merge 等关键函数。",
+      "roi": "dispatch"
+    },
+    {
+      "id": "multi-file-compare",
+      "category": "multi-file-compare",
+      "question": "对比 backend/app/agent/agent_types.py 与 backend/app/agent/nodes/subagent.py 在子代理工具白名单上的职责分工，说明谁负责收窄、谁负责装配。",
+      "expect": "说明 agent_types 定义默认工具集与 resolve 收窄，subagent 负责构建工具并按 spec 过滤。",
+      "roi": "dispatch"
+    },
+    {
+      "id": "code-review-context-pack",
+      "category": "review",
+      "question": "审查 backend/app/agent/context_pack.py 的异常处理与资源限制，按严重度列出问题，给 path:line，不要给修复补丁。",
+      "expect": "指出探测失败是否吞异常、超时/大小限制是否覆盖、是否有未处理 OSError 等，带行号。",
+      "roi": "dispatch"
+    },
+    {
+      "id": "git-change-awareness",
+      "category": "review",
+      "question": "用 git status/diff 查看当前工作区与子代理相关的未提交改动，按模块总结改了什么（只读，不要提交）。",
+      "expect": "能借助 git 状态识别 agent_types/subagent/context_pack 等改动，不虚构未改动文件。",
+      "roi": "dispatch"
+    },
+    {
+      "id": "settings-field-audit",
+      "category": "multi-location",
+      "question": "检查设置页「子代理类型」面板（frontend/src/components/settings/ModelSettingsPane.vue）提交了哪些字段，并对照后端 PATCH /api/agent-types 的校验规则，列出两边不一致或缺口。",
+      "expect": "列出 model_provider_id/model/thinking/max_rounds/llm_budget，并指出提示词/工具未在 UI 编辑等缺口。",
+      "roi": "dispatch"
+    },
+    {
+      "id": "eval-scripts-inventory",
+      "category": "explore-map",
+      "question": "列出 scripts/eval 目录下的全部脚本及各自用途，并指出哪个脚本用于解析质量、哪个用于 Agent 端到端。",
+      "expect": "覆盖 evaluate_agent.py、eval_parse_retrieval.py、eval_ragas.py 等，用途对应正确。",
+      "roi": "dispatch"
+    },
+    {
+      "id": "dispatch-vs-inline-rule",
+      "category": "meta-no-tools",
+      "question": "根据当前系统提示词的派发规则，说明什么情况下应该同轮直接调用工具、什么情况下才用 dispatch_subtasks；给 2 个正例和 2 个反例。",
+      "expect": "说明简单并行查询同轮工具；只有分支需多轮循环/深读/独立验收才派发，并给出合理例子。",
+      "roi": "inline"
+    },
+    {
+      "id": "readonly-command-audit",
+      "category": "single-file",
+      "question": "在 backend/app/command_risk.py 中找到 safe_readonly_command 的白名单集合，说明它为什么拒绝复合命令与命令替换。",
+      "expect": "指出只读命令集合与拒绝管道/重定向/命令替换的安全理由，路径正确。",
+      "roi": "inline"
+    },
+    {
+      "id": "prompt-cache-constraint",
+      "category": "multi-file-compare",
+      "question": "结合 backend/app/agent/nodes/prompts.py 与 tests/test_prompt_compose_snapshot.py，说明为什么轮内提示词改动会让历史会话前缀缓存失效。",
+      "expect": "说明静态核心参与缓存键、快照锁字节、改一个字符即断缓存，引用文件路径。",
+      "roi": "dispatch"
+    },
+    {
+      "id": "context-pack-rules",
+      "category": "meta-no-tools",
+      "question": "不看代码，说明子代理上下文包应该包含哪些信息、总量上限是多少，以及为什么文件名要带修改时间。",
+      "expect": "提到工作目录/工具/清单/git/关键词/摘要与 3000 字符上限；时间戳用于识别历史遗留产物。",
+      "roi": "inline"
+    }
+  ]
+}

@@ -7,8 +7,8 @@ Rathi et al. 2026（arXiv 2609.38473）的 paired per-query 分析。
 
 用法（仓库根或任意目录）：
     # 快指标（确定性，无 LLM；先跑两臂再对比）
-    python backend/evaluate_retrieval.py --batch --no-expansion --out armA.json
-    python backend/evaluate_retrieval.py --batch --no-expansion --out armB.json
+    python scripts/eval/evaluate_retrieval.py --batch --no-expansion --out armA.json
+    python scripts/eval/evaluate_retrieval.py --batch --no-expansion --out armB.json
     python scripts/paired_compare.py fast --a armA.json --b armB.json
 
     # RAGAS：读 backend/ragas_baselines.json 的两个 tag
@@ -187,7 +187,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="配对显著性对比（逐题 Δ + bootstrap CI）")
     sub = parser.add_subparsers(dest="mode", required=True)
 
-    p_fast = sub.add_parser("fast", help="快指标（evaluate_retrieval.py --out 产出的 JSON）")
+    p_fast = sub.add_parser("fast", help="快指标（scripts/eval/evaluate_retrieval.py --out 产出的 JSON）")
     p_fast.add_argument("--a", required=True, help="基线臂结果 JSON")
     p_fast.add_argument("--b", required=True, help="实验臂结果 JSON")
 

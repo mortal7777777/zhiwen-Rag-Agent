@@ -411,6 +411,10 @@ npm run dev
 > Windows 一键启动：双击根目录 `start_all.bat`——自动检查/启动 MySQL、OpenSearch、
 > 后端、前端（含 Python / Node / 依赖的存在性预检，缺什么会先明确提示），
 > 就绪后打开浏览器；已在运行的组件自动跳过。
+>
+> **关闭启动窗口不会停止后端与 OpenSearch**（它们以隐藏进程常驻，前端在独立窗口）。
+> 停止全部服务用 `start_all.bat -Stop` 或 `stop_all.bat`；脚本会按端口杀进程树，
+> 并清理上次后端强杀后残留的 MCP 子进程（`-KeepMCP` 可跳过）。
 
 ## Docker 一键启动（推荐）
 
@@ -474,6 +478,10 @@ zhiwen --tool auto
 安装后在任何 cmd / PowerShell 里敲 `zhiwen` 即可启动（类似 `claude` 命令）；
 未安装时可用项目根的 `.\agent.ps1` 兜底。
 
+> `zhiwen` 依赖后端 API。启动时会先探测 `/api/health`：后端未启动会直接给出
+> `start_all.bat` / `backend\restart_backend.ps1` 指引并退出，不会先进 REPL
+> 再在第一次提问时报连接错误。
+
 终端内命令：`/new` 新会话、`/tools auto|knowledge|web|none` 切换模式、
 `/todos` 查看任务清单、`/status` 查看状态、`/init` 在当前目录创建 AGENTS.md、
 `/resume` 恢复本目录上次会话、`/cost` 查看本会话 tokens、`/memory` 查看
@@ -505,7 +513,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-当前 535 个用例覆盖：编排（声明式派发解析/路由/上限、merge 回填 ToolMessage、
+当前 900+ 个用例覆盖：编排（声明式派发解析/路由/上限、merge 回填 ToolMessage、
 计划模式进入与结构化提交、工具轮链序不变量）、健壮性（空正文重试、流式看门狗、
 tool_trace 截断、bash 后台进程不挂死）、供应商兼容（Anthropic 思考块回传）、
 任务清单（播种/同步/跨轮刷新/模糊完成/修订/进度）、文件工具安全边界与命令白名单、
@@ -522,21 +530,24 @@ CI（`.github/workflows/ci.yml`）：push / PR 自动跑全量 pytest（3.11 + 3
 （全新检出没有 `torch_wheels/`，构建不得依赖它）。
 钩子只做本地提前反馈（找不到解释器时告警放行），**CI 才是唯一权威**。
 
-另有三个守门脚本（CI 与 pre-commit 都跑，防止约定漂移）：
+另有四个守门脚本（CI 与 pre-commit 都跑，防止约定漂移）：
 `scripts/check_frontend_hex.py`（前端裸 hex 基线）、
 `scripts/check_effective_default.py`（配置读取不得忽略环境变量）、
+`scripts/check_effective_readpoints.py`（可调键读点不得绕过 effective）、
 `scripts/check_sse_protocol.py`（后端 SSE 事件必须在前端有处理分支）。
 
-前端另有三组 Node 单测（`cd frontend && npm run check`，无浏览器/后端依赖）：
+前端另有七组 Node 单测（`cd frontend && npm run check`，无浏览器/后端依赖）：
 `check_stream_handlers.mjs`（SSE 事件→状态映射）、`check_typewriter.mjs`
-（打字机/增量流状态机）、`check_api_sse.mjs`（api 导出面快照 + SSE 帧解析与错误处理）。
+（打字机/增量流状态机）、`check_api_sse.mjs`（api 导出面快照 + SSE 帧解析与错误处理）、
+`check_chat_utils.mjs`（聊天纯函数与引用角标）、`check_scope_utils.mjs`（范围解析）、
+`check_settings_form.mjs`（设置表单键集合）、`check_provider_payload.mjs`（供应商载荷映射）。
 
 ## 评测
 
 - `backend/eval_questions.json`：14 题种子集（知识库/通用/联网/工具/安全/规划）；
-- `backend/evaluate_agent.py`：逐题调用 Agent 流式接口，记录延迟/工具/计划/
+- `scripts/eval/evaluate_agent.py`：逐题调用 Agent 流式接口，记录延迟/工具/计划/
   token/状态到 `eval_report.jsonl`，改动前后对比可发现回归；
-- `backend/eval_ragas.py`：RAGAS 四指标基线（faithfulness / answer_correctness /
+- `scripts/eval/eval_ragas.py`：RAGAS 四指标基线（faithfulness / answer_correctness /
   context_precision / context_recall，DeepSeek 裁判，8 道 KB 题），
   结果写入 `ragas_baseline.jsonl`（2026-08-26 最新基线：context_recall 0.792 /
   context_precision 0.769 / faithfulness 0.971 / answer_correctness 0.464）；
@@ -578,9 +589,9 @@ CI（`.github/workflows/ci.yml`）：push / PR 自动跑全量 pytest（3.11 + 3
 | `CHAT_TEMPERATURE` | `0.5` | 回答温度 |
 | `AGENT_TITLE_MODEL` | `deepseek-v4-flash` | 标题生成模型 |
 | `HISTORY_MAX_MESSAGES` | `400` | 历史窗口行数上限（超 1.5× 才压缩到该条数，粘滞窗口） |
-| `HISTORY_MAX_TOKENS` | `64000` | 历史 token 预算兜底（未绑定模板/未知模板类别） |
+| `HISTORY_MAX_TOKENS` | `400000` | 历史 token 预算兜底（未绑定模板/未知模板类别） |
 | `HISTORY_BUDGET_GENERAL` / `_KNOWLEDGE` / `_CODING` / `_WRITING` / `_TRANSLATE` | `64000` / `64000` / `400000` / `400000` / `64000` | 按模板类别的历史 token 预算（压缩与裁剪同一口径；会被模型窗口夹紧——见 `MODEL_CONTEXT_WINDOW` / `CONTEXT_WINDOW_RESERVE`） |
-| `MODEL_CONTEXT_WINDOW` / `CONTEXT_WINDOW_RESERVE` | `0`（自动）/ `32000` | 模型窗口（0=按模型名推断，`[1m]` 后缀→1M，其余 128K）/ 窗口内为静态区+工具+D块预留的 token |
+| `MODEL_CONTEXT_WINDOW` / `CONTEXT_WINDOW_RESERVE` | `0`（自动）/ `64000` | 模型窗口（0=按模型名推断，`[1m]` 后缀→1M，其余 128K）/ 窗口内为静态区+工具+D块预留的 token |
 | `SUMMARY_ENABLED` / `SUMMARY_MAX_CHARS` | `1` / `800` | 滚动摘要开关 / 最大字符 |
 | `MEMORY_ENABLED` / `MEMORY_TOP_K` | `1` / `3` | 长期记忆开关 / 每次注入条数 |
 | `MEMORY_MIN_SCORE` / `MEMORY_MAX_TOKENS` | `0.35` / `600` | 记忆召回阈值 / token 预算 |

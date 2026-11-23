@@ -60,20 +60,21 @@ fi
 # 配置读取守门（P1-2）：effective() 不得传 default（会忽略 env/config 默认值）
 "$PYTHON" "$ROOT/scripts/check_effective_default.py" || exit 1
 
+# 配置读取守门（2026-11-16）：EDITABLE_KEYS 的读点不得绕过 effective()
+"$PYTHON" "$ROOT/scripts/check_effective_readpoints.py" || exit 1
+
 # SSE 协议守门（P1-1）：后端 emit 的事件必须在前端有处理分支（或显式豁免）
 "$PYTHON" "$ROOT/scripts/check_sse_protocol.py" || exit 1
 
-# 前端逻辑单测：SSE 事件→状态 映射 + 打字机/增量流状态机 + API 导出面/SSE 传输
-# + 设置表单键集合 + 供应商载荷映射（与 CI 的 npm run check 对齐）
-if command -v node >/dev/null 2>&1; then
-  (cd "$ROOT/frontend" \
-    && node scripts/check_stream_handlers.mjs \
-    && node scripts/check_typewriter.mjs \
-    && node scripts/check_api_sse.mjs \
-    && node scripts/check_settings_form.mjs \
-    && node scripts/check_provider_payload.mjs) || exit 1
+# 对比度审计（与 CI frontend job 对齐）
+"$PYTHON" "$ROOT/scripts/contrast_audit.py" || exit 1
+
+# 前端逻辑单测：npm run check 覆盖全部 7 个脚本（与 CI 保持同一入口）
+if command -v node >/dev/null 2>&1 && [ -d "$ROOT/frontend/node_modules" ]; then
+  (cd "$ROOT/frontend" && npm run check) || exit 1
+  (cd "$ROOT/frontend" && npm run lint) || exit 1
 else
-  echo "[pre-commit] 未找到 node，跳过前端逻辑单测（CI 仍会跑）" >&2
+  echo "[pre-commit] 未找到 node 或 frontend/node_modules，跳过前端检查（CI 仍会跑）" >&2
 fi
 
 exit 0

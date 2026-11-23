@@ -4,7 +4,7 @@
 # 钩子可被 --no-verify 跳过、可因解释器缺失而放行，CI 不能。
 #
 # 四个 job：
-#   backend   —— 全量 pytest（535+ 用例，不需要 GPU / MySQL / 外网；lite 依赖即可跑，
+#   backend   —— 全量 pytest（900+ 用例，不需要 GPU / MySQL / 外网；lite 依赖即可跑，
 #                顺带验证 lite 档没有偷偷依赖 torch）
 #   frontend  —— 构建 + 裸 hex 防回退 + 对比度审计（两个守门脚本都是纯 Python，无浏览器依赖）
 #   docker    —— 后端 lite 镜像构建守门（全新检出没有 torch_wheels/，构建不得依赖它）
@@ -21,7 +21,9 @@ name: ci
 
 on:
   push:
-    branches: [main, master]
+    # 所有分支都跑：开发分支（dev-*）才是日常提交发生的地方，
+    # 只覆盖 main/master 会让「CI 是唯一权威」名存实亡。
+    branches: ["**"]
   pull_request:
   workflow_dispatch:
 
@@ -45,10 +47,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements-lite.txt pytest
+      - name: 数据库迁移（空库 alembic upgrade head）
+        run: ALEMBIC_DATABASE_URL=sqlite:///./alembic_ci.db python -m alembic -c backend/alembic.ini upgrade head
       - name: 后端测试
         run: python -m pytest backend/tests -q
       - name: 配置守门（effective 不得传 default）
         run: python scripts/check_effective_default.py
+      - name: 配置守门（可调键读点必须走 effective）
+        run: python scripts/check_effective_readpoints.py
       - name: 协议守门（SSE 事件前后端一致）
         run: python scripts/check_sse_protocol.py
 
@@ -68,8 +74,11 @@ jobs:
       - name: 构建
         run: npm run build
         working-directory: frontend
-      - name: 前端逻辑单测（useAgentStream / useTypewriter / API+SSE）
+      - name: 前端逻辑单测（useStreamHandlers / useTypewriter / API+SSE）
         run: npm run check
+        working-directory: frontend
+      - name: ESLint（首轮只卡 error，存量 warning 不阻断）
+        run: npm run lint
         working-directory: frontend
       - uses: actions/setup-python@v5
         with:

@@ -2,12 +2,17 @@
 
 用法：
     $env:OPENSEARCH_INDEX="zhiwen_kb_current"
-    python build_index_v2.py
+    python scripts/eval/build_index_v2.py
 """
 
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
+BACKEND = Path(__file__).resolve().parents[2] / "backend"
+sys.path.insert(0, str(BACKEND))
 
 os.environ.setdefault("OPENSEARCH_INDEX", "zhiwen_kb_current")
 

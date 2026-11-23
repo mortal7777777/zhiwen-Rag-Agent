@@ -7,11 +7,18 @@ venv/
 
 # 日志与运行产物
 *.log
+backend/logs/
 .env
 backend/_*.py
 backend/scripts/dev/_*.py
 backend/eval_questions.local.json*
+backend/alembic_dev.db
+backend/_alembic*.db
+alembic_ci.db
 backend/eval_report.jsonl
+backend/eval_dispatch_report.md
+backend/eval_dispatch_report.jsonl
+backend/eval_dispatch_report.csv
 backend/logs_e2e.txt
 backend/ragas_baseline.jsonl
 backend/ragas_retrieval_cache.json
@@ -26,6 +33,10 @@ backend/.playwright-mcp/
 # 前端
 frontend/node_modules/
 frontend/dist/
+
+# Electron 桌面壳（desktop/）
+desktop/node_modules/
+desktop/release/
 
 # 运行时数据：上传文档、索引账本、trace、checkpoint（可重建，不入库）
 data/
@@ -69,6 +80,13 @@ verify_final.py
 
 # 本地杂物区（测试产物/一次性脚本归档；不入库）
 scratch/
+
+# 手工测试残留（审查后清理；模式防止再次误提交）
+*_perm_key_test.txt
+frontend/scratch_*.mjs
+
+# CHANGELOG 本地维护，不入库（2026-11-17 用户决定）
+CHANGELOG.md
 
 # 本地 AI 助手记忆（含个人信息；保留在磁盘供 CLI 按目录加载，不入库）
 AGENTS.md
@@ -124,6 +142,14 @@ docs/RETRIEVAL_OPTIMIZATION.md
 docs/CACHE_MEMORY_OPTIMIZATION.md
 docs/TOOL_PIPELINE_DETAILED.md
 docs/INDEX_DEDUP_PIPELINE_DETAILED.md
+
+# 评审与演进计划类文档（过程产物，保留在磁盘供本地查阅，不入库）
+docs/AGENT_ARCHITECTURE_REVIEW_AND_PLAN.md
+docs/ARCHITECTURE_REVIEW_*.md
+docs/ARCHITECTURE_FIX_PLAN_*.md
+docs/VISUAL_POLISH_PLAN_*.md
+docs/PUBLIC_BENCHMARK_PLAN.md
+docs/SKILLS_INJECTION_PLAN.md
 
 # full 模式离线 wheel（构建上下文用，不入库；目录由 .gitkeep 占位——
 # Dockerfile full 阶段 COPY 需要路径存在，lite 构建已与其解耦）

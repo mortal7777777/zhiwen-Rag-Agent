@@ -4,9 +4,9 @@
 基准上量一次，回答"业内什么水平"（自建 21/31 题集无法对外可比）。
 
 用法（backend 目录）：
-    python eval_cmrc.py --limit 120            # 构建/复用 cmrc2018_eval 索引并评测检索
-    python eval_cmrc.py --limit 120 --rebuild  # 重建索引
-    python eval_cmrc.py --limit 120 --gen      # 追加生成评测（EM/F1，约 120 次 LLM 调用）
+    python scripts/eval/eval_cmrc.py --limit 120            # 构建/复用 cmrc2018_eval 索引并评测检索
+    python scripts/eval/eval_cmrc.py --limit 120 --rebuild  # 重建索引
+    python scripts/eval/eval_cmrc.py --limit 120 --gen      # 追加生成评测（EM/F1，约 120 次 LLM 调用）
 
 说明：
 - 数据：cmrc2018_dev.json（backend 目录，gitignored；来源 github.com/ymcui/cmrc2018
@@ -25,13 +25,14 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+BACKEND = Path(__file__).resolve().parents[2] / "backend"
+sys.path.insert(0, str(BACKEND))
 
 from langchain_core.documents import Document
 
 from evaluate_retrieval import bootstrap_runtime
 
-DATA = Path(__file__).resolve().parent / "cmrc2018_dev.json"
+DATA = BACKEND / "cmrc2018_dev.json"
 INDEX = "cmrc2018_eval"
 
 
@@ -196,7 +197,7 @@ def main() -> int:
             f"生成 EM(严格) = {sum(ems) / n:.3f} · EM(包含) = {sum(contains) / n:.3f}"
             f" · F1 = {sum(f1s) / n:.3f}（{n} 题，解释文体，严格 EM 偏低属正常）"
         )
-    out = Path(__file__).resolve().parent / "cmrc2018_eval_result.jsonl"
+    out = BACKEND / "cmrc2018_eval_result.jsonl"
     with out.open("w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")

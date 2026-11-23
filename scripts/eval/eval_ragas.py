@@ -1,13 +1,13 @@
 """RAGAS 基线评测：检索 + 生成双维度指标。
 
 用法（backend 目录）：
-    python eval_ragas.py                      # 全量，检索结果默认复用缓存
-    python eval_ragas.py --limit 3
-    python eval_ragas.py --id l1-kb-001,l2-kb-009
-    python eval_ragas.py --refresh            # 忽略检索缓存，重跑 /api/chat
-    python eval_ragas.py --resume             # 续跑上次中断的 run，跳过已完成题
-    python eval_ragas.py --tag 2026-09-11     # 结果确认为新基线，写入 ragas_baselines.json
-    python eval_ragas.py --explain l2-kb-011  # 诊断：collections 新 API 打印裁判逐条判定理由
+    python scripts/eval/eval_ragas.py                      # 全量，检索结果默认复用缓存
+    python scripts/eval/eval_ragas.py --limit 3
+    python scripts/eval/eval_ragas.py --id l1-kb-001,l2-kb-009
+    python scripts/eval/eval_ragas.py --refresh            # 忽略检索缓存，重跑 /api/chat
+    python scripts/eval/eval_ragas.py --resume             # 续跑上次中断的 run，跳过已完成题
+    python scripts/eval/eval_ragas.py --tag 2026-09-11     # 结果确认为新基线，写入 ragas_baselines.json
+    python scripts/eval/eval_ragas.py --explain l2-kb-011  # 诊断：collections 新 API 打印裁判逐条判定理由
 
 断点与缓存（2026-09-11 加，针对 judge 卡死导致的重复检索）：
 - 检索结果逐题写 ragas_retrieval_cache.json（题干或管道指纹变化自动失效），
@@ -47,7 +47,8 @@ from pathlib import Path
 
 import httpx
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+BACKEND = Path(__file__).resolve().parents[2] / "backend"
+sys.path.insert(0, str(BACKEND))
 
 # 关闭 ragas 遥测上报：其 requests.post 会走系统代理（Clash）卡住每次 judge
 # 调用（实测卡死 0/84）；注意 ragas 只认字面量 "true"，"1" 不生效
@@ -69,15 +70,15 @@ from ragas.metrics import (
 )
 
 BASE = "http://127.0.0.1:8000/api"
-REPORT = Path(__file__).resolve().parent / "ragas_baseline.jsonl"
-CACHE = Path(__file__).resolve().parent / "ragas_retrieval_cache.json"
-BASELINES = Path(__file__).resolve().parent / "ragas_baselines.json"
+REPORT = BACKEND / "ragas_baseline.jsonl"
+CACHE = BACKEND / "ragas_retrieval_cache.json"
+BASELINES = BACKEND / "ragas_baselines.json"
 
 
 def load_questions() -> list[dict]:
     """优先本地题库（含参考答案），否则公开版。"""
-    local = Path(__file__).resolve().parent / "eval_questions.local.json"
-    path = local if local.exists() else Path(__file__).resolve().parent / "eval_questions.json"
+    local = BACKEND / "eval_questions.local.json"
+    path = local if local.exists() else BACKEND / "eval_questions.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     return [q for q in data if q["category"] == "kb"]
 

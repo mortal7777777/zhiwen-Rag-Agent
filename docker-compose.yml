@@ -78,6 +78,9 @@ services:
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
       # 可选：视觉模型（识图/OCR）
       SENSENOVA_API_KEY: ${SENSENOVA_API_KEY:-}
+      # 容器内没有 Paddle/OCR Worker：默认只用原生文本层解析（auto 会先尝试
+      # 拉起 Worker 再回退）。需要 PP-Structure 时指向外部 Worker 并改为 paddle/auto
+      PDF_PARSE_BACKEND: ${PDF_PARSE_BACKEND:-pymupdf}
       # 依赖服务
       MYSQL_URL: mysql+pymysql://root:${MYSQL_ROOT_PASSWORD:-ragassistant123}@mysql:3306/rag_assistant?charset=utf8mb4
       OPENSEARCH_URL: http://opensearch:9200
@@ -103,6 +106,15 @@ services:
       # 文件/命令工具的边界目录
       TOOL_WORKSPACE: /app
       CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      # 经 nginx 反代时信任其 X-Forwarded-For / X-Real-IP（否则 uvicorn 只认
+      # 来自 127.0.0.1 的转发头，/api/fs/browse 会把 nginx 容器 IP 当客户端 403）
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-*}
+      # 对外部署可设为 0 关闭 /docs 与 /openapi.json
+      EXPOSE_DOCS: ${EXPOSE_DOCS:-1}
+      # 全局 API Token（对外/局域网部署强烈建议设置）：设置后所有 /api/* 请求
+      # 需携带 Authorization: Bearer（探针 /api/livez、/api/readyz 除外）。
+      # 前端首次 401 会弹窗索取；CLI 需 export ZHIWEN_API_TOKEN。
+      ZHIWEN_API_TOKEN: ${ZHIWEN_API_TOKEN:-}
     volumes:
       - app-data:/data
       - app-meta:/meta
@@ -111,8 +123,9 @@ services:
     # 或临时加 -p 绑定，用完即删。
     # 若只需从宿主机访问 API：docker run --rm --network rag_knowledge_base_default curlimages/curl ...
     healthcheck:
-      # 供 frontend 等待：避免 nginx 先起来、打开页面首屏 /api 全部 502
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      # 供 frontend 等待：避免 nginx 先起来、打开页面首屏 /api 全部 502；
+      # readyz 会同时探 MySQL / OpenSearch（不再是"进程活着就算健康"）
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/readyz', timeout=5)"]
       interval: 10s
       timeout: 5s
       retries: 30

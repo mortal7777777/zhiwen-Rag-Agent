@@ -1,6 +1,6 @@
 """检索策略评估脚本。
 
-两种模式（在 backend 目录下运行）：
+两种模式（任意目录均可运行）：
 
 1. 调试模式（默认）：对内置示例题打印稠密/稀疏/RRF/精排各级 top 列表，
    并测试不同 recall_k 下的关键词命中率（人工排查用）；
@@ -13,10 +13,10 @@
    无 LLM 裁判、秒级完成，作为检索迭代的内环指标；RAGAS 做验收外环。
 
 用法：
-    python evaluate_retrieval.py                        # 调试模式
-    python evaluate_retrieval.py --batch                # 批模式（全管道含查询扩展）
-    python evaluate_retrieval.py --batch --no-expansion # 关查询扩展（隔离索引/精排层）
-    python evaluate_retrieval.py --batch --k 8
+    python scripts/eval/evaluate_retrieval.py                        # 调试模式
+    python scripts/eval/evaluate_retrieval.py --batch                # 批模式（全管道含查询扩展）
+    python scripts/eval/evaluate_retrieval.py --batch --no-expansion # 关查询扩展（隔离索引/精排层）
+    python scripts/eval/evaluate_retrieval.py --batch --k 8
 """
 
 from __future__ import annotations
@@ -28,13 +28,14 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+BACKEND = Path(__file__).resolve().parents[2] / "backend"
+sys.path.insert(0, str(BACKEND))
 
 from app.config import get_settings
 from app.rag.retriever import hybrid_search
 from app.rag.service import RAGService
 
-ANNOTATIONS = Path(__file__).resolve().parent / "retrieval_annotations.json"
+ANNOTATIONS = BACKEND / "retrieval_annotations.json"
 
 # 问题与用于判断"是否命中"的核心关键词（调试模式示例）
 QUESTIONS = [

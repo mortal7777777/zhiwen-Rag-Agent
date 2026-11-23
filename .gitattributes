@@ -2,3 +2,8 @@
 # 直接报 "bad interpreter" 无法执行。
 scripts/githooks/* text eol=lf
 scripts/pre-commit text eol=lf
+
+# Windows 批处理必须 CRLF：LF 会让 cmd 错拆行（注释被当命令执行、
+# %~dp0 解析错乱），表现为 `zhiwen` 启动即报 "不是内部或外部命令"。
+*.bat text eol=crlf
+*.cmd text eol=crlf

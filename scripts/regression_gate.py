@@ -8,7 +8,7 @@
     python scripts/regression_gate.py --min-faithfulness 0.9
 
 流程：
-1. （默认）调 backend/eval_ragas.py 评测，结果追加到 ragas_baseline.jsonl；
+1. （默认）调 scripts/eval/eval_ragas.py 评测，结果追加到 ragas_baseline.jsonl；
 2. 取报告里最后一个 run（或 --run 指定），按 run_id 聚合指标行；
 3. 绝对阈值判定 +（--baseline 时）与基线对比：任一指标低于"基线 - 容差"即失败；
 4. 打印与基线的逐题 delta（单题跌 >0.3 提示）；违规退出码 1（可接 CI 钩子）。
@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EVAL_SCRIPT = ROOT / "backend" / "eval_ragas.py"
+EVAL_SCRIPT = ROOT / "scripts" / "eval" / "eval_ragas.py"
 REPORT = ROOT / "backend" / "ragas_baseline.jsonl"
 BASELINES = ROOT / "backend" / "ragas_baselines.json"
 

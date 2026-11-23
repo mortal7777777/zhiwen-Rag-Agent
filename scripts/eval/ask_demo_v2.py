@@ -1,7 +1,7 @@
 """v2 管线端到端问答演示（Parent-Child + Query 改写 + 精排 + 生成）。
 
-运行（在 backend 目录下，需要 DEEPSEEK_API_KEY）：
-    python ask_demo_v2.py
+运行（任意目录，需要 DEEPSEEK_API_KEY）：
+    python scripts/eval/ask_demo_v2.py
 """
 
 from __future__ import annotations
@@ -10,7 +10,8 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+BACKEND = Path(__file__).resolve().parents[2] / "backend"
+sys.path.insert(0, str(BACKEND))
 
 os.environ.setdefault("OPENSEARCH_INDEX", "zhiwen_kb_current")
 

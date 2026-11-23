@@ -31,8 +31,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 FROM base AS lite
 COPY backend/app ./app
 COPY backend/run.py ./run.py
+# 迁移资产：旧数据卷升级时容器内可执行 stamp/upgrade（入口会自动处理旧库）
+COPY backend/alembic.ini ./alembic.ini
+COPY backend/alembic ./alembic
+COPY backend/docker_migrate.py ./docker_migrate.py
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "python docker_migrate.py && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
 
 # ---------- full：在 base 上加 torch 深度学习层 ----------
 FROM base AS full
@@ -44,5 +48,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && rm -rf /torch_wheels"
 COPY backend/app ./app
 COPY backend/run.py ./run.py
+COPY backend/alembic.ini ./alembic.ini
+COPY backend/alembic ./alembic
+COPY backend/docker_migrate.py ./docker_migrate.py
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "python docker_migrate.py && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

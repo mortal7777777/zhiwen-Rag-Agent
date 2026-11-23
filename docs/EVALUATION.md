@@ -26,11 +26,11 @@
 运行：
 
 ```powershell
-cd backend
-python evaluate_agent.py --category kb          # 只跑一类
-python evaluate_agent.py --limit 5              # 先跑 5 题
-python evaluate_agent.py                        # 全量（支持 session 多轮复用）
-python evaluate_agent.py --approve              # 自动化：临时切 allow 模式，跑完恢复 ask
+cd rag_knowledge_base
+python scripts/eval/evaluate_agent.py --category kb          # 只跑一类
+python scripts/eval/evaluate_agent.py --limit 5              # 先跑 5 题
+python scripts/eval/evaluate_agent.py                        # 全量（支持 session 多轮复用）
+python scripts/eval/evaluate_agent.py --approve              # 自动化：临时切 allow 模式，跑完恢复 ask
 ```
 
 每题记录：difficulty / category / latency / 工具轨迹 / 计划 / token / 状态（**注意：2026-09-25 起 `plan` 字段语义变了**——planner 已移除，该字段记录的是主 Agent 的自有声明/计划模式提交，简单问答轮为空是正常的），
@@ -164,7 +164,7 @@ python evaluate_agent.py --approve              # 自动化：临时切 allow �
 
 ## 度量配套（2026-09-11，2026-10-19 更新）
 
-**快指标（迭代内环）**：`python evaluate_retrieval.py --batch` 读
+**快指标（迭代内环）**：`python scripts/eval/evaluate_retrieval.py --batch` 读
 `backend/retrieval_annotations.json`（gitignored；每题带 expect_source 书目 +
 expect_keywords 实词；多跳题用 expect_sources 列出 ≥2 本书），走完整检索管道
 （service.retrieve）计算四项确定性指标，无 LLM 裁判、约 3.6s/题（`--no-expansion`
@@ -287,7 +287,7 @@ RAGAS 口径用 `ragas --tag-a/--tag-b`）。对照实验建议加 `--no-expansi
 - L3 研究简报 118.6s 超过此前的 90s 软门槛，将 L3 门槛修正为 ≤120s；
 - 计划类任务（l2-kb-004/005/006、l3-follow）触发了子代理并行。
 
-回归对照：改动后重跑 `python evaluate_agent.py --approve`，把本表数据
+回归对照：改动后重跑 `python scripts/eval/evaluate_agent.py --approve`，把本表数据
 与 `eval_report.jsonl` 逐题对比；超过 +10% 延迟/token 或 status 变 error
 即为回归信号。
 
@@ -299,6 +299,25 @@ RAGAS 口径用 `ragas --tag-a/--tag-b`）。对照实验建议加 `--no-expansi
   WebArena（浏览器任务，可选）；
 - 本项目的自建题库负责“贴合用户真实场景”，开源基准负责“横向可比性”，
   两者互补，不要用开源集替代自建集。
+
+## 派发 ROI 评测（eval_dispatch.py，2026-11-21）
+
+回答"什么时候 dispatch 比同轮工具更划算"：
+
+```powershell
+cd rag_knowledge_base
+python scripts\eval\eval_dispatch.py --compare --limit 3          # 子代理开/关各跑 1 遍
+python scripts\eval\eval_dispatch.py --compare --limit 6 --judge  # 加 LLM 裁判打分
+```
+
+- 题库：`scripts/eval/dispatch_eval_questions.json`（12 题，标 `roi=inline|dispatch`）；
+- 脚本临时切换 `agent_subagents_enabled`，**finally 恢复原设置**；
+  `--cleanup` 删除本次创建的会话；
+- 指标：延迟、总/辅助 tokens、`subagent_llm_calls`、dispatch 轮数/子任务、
+  status、可选 judge 分（0/1/2）；输出 `backend/eval_dispatch_report.{md,jsonl,csv}`
+  （已 gitignore）；
+- 回归判定建议：若 dispatch 相对同轮工具质量提升低于阈值且延迟/tokens 明显变差，
+  回调默认派发提示词与每轮上限。
 
 ## 口径说明（重要）
 

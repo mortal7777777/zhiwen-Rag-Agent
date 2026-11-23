@@ -2,7 +2,7 @@
 记录延迟/工具调用/计划/答案长度/运行状态，并用 LLM-as-judge 自动打分。
 
 用法（backend 目录）：
-    python evaluate_agent.py [--limit N] [--category kb] [--no-judge]
+    python scripts/eval/evaluate_agent.py [--limit N] [--category kb] [--no-judge]
 
 说明：
 - 每题会创建一次新会话（作为评测留痕），可在前端“运行记录”里查看；
@@ -20,8 +20,11 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+BACKEND = Path(__file__).resolve().parents[2] / "backend"
+sys.path.insert(0, str(BACKEND))
+
 BASE = "http://127.0.0.1:8000/api"
-REPORT = Path(__file__).resolve().parent / "eval_report.jsonl"
+REPORT = BACKEND / "eval_report.jsonl"
 
 # judge 评分 rubric：0=明显失败 1=基本完成有缺陷 2=完全符合 expect
 JUDGE_RUBRIC = """评分标准：
@@ -221,9 +224,9 @@ def main() -> None:
         _post("/settings", {"updates": {"tool_permission_mode": "allow"}}, method="PUT")
         print("已临时切换 tool_permission_mode=allow", flush=True)
     # 优先本地题库（含知识库书目等个人内容，gitignored）；不存在才用公开题库
-    qpath = Path(__file__).resolve().parent / "eval_questions.local.json"
+    qpath = BACKEND / "eval_questions.local.json"
     if not qpath.exists():
-        qpath = Path(__file__).resolve().parent / "eval_questions.json"
+        qpath = BACKEND / "eval_questions.json"
     questions = json.loads(qpath.read_text(encoding="utf-8"))
     if args.category:
         questions = [q for q in questions if q["category"] == args.category]

@@ -1,9 +1,9 @@
 """缓存命中率探针：历史 run 级统计 + 多轮长 coding 任务 e2e 实测。
 
 用法（backend 目录；需后端与 OpenSearch 已启动）：
-    python cache_probe.py stats [--days 7] [--limit 3000]
-    python cache_probe.py coding [--turns 4] [--keep-settings]
-    python cache_probe.py realistic [--scenarios kb,project] [--provider deepseek] [--keep-settings]
+    python scripts/eval/cache_probe.py stats [--days 7] [--limit 3000]
+    python scripts/eval/cache_probe.py coding [--turns 4] [--keep-settings]
+    python scripts/eval/cache_probe.py realistic [--scenarios kb,project] [--provider deepseek] [--keep-settings]
 
 realistic 模式：贴合真实使用的两组会话
 - kb      ：知识库多轮追问（两本书对比、表格、写作、延伸；书名用
@@ -30,7 +30,8 @@ import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+BACKEND = Path(__file__).resolve().parents[2] / "backend"
+sys.path.insert(0, str(BACKEND))
 
 BASE = "http://127.0.0.1:8000/api"
 
@@ -395,7 +396,7 @@ def coding(turns: int, keep_settings: bool) -> None:
 
 # ---------------- realistic：真实使用场景 e2e ----------------
 
-REPO_ROOT = str(Path(__file__).resolve().parents[1])  # rag_knowledge_base/
+REPO_ROOT = str(Path(__file__).resolve().parents[2])  # rag_knowledge_base/
 
 # 书名从环境变量取（默认占位名）：公开仓库不放私人书目，
 # 本机跑真实场景时用 PROBE_BOOK_A / PROBE_BOOK_B 指定即可

@@ -1,10 +1,16 @@
 ﻿# 知问 ZhiWen 一键启动：检查/启动 依赖服务 + 后端 + 前端，就绪后打开浏览器
 # 用法：双击根目录 start_all.bat；或 powershell -ExecutionPolicy Bypass -File scripts\start_all.ps1 [-NoBrowser]
 param(
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+    [switch]$Stop
 )
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot   # 仓库根（本脚本位于 scripts/ 下）
+
+if ($Stop) {
+    & (Join-Path $PSScriptRoot 'stop_all.ps1')
+    exit 0
+}
 
 # OpenSearch 原生安装目录。探测顺序（同 .zhiwen-python 的本机文件约定）：
 #   环境变量 ZHIWEN_OPENSEARCH_HOME > 仓库根 .zhiwen-opensearch 文件（gitignore）> 通用默认
@@ -68,34 +74,34 @@ $backendOk = $true
 $frontendOk = $true
 if (-not (Test-Path $Python)) {
     $backendOk = $false
-    Write-Host ('[0/5] 后端环境     : Python 解释器不存在：' + $Python) -ForegroundColor Red
+    Write-Host ('[0/6] 后端环境     : Python 解释器不存在：' + $Python) -ForegroundColor Red
     Write-Host '      处理：设置环境变量 ZHIWEN_PYTHON，或编辑仓库根 .zhiwen-python 指向本机 python.exe' -ForegroundColor DarkGray
 } else {
     & $Python -c 'import fastapi, uvicorn' 2>$null
     if ($LASTEXITCODE -ne 0) {
         $backendOk = $false
-        Write-Host '[0/5] 后端环境     : 依赖未安装（缺 fastapi / uvicorn）' -ForegroundColor Red
+        Write-Host '[0/6] 后端环境     : 依赖未安装（缺 fastapi / uvicorn）' -ForegroundColor Red
         Write-Host ('      处理：' + $Python + ' -m pip install -r ' + (Join-Path $root 'backend\requirements.txt')) -ForegroundColor DarkGray
     } else {
-        Write-Host '[0/5] 后端环境     : 就绪（Python + 依赖）' -ForegroundColor Green
+        Write-Host '[0/6] 后端环境     : 就绪（Python + 依赖）' -ForegroundColor Green
     }
 }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     $frontendOk = $false
-    Write-Host '[0/5] 前端环境     : 未找到 node（前端需要 Node.js 18+）' -ForegroundColor Red
+    Write-Host '[0/6] 前端环境     : 未找到 node（前端需要 Node.js 18+）' -ForegroundColor Red
 } elseif (-not (Test-Path (Join-Path $root 'frontend\node_modules'))) {
     $frontendOk = $false
-    Write-Host '[0/5] 前端环境     : 依赖未安装（frontend\node_modules 不存在）' -ForegroundColor Red
+    Write-Host '[0/6] 前端环境     : 依赖未安装（frontend\node_modules 不存在）' -ForegroundColor Red
     Write-Host '      处理：cd frontend 后运行 npm install' -ForegroundColor DarkGray
 } else {
-    Write-Host '[0/5] 前端环境     : 就绪（node + 依赖）' -ForegroundColor Green
+    Write-Host '[0/6] 前端环境     : 就绪（node + 依赖）' -ForegroundColor Green
 }
 
 # ---------- 1/5 MySQL（3306）----------
 if (Test-Port 3306) {
-    Write-Host '[1/5] MySQL        : 已运行 (3306)' -ForegroundColor Green
+    Write-Host '[1/6] MySQL        : 已运行 (3306)' -ForegroundColor Green
 } else {
-    Write-Host '[1/5] MySQL        : 未运行，尝试启动服务 MySQL93 ...' -ForegroundColor Yellow
+    Write-Host '[1/6] MySQL        : 未运行，尝试启动服务 MySQL93 ...' -ForegroundColor Yellow
     try {
         Start-Service -Name 'MySQL93' -ErrorAction Stop
     } catch {
@@ -107,23 +113,23 @@ if (Test-Port 3306) {
 
 # ---------- 2/5 OpenSearch（9200）----------
 if (Test-Port 9200) {
-    Write-Host '[2/5] OpenSearch   : 已运行 (9200)' -ForegroundColor Green
+    Write-Host '[2/6] OpenSearch   : 已运行 (9200)' -ForegroundColor Green
 } else {
     $osBat = Join-Path $OpenSearchHome 'bin\opensearch.bat'
     if (Test-Path $osBat) {
-        Write-Host '[2/5] OpenSearch   : 未运行，启动中（就绪约需 30-90 秒）...' -ForegroundColor Yellow
+        Write-Host '[2/6] OpenSearch   : 未运行，启动中（就绪约需 30-90 秒）...' -ForegroundColor Yellow
         Start-Process -FilePath $osBat -WorkingDirectory $OpenSearchHome -WindowStyle Hidden
         if (Wait-Port 9200 90) { Write-Host '      OpenSearch 已就绪' -ForegroundColor Green }
         else { Write-Host '      OpenSearch 启动超时，请查看其 logs 目录' -ForegroundColor Red }
     } else {
-        Write-Host ('[2/5] OpenSearch   : 未运行，且未找到：' + $osBat) -ForegroundColor Red
+        Write-Host ('[2/6] OpenSearch   : 未运行，且未找到：' + $osBat) -ForegroundColor Red
         Write-Host '      可用环境变量 ZHIWEN_OPENSEARCH_HOME 指向安装目录' -ForegroundColor DarkGray
     }
 }
 
 # ---------- 3/5 SearXNG（8888，可选）----------
 if (Test-Port 8888) {
-    Write-Host '[3/5] SearXNG      : 已运行 (8888)' -ForegroundColor Green
+    Write-Host '[3/6] SearXNG      : 已运行 (8888)' -ForegroundColor Green
 } else {
     $started = $false
     $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
@@ -133,7 +139,7 @@ if (Test-Port 8888) {
                 Select-String -Pattern 'searxng' | Select-Object -First 1
             if ($hit) {
                 $name = ($hit.ToString().Trim() -split '\s+')[0]
-                Write-Host ('[3/5] SearXNG      : 未运行，尝试启动容器 ' + $name + ' ...') -ForegroundColor Yellow
+                Write-Host ('[3/6] SearXNG      : 未运行，尝试启动容器 ' + $name + ' ...') -ForegroundColor Yellow
                 docker start $name | Out-Null
                 $started = Wait-Port 8888 20
             }
@@ -142,18 +148,18 @@ if (Test-Port 8888) {
     if ($started) {
         Write-Host '      SearXNG 已就绪' -ForegroundColor Green
     } else {
-        Write-Host '[3/5] SearXNG      : 未运行（可选组件，需 Docker Desktop；不启动不影响基本使用）' -ForegroundColor DarkGray
+        Write-Host '[3/6] SearXNG      : 未运行（可选组件，需 Docker Desktop；不启动不影响基本使用）' -ForegroundColor DarkGray
     }
 }
 
 # ---------- 4/5 后端（8000）----------
 if (-not $backendOk) {
-    Write-Host '[4/5] 后端 FastAPI : 跳过（环境预检未通过，见 [0/5]）' -ForegroundColor Red
+    Write-Host '[4/6] 后端 FastAPI : 跳过（环境预检未通过，见 [0/6]）' -ForegroundColor Red
 } elseif (Test-Port 8000) {
-    Write-Host '[4/5] 后端 FastAPI : 已运行 (8000)' -ForegroundColor Green
+    Write-Host '[4/6] 后端 FastAPI : 已运行 (8000)' -ForegroundColor Green
     Write-Host '      提示：改过后端代码请执行 backend\restart_backend.ps1 重启' -ForegroundColor DarkGray
 } else {
-    Write-Host '[4/5] 后端 FastAPI : 启动中（127.0.0.1:8000）...' -ForegroundColor Yellow
+    Write-Host '[4/6] 后端 FastAPI : 启动中（127.0.0.1:8000）...' -ForegroundColor Yellow
     # 读取 backend\.env.local（与 run.py / restart_backend.ps1 约定一致：只补缺失键）
     $envFile = Join-Path $root 'backend\.env.local'
     if (Test-Path $envFile) {
@@ -182,18 +188,53 @@ if (-not $backendOk) {
     }
 }
 
-# ---------- 5/5 前端（5173）----------
-if (-not $frontendOk) {
-    Write-Host '[5/5] 前端 Vite    : 跳过（环境预检未通过，见 [0/5]）' -ForegroundColor Red
-} elseif (Test-Port 5173) {
-    Write-Host '[5/5] 前端 Vite    : 已运行 (5173)' -ForegroundColor Green
+# ---------- 5/6 OCR Worker（8090）----------
+$workerScript = Join-Path $root 'backend\scripts\dev\paddle_ocr_worker.py'
+if (Test-Port 8090) {
+    Write-Host '[5/6] OCR Worker   : 已运行 (8090)' -ForegroundColor Green
+} elseif (Test-Path $workerScript) {
+    Write-Host '[5/6] OCR Worker   : 启动中（CPU 模式，模型预热约 20-60 秒）...' -ForegroundColor Yellow
+    if (-not $env:PADDLE_PDX_MODEL_SOURCE) { $env:PADDLE_PDX_MODEL_SOURCE = 'bos' }
+    if (-not $env:PADDLE_OCR_DEVICE) { $env:PADDLE_OCR_DEVICE = 'cpu' }
+    $logDir = Join-Path $root 'backend\logs'
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    Start-Process -FilePath $Python `
+        -ArgumentList '-u', $workerScript `
+        -WorkingDirectory (Join-Path $root 'backend') -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $logDir 'paddle_ocr_worker.log') `
+        -RedirectStandardError (Join-Path $logDir 'paddle_ocr_worker.err.log')
+    if (Wait-Port 8090 180) {
+        Write-Host '      OCR Worker 已就绪（复杂 PDF 走 PP-StructureV3）' -ForegroundColor Green
+    } else {
+        Write-Host '      OCR Worker 启动超时（不影响基础功能；复杂 PDF 会回退原生解析）' -ForegroundColor DarkYellow
+    }
 } else {
-    Write-Host '[5/5] 前端 Vite    : 启动中（新窗口；关闭该窗口即停止前端）...' -ForegroundColor Yellow
+    Write-Host '[5/6] OCR Worker   : 未找到 worker 脚本，跳过（复杂 PDF 回退原生解析）' -ForegroundColor DarkGray
+}
+
+# ---------- 6/6 前端（5173）----------
+if (-not $frontendOk) {
+    Write-Host '[6/6] 前端 Vite    : 跳过（环境预检未通过，见 [0/6]）' -ForegroundColor Red
+} elseif (Test-Port 5173) {
+    Write-Host '[6/6] 前端 Vite    : 已运行 (5173)' -ForegroundColor Green
+} else {
+    Write-Host '[6/6] 前端 Vite    : 启动中（新窗口；关闭该窗口即停止前端）...' -ForegroundColor Yellow
     Start-Process -FilePath 'cmd.exe' -ArgumentList '/k', 'title ZhiWen Frontend && npm run dev' `
         -WorkingDirectory (Join-Path $root 'frontend')
     if (Wait-Port 5173 45) { Write-Host '      前端已就绪' -ForegroundColor Green }
     else { Write-Host '      前端启动超时，请看新打开的窗口输出' -ForegroundColor Red }
 }
+
+# 历史残留检测：上次后端被强杀后可能留下 MCP stdio 子进程
+try {
+    $mcpPattern = '@playwright/mcp|@upstash/context7-mcp|mcp-mermaid|excalidraw-mcp|firecrawl-mcp|arxiv-mcp-server'
+    $mcpOrphans = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and $_.CommandLine -match $mcpPattern
+    })
+    if ($mcpOrphans.Count -gt 0) {
+        Write-Host ('[提示] 检测到 ' + $mcpOrphans.Count + ' 个可能残留的 MCP 进程；如需清理：start_all.bat -Stop') -ForegroundColor DarkYellow
+    }
+} catch { }
 
 Write-Host '==========================================' -ForegroundColor Cyan
 if ($NoBrowser) {
@@ -202,4 +243,6 @@ if ($NoBrowser) {
     Start-Process 'http://localhost:5173'
     Write-Host '已在浏览器打开 http://localhost:5173' -ForegroundColor Cyan
 }
-Write-Host '完成：本窗口可关闭（前端运行在独立窗口；后端为隐藏进程）。' -ForegroundColor Cyan
+Write-Host '完成：本窗口可关闭。' -ForegroundColor Cyan
+Write-Host '注意：关闭本窗口不会停止后端与 OpenSearch（前端在独立窗口）。' -ForegroundColor DarkYellow
+Write-Host '停止全部服务：start_all.bat -Stop  或  stop_all.bat' -ForegroundColor DarkGray

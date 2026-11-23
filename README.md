@@ -12,6 +12,12 @@
 用带工具调用与人工确认的 Agent 回答问题——**答案带原文出处、可追溯**；
 同时支持联网搜索、图片识别、本机 Skills 复用、长期记忆、代码文件与命令执行（类 Claude Code 工作流）。
 
+> ⚠️ **单用户本机项目**：默认无认证，假设单用户本机使用。对外/局域网部署**必须**设置环境变量
+> `ZHIWEN_API_TOKEN`（全局 API Token：所有 `/api/*` 请求需携带 `Authorization: Bearer <token>`，探针
+> `/api/livez`、`/api/readyz` 除外；前端首次收到 401 会弹窗索取并保存，CLI 需 `export ZHIWEN_API_TOKEN`），
+> 并配合 nginx/网关层的 HTTPS 与限流、`EXPOSE_DOCS=0` 关闭接口文档。另有 `PROMPT_ADMIN_TOKEN`
+> 单独保护提示词管理接口。后端启动时若未设置 token 会在日志中显式告警。
+
 - **后端**：FastAPI + LangGraph（7 节点状态图）+ OpenSearch 混合检索 + 本地 BGE Embedding/Reranker + 任意 OpenAI / Anthropic 兼容模型 + MySQL
 - **前端**：Vue 3 + Element Plus（流式打字机、执行计划、审批卡片、来源引用、浅色/深色主题）
 - **一键部署**：`docker compose up`（自带 OpenSearch / MySQL / SearXNG，无需本机环境）
@@ -21,15 +27,15 @@
 ## 核心特性
 
 - **Agent 编排（LangGraph 状态图）**：`prepare → agent ⇄ tools → finalize`，模型自主声明并行子代理、自主进入计划模式先出方案，全程可审计
-- **RAG 检索管道**：Parent-Child 切分 + Multi-Query/HyDE 查询扩展 + kNN×BM25 混合检索 + RRF 融合 + 本地 bge-reranker 精排；文件级增量索引（增改只嵌入该文件，删除秒级生效）
-- **引用可追溯**：逐条来源卡片与 `[n]` 角标，点角标跳到原文；PDF / EPUB / Word 内置文档查看器
+- **RAG 检索管道**：Parent-Child 切分 + Multi-Query/HyDE 查询扩展 + kNN×BM25 混合检索 + RRF 融合 + 本地 bge-reranker 精排；文件级增量索引（增改只嵌入该文件，删除秒级生效）；支持**限定范围提问**（单文档 / 整本书 / 多文档），从知识库页一键带范围进入对话
+- **引用可追溯**：逐条来源卡片与 `[n]` 角标，点角标跳到原文；PDF / EPUB / Word 内置文档查看器；**划选原文即可解释/翻译/总结**（引用直接进上下文，范围自动限定到当前文档）
 - **类 Claude Code 的文件与命令执行**：读文件/检索自动执行；写文件、执行命令走**人工确认**（原生 interrupt 挂起，批准后原轮续跑），命令可跑在 Docker 沙箱里
 - **Prompt caching 友好**：消息链严格纯追加，DeepSeek 前缀缓存实测轮内命中 ~94%，长会话输入成本大幅下降
 - **三层对话记忆**：MySQL 持久会话 + 滚动摘要（粘滞窗口）+ 长期事实记忆（自动提取/分类/整合/语义召回）
 - **多供应商模型管理**：OpenAI 兼容与 Anthropic 兼容两种 API 格式，设置页即切即用
 - **联网可信度分级**：结果自动标注 high / medium / low 并约束模型引用；DuckDuckGo → Bing → 百度 多级降级
 - **终端客户端（类 Claude Code）**：`zhiwen` 一条命令进终端问答，支持审批弹窗、按目录加载 `AGENTS.md`、`/resume` 恢复会话
-- **可观测性**：逐轮运行记录（用时 / token / 缓存命中 / 工具轨迹）+ JSONL trace
+- **可观测性**：逐轮运行记录（用时 / token / 缓存命中 / 工具轨迹）+ JSONL trace；**运行回放**面板展示分阶段耗时、逐调用缓存、工具面/消息链指纹；**索引健康**面板给出新增/变化/缺失文件并支持一键增量
 
 > 每一项的完整细节（记忆体系、HITL 流程、沙箱、键盘快捷键、全部环境变量与 API 一览）见 **[docs/GUIDE.md](docs/GUIDE.md)**。
 
