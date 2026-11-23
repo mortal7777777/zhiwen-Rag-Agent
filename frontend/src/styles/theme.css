@@ -26,7 +26,7 @@
   /* 文本（对比度修正：text-3 #8b909b(白底 3.20) → #6b7280(白底 4.83)） */
   --text-1: #23262d;
   --text-2: #4c515b;
-  --text-3: #6b7280;
+  --text-3: #646b78;           /* 2026-11-19：白底 5.36 / hover 4.86 / active 4.86 */
 
   /* 品牌色 */
   --primary: #1677ff;
@@ -34,13 +34,16 @@
   --primary-text: #0958d9;     /* 蓝文字/链接专用（白底 6.16；按钮底仍用 --primary） */
   --accent: #6f5bff;
   --primary-soft: rgba(22, 119, 255, 0.08);
-  --primary-grad: linear-gradient(135deg, #1677ff 0%, #6f5bff 100%);
+  --primary-grad: linear-gradient(135deg, #0f62d9 0%, #5b4fd6 100%);   /* 白字最亮端 5.94 */
+  /* 实心按钮底：白字需 ≥4.5:1，--primary(#1677ff) 白字仅 4.10，
+     故按钮填充单独一档（--primary-text 只给文字/链接） */
+  --primary-solid: #0f62d9;    /* 白字 5.57 */
   --text-on-brand: #ffffff;    /* 品牌/彩色底上的文字（渐变按钮、徽标、头像） */
   --user-avatar-grad: linear-gradient(135deg, #f7b955 0%, #ff9a5a 100%);
 
   /* 语义色（--x=图形/边框；--x-text=文字，对比度达标） */
   --danger: #f56c6c;
-  --danger-text: #d4380d;      /* 白底 4.80（原 #f56c6c 仅 2.90） */
+  --danger-text: #c22d10;      /* 白底 5.71 / 纸底 5.20 / tag 底 5.15（原 #f56c6c 仅 2.90） */
   --danger-bg: #fef0f0;
   --danger-border: #fde2e2;
   --success: #2eb872;
@@ -89,11 +92,26 @@
   --font-xl: 20px;
   --font-2xl: 24px;
   --font-3xl: 30px;
-  /* 标题字体（界面风格可覆写：书斋 → 宋体系） */
-  --font-display: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial,
+  /* 字体族库：界面字体（--font-display）在运行时由"字体"模块改写，
+     这里只登记候选栈。中文优先、离线可用（都是系统字体，不引 webfont）。 */
+  --font-sans: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial,
     sans-serif;
+  --font-ui: 'Microsoft YaHei UI', 'PingFang SC', 'Microsoft YaHei', 'Segoe UI',
+    'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-dengxian: 'DengXian', '等线', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-serif: 'Songti SC', 'STSong', 'SimSun', 'Noto Serif SC', serif;
+  --font-kai: 'Kaiti SC', 'KaiTi', 'STKaiti', '楷体', 'SimSun', serif;
+  --font-fangsong: 'FangSong', 'STFangsong', '仿宋', 'SimSun', serif;
+  /* 标题字体 = 界面字体（界面风格可覆写：书斋 → 宋体系） */
+  --font-display: var(--font-sans);
 
   /* 动效 */
+  /* 行高（此前 10 种比例 + 70 处 normal，无刻度） */
+  --lh-tight: 1.35;            /* 标题 / 单行紧凑 */
+  --lh-base: 1.6;              /* 中文正文默认 */
+  --lh-loose: 1.75;            /* 长文档 / 富文本正文 */
+  /* 等宽字体（收编 5 套散栈） */
+  --font-mono: 'Cascadia Code', 'JetBrains Mono', Consolas, 'Courier New', monospace;
   --dur-fast: 120ms;
   --dur-base: 200ms;
   --dur-slow: 320ms;
@@ -129,7 +147,7 @@ html.dark {
   /* 文本（深色下三档均已达标：4.59~14.75） */
   --text-1: #e6e8ec;
   --text-2: #c4c9d2;
-  --text-3: #858c98;
+  --text-3: #8d93a0;           /* 纯底 5.47 / hover 4.79 / tag 叠加 4.81 */
 
   /* 品牌色 */
   --primary: #4a94ff;
@@ -137,7 +155,8 @@ html.dark {
   --primary-text: #4a94ff;     /* 深底 5.60 */
   --accent: #8b7bff;
   --primary-soft: rgba(74, 148, 255, 0.14);
-  --primary-grad: linear-gradient(135deg, #4a94ff 0%, #8b7bff 100%);
+  --primary-grad: linear-gradient(135deg, #1f6fe0 0%, #5b4fd6 100%);
+  --primary-solid: #1f6fe0;    /* 白字 4.76（深色 --primary 更亮，白字仅 3.01） */
   --text-on-brand: #ffffff;
   --user-avatar-grad: linear-gradient(135deg, #f7b955 0%, #ff9a5a 100%);
 
@@ -345,8 +364,7 @@ body,
 
 body {
   margin: 0;
-  font-family: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial,
-    sans-serif;
+  font-family: var(--font-display);
   background: var(--bg-app);
   color: var(--text-1);
   -webkit-font-smoothing: antialiased;
@@ -412,7 +430,7 @@ html[data-style="quiet"] {
   --border-strong: #e0ddd6;
   --text-1: #1f2126;
   --text-2: #5c6169;
-  --text-3: #6e6a64;
+  --text-3: #665f57;           /* 暖灰底 5.47–6.29 */
   --primary-soft: rgba(31, 33, 38, 0.06);
   --user-bubble-bg: #f2f1ee;
   --user-bubble-border: #e8e6e0;
@@ -438,7 +456,7 @@ html[data-style="quiet"].dark {
   --border-strong: #3a3833;
   --text-1: #e9e7e2;
   --text-2: #c3c0b9;
-  --text-3: #8e8b84;
+  --text-3: #97938b;           /* 深暖底 4.70–5.51 */
   --primary-soft: rgba(233, 231, 226, 0.08);
   --user-bubble-bg: #2d2b26;
   --user-bubble-border: #3a3830;
@@ -466,10 +484,11 @@ html[data-style="salon"] {
   --text-3: #6f6450;
   --primary: #96691f;
   --primary-2: #b98a3f;
+  --primary-solid: #8a5a14;    /* 白字 5.91（纸色底需更深一档） */
   --primary-text: #8a5a14;
   --accent: #b98a3f;
   --primary-soft: rgba(150, 105, 31, 0.10);
-  --primary-grad: linear-gradient(135deg, #a3742a 0%, #8a5a14 100%);
+  --primary-grad: linear-gradient(135deg, #96691f 0%, #8a5a14 100%);
   --warning: #b98a3f;
   --warning-text: #8a5a14;
   --warning-bg: #faf0da;
@@ -503,10 +522,11 @@ html[data-style="salon"].dark {
   --text-3: #a3967c;
   --primary: #c08a3e;
   --primary-2: #d8a75c;
+  --primary-solid: #9c6b22;    /* 白字 4.63 */
   --primary-text: #d0a052;
   --accent: #c08a3e;
   --primary-soft: rgba(192, 138, 62, 0.15);
-  --primary-grad: linear-gradient(135deg, #c08a3e 0%, #8f6420 100%);
+  --primary-grad: linear-gradient(135deg, #9c6b22 0%, #8f6420 100%);
   --warning: #c08a3e;
   --warning-text: #d8a75c;
   --warning-bg: #3a2f1f;
@@ -524,6 +544,680 @@ html[data-style="salon"].dark {
   --font-display: 'Songti SC', 'STSong', 'SimSun', 'Noto Serif SC', serif;
 }
 
+/* ------------------------------------------------------------
+   风格：墨玉（Teal）　取自 Hermes 默认主题 Hermes Teal：深青绿底 + 暖奶白文字 + 琥珀强调；浅色版是同一色族的薄荷纸，不是灰白。
+   白字压实心按钮：浅 7.51:1 / 深 5.54:1
+   ------------------------------------------------------------ */
+
+html[data-style="teal"] {
+  --bg-app: #e9f0ed;
+  --bg-sidebar: #f2f7f4;
+  --bg-panel: #f4f8f6;
+  --bg-chat: #fbfdfc;
+  --bg-card: #f1f6f3;
+  --bg-card-2: #f7fbf9;
+  --bg-hover: #e8f1ed;
+  --bg-active: #dff0e9;
+  --border: #d7e3dd;
+  --border-strong: #c4d5cd;
+  --text-1: #0f2624;
+  --text-2: #34524d;
+  --text-3: #54706b;
+  --primary: #0f766e;
+  --primary-2: #14a09a;
+  --primary-text: #0b5f59;
+  --primary-solid: #0b5f59;
+  --accent: #b45309;
+  --primary-soft: color-mix(in srgb, #0f766e 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #0b5f59 0%, #0f766e 100%);
+  --text-on-brand: #ffffff;
+  --danger: #c0392b;
+  --danger-text: #a01a1a;
+  --danger-bg: #fdeeee;
+  --danger-border: #f5d3cf;
+  --success: #15803d;
+  --success-text: #146c37;
+  --warning: #b45309;
+  --warning-text: #8a4b0a;
+  --warning-bg: #fdf3e4;
+  --warning-border: #efd9b8;
+  --info: #54706b;
+  --user-bubble-bg: #dcefe9;
+  --user-bubble-border: #c9e3da;
+  --user-bubble-text: #0f2624;
+  --plan-bg: #f2faf7;
+  --plan-border: #d9ece4;
+  --web-tag-bg: #fdf3e4;
+  --web-tag-text: #8a4b0a;
+  --shadow-soft: 0 1px 2px rgba(15, 38, 36, 0.04), 0 2px 8px rgba(15, 38, 36, 0.06);
+  --shadow-pop: 0 2px 10px rgba(15, 38, 36, 0.07), 0 8px 24px rgba(15, 118, 110, 0.16);
+  --shadow-modal: 0 12px 32px rgba(15, 38, 36, 0.16), 0 2px 8px rgba(15, 38, 36, 0.08);
+}
+
+html[data-style="teal"].dark {
+  --bg-app: #041c1c;
+  --bg-sidebar: #07211f;
+  --bg-panel: #0a2624;
+  --bg-chat: #0d2b28;
+  --bg-card: #11312d;
+  --bg-card-2: #0f2e2b;
+  --bg-hover: #143934;
+  --bg-active: #17423c;
+  --border: #1b3d38;
+  --border-strong: #265049;
+  --text-1: #ffe6cb;
+  --text-2: #d5bfa5;
+  --text-3: #b5a595;
+  --primary: #3fbdb0;
+  --primary-2: #67d6c8;
+  --primary-text: #7de3d2;
+  --primary-solid: #17756b;
+  --accent: #ffbd38;
+  --primary-soft: color-mix(in srgb, #3fbdb0 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #17756b 0%, #2c8178 100%);
+  --text-on-brand: #ffffff;
+  --danger: #ff8f8f;
+  --danger-text: #ff9a9a;
+  --danger-bg: #3a2320;
+  --danger-border: #4a2b26;
+  --success: #4bd08a;
+  --success-text: #6ee7a8;
+  --warning: #e8a33d;
+  --warning-text: #ffbd38;
+  --warning-bg: #3a2f1f;
+  --warning-border: #4a3a24;
+  --info: #b5a595;
+  --user-bubble-bg: #123f3a;
+  --user-bubble-border: #1b4f47;
+  --user-bubble-text: #ffe6cb;
+  --plan-bg: #0f2e2b;
+  --plan-border: #1b4f47;
+  --web-tag-bg: #3a2f1f;
+  --web-tag-text: #ffbd38;
+  --shadow-soft: 0 2px 10px rgba(0,0,0,0.35);
+  --shadow-pop: 0 2px 10px rgba(0,0,0,0.45), 0 8px 24px rgba(63, 189, 176, 0.14);
+  --shadow-modal: 0 12px 32px rgba(0,0,0,0.55);
+}
+
+/* ------------------------------------------------------------
+   风格：子夜（Midnight）　取自 Hermes Midnight：深蓝紫底 + 冷薰衣草文字；浅色版是冷调薰衣草白。
+   白字压实心按钮：浅 7.6:1 / 深 6.06:1
+   ------------------------------------------------------------ */
+
+html[data-style="midnight"] {
+  --bg-app: #f1f1fa;
+  --bg-sidebar: #f8f8fd;
+  --bg-panel: #f6f6fc;
+  --bg-chat: #fdfdff;
+  --bg-card: #f3f3fb;
+  --bg-card-2: #f8f8fe;
+  --bg-hover: #ecebf8;
+  --bg-active: #e6e4fa;
+  --border: #e2e1f0;
+  --border-strong: #cfcce8;
+  --text-1: #1a1730;
+  --text-2: #423c66;
+  --text-3: #5b5580;
+  --primary: #5b4bd6;
+  --primary-2: #7c6ef0;
+  --primary-text: #4a3cc0;
+  --primary-solid: #4b3fbf;
+  --accent: #7c6ef0;
+  --primary-soft: color-mix(in srgb, #5b4bd6 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #4b3fbf 0%, #5b4bd6 100%);
+  --text-on-brand: #ffffff;
+  --danger: #b03060;
+  --danger-text: #a3204a;
+  --danger-bg: #fceef2;
+  --danger-border: #f2d3de;
+  --success: #157347;
+  --success-text: #15683c;
+  --warning: #a8570a;
+  --warning-text: #8a4b0a;
+  --warning-bg: #fdf3e4;
+  --warning-border: #efd9b8;
+  --info: #5b5580;
+  --user-bubble-bg: #eeecfb;
+  --user-bubble-border: #dcd8f7;
+  --user-bubble-text: #1a1730;
+  --plan-bg: #f5f4fe;
+  --plan-border: #e3e0f8;
+  --web-tag-bg: #fdf3e4;
+  --web-tag-text: #8a4b0a;
+  --shadow-soft: 0 1px 2px rgba(26, 23, 48, 0.04), 0 2px 8px rgba(26, 23, 48, 0.06);
+  --shadow-pop: 0 2px 10px rgba(26, 23, 48, 0.07), 0 8px 24px rgba(91, 75, 214, 0.16);
+  --shadow-modal: 0 12px 32px rgba(26, 23, 48, 0.16), 0 2px 8px rgba(26, 23, 48, 0.08);
+}
+
+html[data-style="midnight"].dark {
+  --bg-app: #08081c;
+  --bg-sidebar: #0b0b22;
+  --bg-panel: #0d0d28;
+  --bg-chat: #10102e;
+  --bg-card: #14143a;
+  --bg-card-2: #12123a;
+  --bg-hover: #191944;
+  --bg-active: #1e1e52;
+  --border: #1e1e52;
+  --border-strong: #2e2e6e;
+  --text-1: #ddd6ff;
+  --text-2: #c4bff0;
+  --text-3: #a9a3dc;
+  --primary: #8b80e8;
+  --primary-2: #a89eff;
+  --primary-text: #c0b6ff;
+  --primary-solid: #5a4fd0;
+  --accent: #8b80e8;
+  --primary-soft: color-mix(in srgb, #8b80e8 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #5a4fd0 0%, #6f66d6 100%);
+  --text-on-brand: #ffffff;
+  --danger: #ff9ab3;
+  --danger-text: #ffadc2;
+  --danger-bg: #341026;
+  --danger-border: #4a1a34;
+  --success: #4bd08a;
+  --success-text: #6ee7a8;
+  --warning: #e8a33d;
+  --warning-text: #ffcf7a;
+  --warning-bg: #2a1a3a;
+  --warning-border: #3a2a52;
+  --info: #a9a3dc;
+  --user-bubble-bg: #1a1a44;
+  --user-bubble-border: #282862;
+  --user-bubble-text: #ddd6ff;
+  --plan-bg: #12123a;
+  --plan-border: #2a2a66;
+  --web-tag-bg: #2a1a3a;
+  --web-tag-text: #ffcf7a;
+  --shadow-soft: 0 2px 10px rgba(0,0,0,0.35);
+  --shadow-pop: 0 2px 10px rgba(0,0,0,0.45), 0 8px 24px rgba(139, 128, 232, 0.14);
+  --shadow-modal: 0 12px 32px rgba(0,0,0,0.55);
+}
+
+/* ------------------------------------------------------------
+   风格：素墨（Mono）　取自 Hermes Mono：纯灰阶 + 直角（圆角令牌整体收到 0–4px），把注意力全留给内容。
+   白字压实心按钮：浅 14.16:1 / 深 8.86:1
+   ------------------------------------------------------------ */
+
+html[data-style="mono"] {
+  --bg-app: #f7f7f6;
+  --bg-sidebar: #fdfdfc;
+  --bg-panel: #fafafa;
+  --bg-chat: #ffffff;
+  --bg-card: #f4f4f3;
+  --bg-card-2: #fafaf9;
+  --bg-hover: #eeeeed;
+  --bg-active: #e6e6e4;
+  --border: #e3e3e1;
+  --border-strong: #d2d2cf;
+  --text-1: #131313;
+  --text-2: #3a3a3a;
+  --text-3: #5c5c5c;
+  --primary: #2b2b2b;
+  --primary-2: #4a4a4a;
+  --primary-text: #1f1f1f;
+  --primary-solid: #2b2b2b;
+  --accent: #6b6b6b;
+  --primary-soft: color-mix(in srgb, #2b2b2b 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #2b2b2b 0%, #4a4a4a 100%);
+  --text-on-brand: #ffffff;
+  --danger: #9b2c2c;
+  --danger-text: #8f2020;
+  --danger-bg: #f7efef;
+  --danger-border: #e6d6d6;
+  --success: #2f6b45;
+  --success-text: #24613a;
+  --warning: #6b4a12;
+  --warning-text: #6b4a12;
+  --warning-bg: #f4efe6;
+  --warning-border: #e5dccd;
+  --info: #5c5c5c;
+  --user-bubble-bg: #f0f0ef;
+  --user-bubble-border: #e0e0dd;
+  --user-bubble-text: #131313;
+  --plan-bg: #f6f6f5;
+  --plan-border: #e6e6e3;
+  --web-tag-bg: #f4efe6;
+  --web-tag-text: #6b4a12;
+  --shadow-soft: 0 1px 2px rgba(19, 19, 19, 0.04), 0 2px 8px rgba(19, 19, 19, 0.06);
+  --shadow-pop: 0 2px 10px rgba(19, 19, 19, 0.07), 0 8px 24px rgba(43, 43, 43, 0.16);
+  --shadow-modal: 0 12px 32px rgba(19, 19, 19, 0.16), 0 2px 8px rgba(19, 19, 19, 0.08);
+}
+
+html[data-style="mono"].dark {
+  --bg-app: #0e0e0e;
+  --bg-sidebar: #121212;
+  --bg-panel: #151515;
+  --bg-chat: #191919;
+  --bg-card: #1e1e1e;
+  --bg-card-2: #1b1b1b;
+  --bg-hover: #232323;
+  --bg-active: #2a2a2a;
+  --border: #2a2a2a;
+  --border-strong: #3a3a3a;
+  --text-1: #eaeaea;
+  --text-2: #c8c8c8;
+  --text-3: #9a9a9a;
+  --primary: #9a9a9a;
+  --primary-2: #b5b5b5;
+  --primary-text: #e0e0e0;
+  --primary-solid: #4a4a4a;
+  --accent: #bdbdbd;
+  --primary-soft: color-mix(in srgb, #9a9a9a 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #4a4a4a 0%, #6e6e6e 100%);
+  --text-on-brand: #ffffff;
+  --danger: #e07a7a;
+  --danger-text: #f09090;
+  --danger-bg: #2a1e1e;
+  --danger-border: #3a2a2a;
+  --success: #7fcf9f;
+  --success-text: #8fd6a8;
+  --warning: #d0a860;
+  --warning-text: #e0bb78;
+  --warning-bg: #28241c;
+  --warning-border: #3a3428;
+  --info: #9a9a9a;
+  --user-bubble-bg: #242424;
+  --user-bubble-border: #333333;
+  --user-bubble-text: #eaeaea;
+  --plan-bg: #1c1c1c;
+  --plan-border: #333333;
+  --web-tag-bg: #28241c;
+  --web-tag-text: #e0bb78;
+  --shadow-soft: 0 2px 10px rgba(0,0,0,0.35);
+  --shadow-pop: 0 2px 10px rgba(0,0,0,0.45), 0 8px 24px rgba(154, 154, 154, 0.14);
+  --shadow-modal: 0 12px 32px rgba(0,0,0,0.55);
+}
+
+/* 素墨：直角人格——圆角令牌整体收到 0–4px（只在 mono 风格内生效） */
+html[data-style="mono"] {
+  --radius-xs: 0;
+  --radius-sm: 2px;
+  --radius-md: 2px;
+  --radius-lg: 4px;
+  --radius-pill: 4px;
+}
+
+/* ------------------------------------------------------------
+   风格：炭火（Ember）　取自 Hermes Ember：近黑褐底 + 橙奶油文字 + 炉火橙强调，适合深夜长时间读长文。
+   白字压实心按钮：浅 6.2:1 / 深 7.56:1
+   ------------------------------------------------------------ */
+
+html[data-style="ember"] {
+  --bg-app: #fdf4ea;
+  --bg-sidebar: #fffaf3;
+  --bg-panel: #fdf7f0;
+  --bg-chat: #fffdfa;
+  --bg-card: #fbf1e6;
+  --bg-card-2: #fdf8f1;
+  --bg-hover: #f7ebdc;
+  --bg-active: #f3e2cd;
+  --border: #eddfcd;
+  --border-strong: #dcc7ad;
+  --text-1: #2a1508;
+  --text-2: #5a3a20;
+  --text-3: #7a5a3c;
+  --primary: #c25a0c;
+  --primary-2: #e07a1f;
+  --primary-text: #96400a;
+  --primary-solid: #a3440b;
+  --accent: #b45309;
+  --primary-soft: color-mix(in srgb, #c25a0c 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #a3440b 0%, #b16030 100%);
+  --text-on-brand: #ffffff;
+  --danger: #b3261e;
+  --danger-text: #a01f18;
+  --danger-bg: #fbeeec;
+  --danger-border: #efd3ce;
+  --success: #2f6b45;
+  --success-text: #24613a;
+  --warning: #8a4b0a;
+  --warning-text: #8a4b0a;
+  --warning-bg: #fdf1dd;
+  --warning-border: #efd9b8;
+  --info: #7a5a3c;
+  --user-bubble-bg: #f8e6d1;
+  --user-bubble-border: #eccfae;
+  --user-bubble-text: #2a1508;
+  --plan-bg: #fdf6ec;
+  --plan-border: #ecdcc6;
+  --web-tag-bg: #fdf1dd;
+  --web-tag-text: #8a4b0a;
+  --shadow-soft: 0 1px 2px rgba(42, 21, 8, 0.05), 0 2px 8px rgba(42, 21, 8, 0.06);
+  --shadow-pop: 0 2px 10px rgba(42, 21, 8, 0.07), 0 8px 24px rgba(163, 68, 11, 0.18);
+  --shadow-modal: 0 14px 36px rgba(42, 21, 8, 0.16), 0 2px 8px rgba(42, 21, 8, 0.08);
+}
+
+html[data-style="ember"].dark {
+  --bg-app: #160800;
+  --bg-sidebar: #190a02;
+  --bg-panel: #1c0d03;
+  --bg-chat: #1f0f04;
+  --bg-card: #1e0e04;
+  --bg-card-2: #221006;
+  --bg-hover: #2a1408;
+  --bg-active: #341800;
+  --border: #3a1c08;
+  --border-strong: #4a2410;
+  --text-1: #ffd8b0;
+  --text-2: #f0c090;
+  --text-3: #b98a63;
+  --primary: #d97316;
+  --primary-2: #f08a2a;
+  --primary-text: #ffb066;
+  --primary-solid: #8f3a0a;
+  --accent: #ffd8b0;
+  --primary-soft: color-mix(in srgb, #d97316 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #8f3a0a 0%, #a86540 100%);
+  --text-on-brand: #ffffff;
+  --danger: #ff8a7a;
+  --danger-text: #ff9d8f;
+  --danger-bg: #341008;
+  --danger-border: #4a1a10;
+  --success: #4bd08a;
+  --success-text: #6ee7a8;
+  --warning: #e8a33d;
+  --warning-text: #ffc98a;
+  --warning-bg: #3a2410;
+  --warning-border: #4a2f14;
+  --info: #b98a63;
+  --user-bubble-bg: #2f1708;
+  --user-bubble-border: #43200c;
+  --user-bubble-text: #ffd8b0;
+  --plan-bg: #221006;
+  --plan-border: #43200c;
+  --web-tag-bg: #3a2410;
+  --web-tag-text: #ffc98a;
+  --shadow-soft: 0 2px 12px rgba(0,0,0,0.45);
+  --shadow-pop: 0 2px 10px rgba(0,0,0,0.5), 0 8px 24px rgba(143, 58, 10, 0.22);
+  --shadow-modal: 0 14px 36px rgba(0,0,0,0.6);
+}
+
+/* ------------------------------------------------------------
+   风格：赛博（Cyberpunk）　取自 Hermes Cyberpunk：纯黑底 + 荧光绿 #00ff41 + 霓虹红；浅色版是终端白纸。
+   白字压实心按钮：浅 5.48:1 / 深 6.71:1
+   ------------------------------------------------------------ */
+
+html[data-style="cyber"] {
+  --bg-app: #f0faf2;
+  --bg-sidebar: #f7fdf8;
+  --bg-panel: #f4fcf5;
+  --bg-chat: #ffffff;
+  --bg-card: #edf8f0;
+  --bg-card-2: #f5fcf7;
+  --bg-hover: #e4f6e8;
+  --bg-active: #d6f1dd;
+  --border: #d3e8d8;
+  --border-strong: #b6d8bf;
+  --text-1: #05230b;
+  --text-2: #14532d;
+  --text-3: #2a6b3c;
+  --primary: #0f9d3a;
+  --primary-2: #2ecc5f;
+  --primary-text: #0a6b27;
+  --primary-solid: #0a7a2c;
+  --accent: #c2002f;
+  --primary-soft: color-mix(in srgb, #0f9d3a 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #0a7a2c 0%, #228741 100%);
+  --text-on-brand: #ffffff;
+  --danger: #c2002f;
+  --danger-text: #a80028;
+  --danger-bg: #fdecef;
+  --danger-border: #f3ccd5;
+  --success: #0a7a2c;
+  --success-text: #0a6b27;
+  --warning: #8a5a00;
+  --warning-text: #8a5a00;
+  --warning-bg: #fdf5df;
+  --warning-border: #eeddb0;
+  --info: #2a6b3c;
+  --user-bubble-bg: #e2f6e7;
+  --user-bubble-border: #c9ebd3;
+  --user-bubble-text: #05230b;
+  --plan-bg: #f3fcf5;
+  --plan-border: #d3ebda;
+  --web-tag-bg: #fdf5df;
+  --web-tag-text: #8a5a00;
+  --shadow-soft: 0 1px 2px rgba(5, 35, 11, 0.05), 0 2px 8px rgba(5, 35, 11, 0.06);
+  --shadow-pop: 0 2px 10px rgba(5, 35, 11, 0.07), 0 8px 24px rgba(10, 122, 44, 0.18);
+  --shadow-modal: 0 14px 36px rgba(5, 35, 11, 0.16), 0 2px 8px rgba(5, 35, 11, 0.08);
+}
+
+html[data-style="cyber"].dark {
+  --bg-app: #000a00;
+  --bg-sidebar: #001000;
+  --bg-panel: #001200;
+  --bg-chat: #001600;
+  --bg-card: #001200;
+  --bg-card-2: #001400;
+  --bg-hover: #001a00;
+  --bg-active: #002400;
+  --border: #003000;
+  --border-strong: #004a00;
+  --text-1: #00ff41;
+  --text-2: #5cff85;
+  --text-3: #3fd968;
+  --primary: #00ff41;
+  --primary-2: #7dffa0;
+  --primary-text: #00e038;
+  --primary-solid: #056b1f;
+  --accent: #ff003c;
+  --primary-soft: color-mix(in srgb, #00ff41 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #056b1f 0%, #308445 100%);
+  --text-on-brand: #ffffff;
+  --danger: #ff5c7a;
+  --danger-text: #ff7a92;
+  --danger-bg: #2a0010;
+  --danger-border: #4a0018;
+  --success: #00ff41;
+  --success-text: #5cff85;
+  --warning: #c8ff41;
+  --warning-text: #c8ff41;
+  --warning-bg: #1a2400;
+  --warning-border: #33400a;
+  --info: #3fd968;
+  --user-bubble-bg: #00280a;
+  --user-bubble-border: #00380f;
+  --user-bubble-text: #00ff41;
+  --plan-bg: #001400;
+  --plan-border: #00380f;
+  --web-tag-bg: #1a2400;
+  --web-tag-text: #c8ff41;
+  --shadow-soft: 0 2px 12px rgba(0,0,0,0.45);
+  --shadow-pop: 0 2px 10px rgba(0,0,0,0.5), 0 8px 24px rgba(5, 107, 31, 0.22);
+  --shadow-modal: 0 14px 36px rgba(0,0,0,0.6);
+}
+
+/* ------------------------------------------------------------
+   风格：卡布（Catppuccin）　Catppuccin Latte / Mocha：低饱和紫罗兰，久看不累的代码编辑器配色。
+   白字压实心按钮：浅 7.52:1 / 深 5.95:1
+   ------------------------------------------------------------ */
+
+html[data-style="catppuccin"] {
+  --bg-app: #e9ecf2;
+  --bg-sidebar: #eff1f5;
+  --bg-panel: #f2f4f8;
+  --bg-chat: #fafbfd;
+  --bg-card: #eaeef4;
+  --bg-card-2: #f2f4f9;
+  --bg-hover: #e4e8f0;
+  --bg-active: #dde2ec;
+  --border: #d5dae6;
+  --border-strong: #bfc5d6;
+  --text-1: #4c4f69;
+  --text-2: #5c5f77;
+  --text-3: #606376;
+  --primary: #8839ef;
+  --primary-2: #a06bf5;
+  --primary-text: #6d2ebf;
+  --primary-solid: #6d2ebf;
+  --accent: #1e66f5;
+  --primary-soft: color-mix(in srgb, #8839ef 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #6d2ebf 0%, #8d5ccd 100%);
+  --text-on-brand: #ffffff;
+  --danger: #d20f39;
+  --danger-text: #b80a30;
+  --danger-bg: #fceef1;
+  --danger-border: #f0cdd6;
+  --success: #40a02b;
+  --success-text: #337a21;
+  --warning: #df8e1d;
+  --warning-text: #8a5a0a;
+  --warning-bg: #fdf4e3;
+  --warning-border: #efdcb4;
+  --info: #6c6f85;
+  --user-bubble-bg: #e8e3f8;
+  --user-bubble-border: #d8d0f2;
+  --user-bubble-text: #4c4f69;
+  --plan-bg: #f2f4f9;
+  --plan-border: #dde2ec;
+  --web-tag-bg: #fdf4e3;
+  --web-tag-text: #8a5a0a;
+  --shadow-soft: 0 1px 2px rgba(76, 79, 105, 0.05), 0 2px 8px rgba(76, 79, 105, 0.06);
+  --shadow-pop: 0 2px 10px rgba(76, 79, 105, 0.07), 0 8px 24px rgba(109, 46, 191, 0.18);
+  --shadow-modal: 0 14px 36px rgba(76, 79, 105, 0.16), 0 2px 8px rgba(76, 79, 105, 0.08);
+}
+
+html[data-style="catppuccin"].dark {
+  --bg-app: #1e1e2e;
+  --bg-sidebar: #181825;
+  --bg-panel: #1e1e2e;
+  --bg-chat: #232334;
+  --bg-card: #29293a;
+  --bg-card-2: #252535;
+  --bg-hover: #31314a;
+  --bg-active: #3a3a55;
+  --border: #454560;
+  --border-strong: #585b70;
+  --text-1: #cdd6f4;
+  --text-2: #bac2de;
+  --text-3: #a6adc8;
+  --primary: #cba6f7;
+  --primary-2: #dcc0ff;
+  --primary-text: #cba6f7;
+  --primary-solid: #6d4fc0;
+  --accent: #89b4fa;
+  --primary-soft: color-mix(in srgb, #cba6f7 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #6d4fc0 0%, #7f64c8 100%);
+  --text-on-brand: #ffffff;
+  --danger: #f38ba8;
+  --danger-text: #f5a3bb;
+  --danger-bg: #3a1e28;
+  --danger-border: #4f2733;
+  --success: #a6e3a1;
+  --success-text: #b3ecaf;
+  --warning: #fab387;
+  --warning-text: #fbc9a8;
+  --warning-bg: #3a2a1e;
+  --warning-border: #4f3a28;
+  --info: #a6adc8;
+  --user-bubble-bg: #31314a;
+  --user-bubble-border: #454560;
+  --user-bubble-text: #cdd6f4;
+  --plan-bg: #252535;
+  --plan-border: #454560;
+  --web-tag-bg: #3a2a1e;
+  --web-tag-text: #fbc9a8;
+  --shadow-soft: 0 2px 12px rgba(0,0,0,0.45);
+  --shadow-pop: 0 2px 10px rgba(0,0,0,0.5), 0 8px 24px rgba(109, 79, 192, 0.22);
+  --shadow-modal: 0 14px 36px rgba(0,0,0,0.6);
+}
+
+/* ------------------------------------------------------------
+   风格：森野（Everforest）　Everforest：暖米底配苔绿，比纯白纸更柔和的护眼绿。
+   白字压实心按钮：浅 5.88:1 / 深 4.93:1
+   ------------------------------------------------------------ */
+
+html[data-style="everforest"] {
+  --bg-app: #f4efdc;
+  --bg-sidebar: #fdf6e3;
+  --bg-panel: #faf4e4;
+  --bg-chat: #fffcf2;
+  --bg-card: #f6f0dd;
+  --bg-card-2: #fbf6e8;
+  --bg-hover: #f0e9d3;
+  --bg-active: #e9e1c8;
+  --border: #e2dac0;
+  --border-strong: #cfc6a8;
+  --text-1: #3d4a42;
+  --text-2: #4e5c52;
+  --text-3: #576856;
+  --primary: #6b8a1f;
+  --primary-2: #8aa832;
+  --primary-text: #4d5f2c;
+  --primary-solid: #586b35;
+  --accent: #8da101;
+  --primary-soft: color-mix(in srgb, #6b8a1f 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #586b35 0%, #6a7b4b 100%);
+  --text-on-brand: #ffffff;
+  --danger: #b3402c;
+  --danger-text: #9c3524;
+  --danger-bg: #f9ece6;
+  --danger-border: #e8d2c8;
+  --success: #5f8f3a;
+  --success-text: #4a7230;
+  --warning: #a76a00;
+  --warning-text: #8a5a0a;
+  --warning-bg: #f8f0d9;
+  --warning-border: #e6dab4;
+  --info: #61735f;
+  --user-bubble-bg: #eae6cf;
+  --user-bubble-border: #dbd4b6;
+  --user-bubble-text: #3d4a42;
+  --plan-bg: #f8f3e2;
+  --plan-border: #ded7bb;
+  --web-tag-bg: #f8f0d9;
+  --web-tag-text: #8a5a0a;
+  --shadow-soft: 0 1px 2px rgba(61, 74, 66, 0.05), 0 2px 8px rgba(61, 74, 66, 0.06);
+  --shadow-pop: 0 2px 10px rgba(61, 74, 66, 0.07), 0 8px 24px rgba(88, 107, 53, 0.18);
+  --shadow-modal: 0 14px 36px rgba(61, 74, 66, 0.16), 0 2px 8px rgba(61, 74, 66, 0.08);
+}
+
+html[data-style="everforest"].dark {
+  --bg-app: #2d353b;
+  --bg-sidebar: #272e33;
+  --bg-panel: #2d353b;
+  --bg-chat: #333c43;
+  --bg-card: #343f44;
+  --bg-card-2: #2f383e;
+  --bg-hover: #38424a;
+  --bg-active: #3f4a50;
+  --border: #414b50;
+  --border-strong: #5a666b;
+  --text-1: #d3c6aa;
+  --text-2: #c4b89c;
+  --text-3: #bfb7a7;
+  --primary: #a7c080;
+  --primary-2: #bfd69c;
+  --primary-text: #b8d19a;
+  --primary-solid: #587a3a;
+  --accent: #dbbc7f;
+  --primary-soft: color-mix(in srgb, #a7c080 12%, transparent);
+  --primary-grad: linear-gradient(135deg, #587a3a 0%, #5f7f42 100%);
+  --text-on-brand: #ffffff;
+  --danger: #e67e80;
+  --danger-text: #ef9fa0;
+  --danger-bg: #3a2a2a;
+  --danger-border: #4f3a3a;
+  --success: #a7c080;
+  --success-text: #bfd69c;
+  --warning: #dbbc7f;
+  --warning-text: #e6cfa0;
+  --warning-bg: #3a3428;
+  --warning-border: #4f4736;
+  --info: #a89e88;
+  --user-bubble-bg: #414b50;
+  --user-bubble-border: #4f5b60;
+  --user-bubble-text: #d3c6aa;
+  --plan-bg: #2f383e;
+  --plan-border: #4f5b60;
+  --web-tag-bg: #3a3428;
+  --web-tag-text: #e6cfa0;
+  --shadow-soft: 0 2px 12px rgba(0,0,0,0.45);
+  --shadow-pop: 0 2px 10px rgba(0,0,0,0.5), 0 8px 24px rgba(88, 122, 58, 0.22);
+  --shadow-modal: 0 14px 36px rgba(0,0,0,0.6);
+}
+
 /* 动效降级（系统"减少动态效果"） */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -533,4 +1227,215 @@ html[data-style="salon"].dark {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
   }
+}
+
+/* ============ 键盘可达性（2026-11-19 P2·C5） ============ */
+/* 原生 <button> 化的自定义控件聚焦时给出可见描边（Element Plus 组件有自己的
+   聚焦反馈，不在本规则内，避免双重高亮） */
+button.header-toggle:focus-visible,
+button.header-icon-btn:focus-visible,
+button.attach-btn:focus-visible,
+button.logo:focus-visible,
+button.collapse-btn:focus-visible,
+button.settings-tab:focus-visible,
+button.session-action:focus-visible,
+button.panel-toggle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* ============================================================
+   文字域桥接（2026-11-19 V1）
+   EP 把 --el-color-{type} 同时用于"填充"与"文字"两个域；映射层只能
+   统一图形档，于是标签/文字按钮/链接拿到的是 2.3–4.1:1 的亮色。
+   本段只把"读文字"的场景改指文字档（--x-text / --primary-text /
+   --primary-solid），图形档（边框/图标/进度条）保持不变。
+   ============================================================ */
+.el-menu {
+  --el-menu-active-color: var(--primary-text);
+}
+
+.el-tabs__item.is-active,
+.el-tabs__item:hover {
+  color: var(--primary-text);
+}
+
+/* 标签文字：EP 用文字色渲染 tag 内容 */
+.el-tag--success { --el-tag-text-color: var(--success-text); }
+.el-tag--warning { --el-tag-text-color: var(--warning-text); }
+.el-tag--danger  { --el-tag-text-color: var(--danger-text); }
+.el-tag--info    { --el-tag-text-color: var(--text-3); }
+
+/* 实心主按钮：底色走 --primary-solid（白字达标），主色只留在悬停高亮 */
+.el-button--primary {
+  --el-button-bg-color: var(--primary-solid);
+  --el-button-border-color: var(--primary-solid);
+  --el-button-hover-bg-color: color-mix(in srgb, var(--primary-solid) 86%, #ffffff);
+  --el-button-hover-border-color: color-mix(in srgb, var(--primary-solid) 86%, #ffffff);
+  --el-button-active-bg-color: color-mix(in srgb, var(--primary-solid) 86%, #000000);
+  --el-button-active-border-color: color-mix(in srgb, var(--primary-solid) 86%, #000000);
+}
+
+/* 禁用态：EP 默认白字压 light-5 浅蓝底（实测 1.98:1），改中性底 + 次要文字 */
+.el-button--primary.is-disabled,
+.el-button--primary.is-disabled:hover,
+.el-button--primary.is-disabled:focus {
+  --el-button-disabled-bg-color: color-mix(in srgb, var(--primary-solid) 18%, var(--bg-chat));
+  --el-button-disabled-border-color: transparent;
+  --el-button-disabled-text-color: var(--text-3);
+}
+
+/* 文字/链接型按钮与超链接：走文字档 */
+.el-button--primary.is-link,
+.el-button--primary.is-text { --el-button-text-color: var(--primary-text); }
+.el-button--danger.is-link,
+.el-button--danger.is-text { --el-button-text-color: var(--danger-text); }
+.el-button--warning.is-link,
+.el-button--warning.is-text { --el-button-text-color: var(--warning-text); }
+.el-button--success.is-link,
+.el-button--success.is-text { --el-button-text-color: var(--success-text); }
+.el-link.el-link--primary {
+  --el-link-text-color: var(--primary-text);
+  --el-link-hover-text-color: var(--primary);
+}
+
+/* ------------------------------------------------------------
+   文字域桥接（第二轮）：EP 的组件样式由 unplugin 按需注入，注入点在
+   main.js 的 theme.css 之后，因此同名特异性的类级覆写会被反过来压住。
+   这里统一加 html 前缀抬高一级特异性，保证"读文字"的场景取文字档。
+   ------------------------------------------------------------ */
+html .el-menu { --el-menu-active-color: var(--primary-text); }
+
+html .el-tabs__item.is-active,
+html .el-tabs__item:hover { color: var(--primary-text); }
+
+html .el-tag.el-tag--primary { --el-tag-text-color: var(--primary-text); }
+html .el-tag.el-tag--success { --el-tag-text-color: var(--success-text); }
+html .el-tag.el-tag--warning { --el-tag-text-color: var(--warning-text); }
+html .el-tag.el-tag--danger  { --el-tag-text-color: var(--danger-text); }
+html .el-tag.el-tag--info    { --el-tag-text-color: var(--text-3); }
+
+/* 朴素/文字型按钮：EP 用 --el-color-{type} 当文字色 */
+html .el-button--primary.is-plain,
+html .el-button--primary.is-link,
+html .el-button--primary.is-text { --el-button-text-color: var(--primary-text); }
+html .el-button--warning.is-plain,
+html .el-button--warning.is-link,
+html .el-button--warning.is-text { --el-button-text-color: var(--warning-text); }
+html .el-button--danger.is-plain,
+html .el-button--danger.is-link,
+html .el-button--danger.is-text { --el-button-text-color: var(--danger-text); }
+html .el-button--success.is-plain,
+html .el-button--success.is-link,
+html .el-button--success.is-text { --el-button-text-color: var(--success-text); }
+
+/* 实心主按钮：底色走 --primary-solid（白字达标） */
+html .el-button--primary {
+  --el-button-bg-color: var(--primary-solid);
+  --el-button-border-color: var(--primary-solid);
+  --el-button-hover-bg-color: color-mix(in srgb, var(--primary-solid) 86%, #ffffff);
+  --el-button-hover-border-color: color-mix(in srgb, var(--primary-solid) 86%, #ffffff);
+  --el-button-active-bg-color: color-mix(in srgb, var(--primary-solid) 86%, #000000);
+  --el-button-active-border-color: color-mix(in srgb, var(--primary-solid) 86%, #000000);
+}
+
+/* 禁用态：白字压 light-5 浅蓝底（实测 1.98:1）→ 中性底 + 次要文字 */
+html .el-button--primary.is-disabled,
+html .el-button--primary.is-disabled:hover,
+html .el-button--primary.is-disabled:focus {
+  --el-button-disabled-bg-color: color-mix(in srgb, var(--primary-solid) 16%, var(--bg-chat));
+  --el-button-disabled-border-color: transparent;
+  --el-button-disabled-text-color: var(--text-3);
+  color: var(--text-3);
+}
+html .el-button--primary.is-disabled.is-plain {
+  /* EP 在这条组合选择器上直接给 color，不只走变量，故显式改色 */
+  color: var(--text-3);
+  --el-button-disabled-bg-color: transparent;
+  --el-button-disabled-text-color: var(--text-3);
+  border-color: var(--border-strong);
+}
+
+/* 上传区里的强调文字 */
+html .el-upload-dragger .el-upload__text em { color: var(--primary-text); }
+
+html .el-link.el-link--primary {
+  --el-link-text-color: var(--primary-text);
+  --el-link-hover-text-color: var(--primary);
+}
+
+
+/* ------------------------------------------------------------
+   字体模块（data-font）：auto = 按界面风格的默认字体；显式选择则覆盖。
+   规则放在文件末尾：同特异性下后写的赢，[data-style][data-font] 双属性
+   也高于各风格块里的单属性 --font-display 覆写。
+   ------------------------------------------------------------ */
+html[data-font="auto"] {
+  --font-display: var(--font-sans);
+}
+
+/* 每种风格的默认字体人格 */
+html[data-style="quiet"][data-font="auto"] {
+  --font-display: var(--font-dengxian);
+}
+
+html[data-style="salon"][data-font="auto"] {
+  --font-display: var(--font-serif);
+}
+
+html[data-style="teal"][data-font="auto"] {
+  --font-display: var(--font-ui);
+}
+
+html[data-style="midnight"][data-font="auto"] {
+  --font-display: var(--font-ui);
+}
+
+html[data-style="mono"][data-font="auto"] {
+  --font-display: var(--font-mono);
+}
+
+html[data-style="ember"][data-font="auto"] {
+  --font-display: var(--font-serif);
+}
+
+html[data-style="cyber"][data-font="auto"] {
+  --font-display: var(--font-mono);
+}
+
+html[data-style="catppuccin"][data-font="auto"] {
+  --font-display: var(--font-ui);
+}
+
+html[data-style="everforest"][data-font="auto"] {
+  --font-display: var(--font-kai);
+}
+
+/* 显式选择 */
+html[data-font="sans"] {
+  --font-display: var(--font-sans);
+}
+
+html[data-font="ui"] {
+  --font-display: var(--font-ui);
+}
+
+html[data-font="dengxian"] {
+  --font-display: var(--font-dengxian);
+}
+
+html[data-font="serif"] {
+  --font-display: var(--font-serif);
+}
+
+html[data-font="kai"] {
+  --font-display: var(--font-kai);
+}
+
+html[data-font="fangsong"] {
+  --font-display: var(--font-fangsong);
+}
+
+html[data-font="mono"] {
+  --font-display: var(--font-mono);
 }

@@ -11,8 +11,10 @@
 import { onBeforeUnmount, shallowRef, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { executeTool } from '../api'
+import { prepareMarkdownSource } from '../utils/citations'
 
 const props = defineProps({
   content: { type: String, default: '' },
@@ -69,11 +71,8 @@ let renderTimer = null
 let lastRender = 0
 
 function renderNow() {
-  // 先把 [n] 引用标记转成可点击的角标（避开 Markdown 链接 [x](url) 语法）
-  const withCites = (props.content || '').replace(
-    /(?<!\\)\[(\d{1,3})\](?!\()/g,
-    '<sup class="cite" data-cite="$1">[$1]</sup>',
-  )
+  // 引用角标 + 单波浪号转义（都在 Markdown 解析前完成，代码段不动）
+  const withCites = prepareMarkdownSource(props.content)
   const raw = marked.parse(withCites, { renderer: codeRenderer })
   rendered.value = DOMPurify.sanitize(raw, { USE_PROFILES: { html: true } })
 }
@@ -220,7 +219,7 @@ onBeforeUnmount(() => {
   padding: 2px 6px;
   border-radius: var(--radius-xs);
   font-size: var(--font-sm);
-  font-family: Consolas, Monaco, 'Courier New', monospace;
+  font-family: var(--font-mono);
   background: var(--bg-hover);
   color: #c7254e;
 }
@@ -309,11 +308,15 @@ onBeforeUnmount(() => {
 }
 
 .markdown-body table {
-  display: block;
+  /* 不要用 display:block 做横向滚动：那会破坏表格列宽算法，导致
+     序号列和正文列被平均分配、长文本被裁切。表格保持 table 布局，
+     由外层 markdown-body 承担横向溢出。 */
+  display: table;
+  width: 100%;
   max-width: 100%;
-  overflow-x: auto;
-  margin: 12px 0;
+  table-layout: auto;
   border-collapse: collapse;
+  margin: 12px 0;
   font-size: var(--font-sm);
 }
 
@@ -322,11 +325,25 @@ onBeforeUnmount(() => {
   padding: 8px 12px;
   border: 1px solid var(--border-strong);
   text-align: left;
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .markdown-body th {
+  /* 表头不折行：允许 everywhere 断词时表头会塌到单字宽（「序号」竖排） */
+  white-space: nowrap;
   background: var(--bg-hover);
   font-weight: 600;
+}
+
+.markdown-body tbody tr:nth-child(even) {
+  background: var(--bg-hover);
+}
+
+.markdown-body {
+  overflow-x: auto;
 }
 
 .markdown-body a {

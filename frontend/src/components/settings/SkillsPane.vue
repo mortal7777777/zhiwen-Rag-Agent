@@ -24,9 +24,16 @@
       <el-switch v-model="skillsEnabled" @change="saveSkillsEnabled" />
     </div>
 
-    <el-collapse class="skill-advanced">
-      <el-collapse-item title="索引与加载参数（高级）" name="advanced">
-        <el-form label-width="190px" size="small" class="skill-advanced-form">
+    <SettingsSubnav
+      v-model="activeSkillsTab"
+      :tabs="skillTabs"
+      storage-key="rag_skills_settings_tab"
+      label="技能设置分组"
+    />
+
+    <div class="settings-section" v-show="activeSkillsTab === 'params'">
+      <div class="settings-label">索引与加载参数</div>
+      <el-form label-width="190px" size="small" class="skill-advanced-form">
           <el-form-item label="索引字符预算">
             <el-input-number
               v-model="toolsForm.skills_index_max_chars"
@@ -69,9 +76,9 @@
             </el-button>
           </el-form-item>
         </el-form>
-      </el-collapse-item>
-    </el-collapse>
+    </div>
 
+    <div class="settings-section" v-show="activeSkillsTab === 'library'">
     <div class="skill-filter-row">
       <el-input
         v-model="skillQuery"
@@ -157,7 +164,7 @@
               删除
             </el-button>
           </template>
-          <el-tooltip content="从本助手移除（不影响其他 Agent 的文件）" placement="top">
+          <el-tooltip :show-after="1000" content="从本助手移除（不影响其他 Agent 的文件）" placement="top" :hide-after="800">
             <el-button link type="info" size="small" class="skill-remove" @click="hideSkill(s)">
               <el-icon :size="13"><Hide /></el-icon>
             </el-button>
@@ -166,30 +173,6 @@
       </div>
     </div>
 
-    <template v-if="hiddenSkills.length">
-      <div class="hidden-head">
-        <span class="settings-label">已从本助手移除</span>
-        <span class="hidden-hint">只影响本助手，不会修改其他 Agent 的技能文件</span>
-      </div>
-      <div class="skill-list">
-        <div v-for="s in hiddenSkills" :key="s.name" class="skill-item muted">
-          <div class="skill-icon">
-            <el-icon :size="16"><component :is="skillIcon(s)" /></el-icon>
-          </div>
-          <div class="skill-main">
-            <div class="skill-head">
-              <span class="skill-name">{{ s.name }}</span>
-              <el-tag size="small" :type="sourceTagType(s.source)">{{ sourceLabel(s.source) }}</el-tag>
-            </div>
-            <div class="skill-desc">{{ s.description }}</div>
-          </div>
-          <div class="skill-ops">
-            <el-button size="small" @click="restoreSkill(s)">恢复</el-button>
-          </div>
-        </div>
-      </div>
-    </template>
-
     <div class="skill-footer">
       <el-button link type="primary" size="small" @click="handleResetSkills">
         恢复默认精选手集
@@ -197,6 +180,34 @@
       <el-button link size="small" @click="refreshSkills">
         重新扫描本机技能
       </el-button>
+    </div>
+    </div>
+
+    <div class="settings-section" v-show="activeSkillsTab === 'hidden'">
+      <div v-if="!hiddenSkills.length" class="skills-empty">没有已移除的技能</div>
+      <template v-else>
+        <div class="hidden-head">
+          <span class="settings-label">已从本助手移除</span>
+          <span class="hidden-hint">只影响本助手，不会修改其他 Agent 的技能文件</span>
+        </div>
+        <div class="skill-list">
+          <div v-for="s in hiddenSkills" :key="s.name" class="skill-item muted">
+            <div class="skill-icon">
+              <el-icon :size="16"><component :is="skillIcon(s)" /></el-icon>
+            </div>
+            <div class="skill-main">
+              <div class="skill-head">
+                <span class="skill-name">{{ s.name }}</span>
+                <el-tag size="small" :type="sourceTagType(s.source)">{{ sourceLabel(s.source) }}</el-tag>
+              </div>
+              <div class="skill-desc">{{ s.description }}</div>
+            </div>
+            <div class="skill-ops">
+              <el-button size="small" @click="restoreSkill(s)">恢复</el-button>
+            </div>
+          </div>
+        </div>
+      </template>
     </div>
 
     <!-- 自创技能内容预览：append-to-body 已传送至 body，不受面板 v-show 影响 -->
@@ -215,8 +226,9 @@
  * 全部状态与操作来自 useSkillsAdmin（App.vue provide）；
  * 自创技能预览对话框随本面板走（append-to-body 已传送，不受 v-show 影响）。
  */
-import { inject } from 'vue'
-import { Hide, MagicStick, Search } from '@element-plus/icons-vue'
+import { computed, inject, ref } from 'vue'
+import { Hide, MagicStick, Search, Setting } from '@element-plus/icons-vue'
+import SettingsSubnav from './SettingsSubnav.vue'
 
 const { toolsForm, toolsSaving, saveToolsSettings } = inject('settingsForm')
 
@@ -235,6 +247,10 @@ const {
   agentPreviewVisible,
   agentPreviewContent,
   agentPendingCount,
+  // 回归修复（2026-11-19）：模板里 @change="persistSkills" / @click="refreshSkills"
+  // 一直在用，但此前漏解构 → 技能开关与「刷新」按钮静默失效（渲染告警被淹没）
+  persistSkills,
+  refreshSkills,
   skillIcon,
   sourceLabel,
   sourceTagType,
@@ -250,15 +266,28 @@ const {
   restoreSkill,
   handleResetSkills,
 } = inject('settingsSkills')
+
+/** 当前技能设置分组（记忆上次选择由 SettingsSubnav 负责） */
+const activeSkillsTab = ref('library')
+
+const skillTabs = computed(() => [
+  {
+    key: 'library',
+    label: '技能库',
+    icon: MagicStick,
+    badge: enabledCount.value || '',
+  },
+  { key: 'params', label: '索引与加载', icon: Setting, badge: '' },
+  {
+    key: 'hidden',
+    label: '已移除',
+    icon: Hide,
+    badge: hiddenSkills.value.length || '',
+  },
+])
 </script>
 
 <style scoped>
-.skill-advanced {
-  margin: 4px 0 12px;
-  border-radius: 8px;
-  border: 1px solid var(--el-border-color-lighter);
-  padding: 0 12px;
-}
 .skill-advanced-form :deep(.el-form-item) {
   margin-bottom: 10px;
 }

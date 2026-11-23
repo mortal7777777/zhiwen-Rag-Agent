@@ -1,5 +1,5 @@
 /**
- * 外观状态：主题 / 内容宽度 / 界面风格（从 App.vue 抽出，2026-10-09 设置页拆分）。
+ * 外观状态：主题 / 内容宽度 / 界面风格 / 布局 / 字体（从 App.vue 抽出，2026-10-09）。
  *
  * 全局生效：直接写 documentElement（class/dataset/CSS 变量）+ localStorage 持久化，
  * 因此由 App.vue 持有**唯一实例**（启动时 init() 读取 + mount() 应用），设置页
@@ -11,11 +11,27 @@ import { ref, watch } from 'vue'
 const THEME_KEY = 'rag_theme'
 const WIDTH_KEY = 'rag_content_width'
 const STYLE_KEY = 'rag_style'
+const LAYOUT_KEY = 'rag_layout'
+const FONT_KEY = 'rag_font'
+const SIDEBAR_KEY = 'rag_sidebar_merged'
+const SIDEBAR_COLLAPSED_KEY = 'rag_sidebar_collapsed'
+const HOME_KEY = 'rag_home_style'
+const GROUP_WS_KEY = 'rag_group_sessions_by_workspace'
 
 export function useAppearance() {
   const theme = ref('system')
   const contentWidth = ref('1200px')
   const styleMode = ref('default')
+  const layoutMode = ref('standard')
+  const fontMode = ref('auto')
+  // 会话列表与导航是否合成一条侧栏（图标条 + 列表）
+  const mergedSidebar = ref(false)
+  // 单列布局（Claude/Hermes）整列收起，鼠标移回左边缘再悬浮出来
+  const sidebarCollapsed = ref(false)
+  // 主页（欢迎页）样式：classic / minimal / hero / studio
+  const homeStyle = ref('classic')
+  // 会话列表按工作区（会话 project_dir）分组；默认开启
+  const groupSessionsByWorkspace = ref(true)
 
   function applyStyle() {
     if (styleMode.value === 'default') {
@@ -23,6 +39,27 @@ export function useAppearance() {
     } else {
       document.documentElement.dataset.style = styleMode.value
     }
+  }
+
+  /** 布局总是写到 dataset：html[data-layout="standard"] 也要能命中。 */
+  function applyLayout() {
+    document.documentElement.dataset.layout = layoutMode.value
+  }
+
+  /** 字体同理：auto 时由 theme.css 按 data-style 解析成该风格的默认字体。 */
+  function applyFont() {
+    document.documentElement.dataset.font = fontMode.value
+  }
+
+  /** split = 导航与会话列表两条栏；merged = 合成一条（导轨 + 列表贴身）。 */
+  function applyHomeStyle() {
+    document.documentElement.dataset.home = homeStyle.value
+  }
+
+  function applySidebar() {
+    document.documentElement.dataset.sidebar = mergedSidebar.value ? 'merged' : 'split'
+    // 收起态只在单列布局下有意义，其它布局忽略
+    document.documentElement.dataset.sidebarCollapsed = sidebarCollapsed.value ? '1' : '0'
   }
 
   function resolveDark() {
@@ -48,6 +85,31 @@ export function useAppearance() {
     applyStyle()
     localStorage.setItem(STYLE_KEY, styleMode.value)
   })
+  watch(layoutMode, () => {
+    applyLayout()
+    localStorage.setItem(LAYOUT_KEY, layoutMode.value)
+  })
+  watch(fontMode, () => {
+    applyFont()
+    localStorage.setItem(FONT_KEY, fontMode.value)
+  })
+  watch(mergedSidebar, () => {
+    applySidebar()
+    applyHomeStyle()
+    localStorage.setItem(SIDEBAR_KEY, mergedSidebar.value ? '1' : '0')
+  })
+  watch(homeStyle, (value) => {
+    document.documentElement.dataset.home = value
+    localStorage.setItem(HOME_KEY, value)
+  })
+  watch(groupSessionsByWorkspace, (value) => {
+    localStorage.setItem(GROUP_WS_KEY, value ? '1' : '0')
+  })
+
+  watch(sidebarCollapsed, () => {
+    document.documentElement.dataset.sidebarCollapsed = sidebarCollapsed.value ? '1' : '0'
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed.value ? '1' : '0')
+  })
   watch(theme, () => {
     applyTheme()
     localStorage.setItem(THEME_KEY, theme.value)
@@ -62,6 +124,13 @@ export function useAppearance() {
     try {
       theme.value = localStorage.getItem(THEME_KEY) || 'system'
       styleMode.value = localStorage.getItem(STYLE_KEY) || 'default'
+      layoutMode.value = localStorage.getItem(LAYOUT_KEY) || 'standard'
+      fontMode.value = localStorage.getItem(FONT_KEY) || 'auto'
+      mergedSidebar.value = localStorage.getItem(SIDEBAR_KEY) === '1'
+      sidebarCollapsed.value = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1'
+      homeStyle.value = localStorage.getItem(HOME_KEY) || 'classic'
+      // 默认开启的布尔项：只有显式存过 '0' 才关闭
+      groupSessionsByWorkspace.value = localStorage.getItem(GROUP_WS_KEY) !== '0'
       const savedWidth = localStorage.getItem(WIDTH_KEY)
       // 旧版 px 档位迁移到按比例档位
       const legacyMap = { '960px': '55%', '1200px': '70%', '1440px': '85%', none: '100%' }
@@ -76,7 +145,29 @@ export function useAppearance() {
     applyTheme()
     applyWidth()
     applyStyle()
+    applyLayout()
+    applyFont()
+    applySidebar()
+    applyHomeStyle()
   }
 
-  return { theme, contentWidth, styleMode, applyTheme, applyWidth, applyStyle, init, mount }
+  return {
+    theme,
+    contentWidth,
+    styleMode,
+    layoutMode,
+    fontMode,
+    mergedSidebar,
+    sidebarCollapsed,
+    homeStyle,
+    groupSessionsByWorkspace,
+    applyTheme,
+    applyWidth,
+    applyStyle,
+    applyLayout,
+    applyFont,
+    applySidebar,
+    init,
+    mount,
+  }
 }

@@ -8,7 +8,8 @@
  * 对齐（拆分前是 saveToolsSettings 里直接调用 loadSettings）。
  */
 import { ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { executeTool, saveSettings } from '../api'
 
 export function useSettingsForm(reload) {
@@ -27,8 +28,9 @@ export function useSettingsForm(reload) {
     command_sandbox: 'subprocess',
     sandbox_image: 'python:3.11-slim',
     sandbox_workspace_readonly: false,
+    sandbox_auto_allow: false,
     tool_permission_mode: 'ask',
-    permission_timeout: 300,
+    permission_timeout: 0,
     skill_sandbox_enabled: false,
     skills_index_max_chars: 12000,
     skills_full_view_max_chars: 24000,
@@ -79,8 +81,9 @@ export function useSettingsForm(reload) {
       command_sandbox: editable.command_sandbox || 'subprocess',
       sandbox_image: editable.sandbox_image || 'python:3.11-slim',
       sandbox_workspace_readonly: editable.sandbox_workspace_readonly === true,
+      sandbox_auto_allow: editable.sandbox_auto_allow === true,
       tool_permission_mode: editable.tool_permission_mode || 'ask',
-      permission_timeout: editable.permission_timeout ?? 300,
+      permission_timeout: editable.permission_timeout ?? 0,
       skill_sandbox_enabled: editable.skill_sandbox_enabled === true,
       skills_index_max_chars: editable.skills_index_max_chars ?? 12000,
       skills_full_view_max_chars: editable.skills_full_view_max_chars ?? 24000,
@@ -131,6 +134,7 @@ export function useSettingsForm(reload) {
         command_sandbox: f.command_sandbox,
         sandbox_image: f.sandbox_image,
         sandbox_workspace_readonly: f.sandbox_workspace_readonly,
+        sandbox_auto_allow: f.sandbox_auto_allow,
         tool_permission_mode: f.tool_permission_mode,
         permission_timeout: f.permission_timeout,
         skill_sandbox_enabled: f.skill_sandbox_enabled,

@@ -1,0 +1,305 @@
+/* ============================================================================
+   十套风格各自的"签名"样式：卡片 / 标题 / 按钮 / 选中态
+   目标不是换配色（配色在 theme.css 的令牌里），而是让每套风格在**形状与质感**上
+   一眼可辨：书斋的纸边与细线、素墨的硬边、赛博的荧光描边、卡布的柔圆等等。
+   只动全局层面（卡片、按钮、标题、导航选中），不动布局结构。
+   ========================================================================= */
+
+/* ---------------- 书斋：纸面 + 细墨线 + 衬线标题 ---------------- */
+html[data-style='salon'] .el-card {
+  border-color: color-mix(in srgb, var(--text-1) 14%, transparent);
+  box-shadow: none;
+  border-radius: 3px;
+}
+
+html[data-style='salon'] h1,
+html[data-style='salon'] h2,
+html[data-style='salon'] h3,
+html[data-style='salon'] .welcome-title,
+html[data-style='salon'] .page-title {
+  font-family: 'Noto Serif SC', Georgia, 'Times New Roman', serif;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+html[data-style='salon'] .el-button {
+  border-radius: 2px;
+}
+
+html[data-style='salon'] .el-button--primary {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 12%, transparent);
+}
+
+/* ---------------- 静雅：无边框卡片 + 大留白 ---------------- */
+html[data-style='quiet'] .el-card {
+  border-color: transparent;
+  box-shadow: none;
+  background: color-mix(in srgb, var(--bg-card) 92%, var(--bg-chat));
+}
+
+html[data-style='quiet'] .el-card:hover {
+  background: var(--bg-card);
+}
+
+html[data-style='quiet'] .el-button {
+  border-radius: var(--radius-pill);
+  font-weight: 500;
+}
+
+html[data-style='quiet'] .el-button:not(.el-button--primary):not(.is-text) {
+  border-color: transparent;
+  background: var(--bg-hover);
+}
+
+/* ---------------- 墨玉：卡片顶部青色细线 + 柔阴影 ---------------- */
+html[data-style='teal'] .el-card {
+  border-radius: 14px;
+  border-color: color-mix(in srgb, var(--primary) 18%, var(--border));
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--primary) 8%, transparent);
+  position: relative;
+  overflow: hidden;
+}
+
+html[data-style='teal'] .el-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    var(--primary),
+    color-mix(in srgb, var(--primary-2, var(--primary)) 60%, transparent)
+  );
+  opacity: 0.75;
+}
+
+html[data-style='teal'] .el-button {
+  border-radius: 10px;
+}
+
+/* ---------------- 子夜：暗色玻璃卡 + 紫罗兰描边泛光 ---------------- */
+html[data-style='midnight'] .el-card {
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-card) 86%, transparent);
+  border-color: color-mix(in srgb, var(--primary) 16%, var(--border));
+  backdrop-filter: blur(6px);
+}
+
+html[data-style='midnight'] .el-card:hover {
+  border-color: color-mix(in srgb, var(--primary) 38%, var(--border));
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
+html[data-style='midnight'] .el-button--primary {
+  box-shadow: 0 0 18px color-mix(in srgb, var(--primary) 26%, transparent);
+}
+
+/* ---------------- 素墨：硬边 + 等宽标题 + 全直角 ---------------- */
+html[data-style='mono'] .el-card {
+  border-radius: 0;
+  border-width: 1px;
+  border-color: var(--border-strong);
+  box-shadow: 2px 2px 0 0 color-mix(in srgb, var(--text-1) 8%, transparent);
+}
+
+html[data-style='mono'] .el-button {
+  border-radius: 0;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.02em;
+}
+
+html[data-style='mono'] h1,
+html[data-style='mono'] h2,
+html[data-style='mono'] h3,
+html[data-style='mono'] .welcome-title,
+html[data-style='mono'] .page-title {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* ---------------- 炭火：暖色渐变卡头 + 拾取式圆角 ---------------- */
+html[data-style='ember'] .el-card {
+  border-radius: 10px;
+  border-color: color-mix(in srgb, var(--primary) 20%, var(--border));
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--primary) 6%, var(--bg-card)) 0%,
+      var(--bg-card) 42%
+    );
+}
+
+/* 炭火的橙偏亮：白字压在纯 primary 上只有 3.27，文字按钮（1.82）更糊。
+   主按钮加深一档，文字按钮往正文色靠，明暗主题下都可读。 */
+html[data-style='ember'] .el-button--primary {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--primary) 78%, #1a0d06),
+    color-mix(in srgb, var(--primary) 58%, #1a0d06)
+  );
+  border-color: transparent;
+}
+
+html[data-style='ember'] .el-button.is-text,
+html[data-style='ember'] .el-button--text,
+html[data-style='ember'] .el-button.is-link,
+html[data-style='ember'] .el-link {
+  color: color-mix(in srgb, var(--primary) 62%, var(--text-1));
+}
+
+html[data-style='ember'] .el-button.is-text:hover,
+html[data-style='ember'] .el-button--text:hover,
+html[data-style='ember'] .el-button.is-link:hover,
+html[data-style='ember'] .el-link:hover {
+  color: var(--text-1);
+}
+
+/* ---------------- 赛博：荧光描边 + 网格底纹 ---------------- */
+html[data-style='cyber'] .el-card {
+  border-radius: 4px;
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--primary) 7%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--primary) 7%, transparent) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+html[data-style='cyber'] .el-button--primary {
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 60%, transparent);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--primary) 45%, transparent);
+}
+
+html[data-style='cyber'] .welcome-title,
+html[data-style='cyber'] .page-title {
+  text-shadow: 0 0 22px color-mix(in srgb, var(--primary) 32%, transparent);
+}
+
+/* ---------------- 卡布：柔圆 + 淡紫描边 ---------------- */
+html[data-style='catppuccin'] .el-card {
+  border-radius: 18px;
+  border-color: color-mix(in srgb, #cba6f7 22%, var(--border));
+}
+
+html[data-style='catppuccin'] .el-button {
+  border-radius: 12px;
+}
+
+html[data-style='catppuccin'] .el-tag {
+  border-radius: var(--radius-pill);
+}
+
+/* ---------------- 森野：苔绿描边 + 轻微纸感 ---------------- */
+html[data-style='everforest'] .el-card {
+  border-radius: 12px;
+  border-color: color-mix(in srgb, var(--primary) 20%, var(--border));
+  background: color-mix(in srgb, var(--primary) 4%, var(--bg-card));
+}
+
+html[data-style='everforest'] .el-button {
+  border-radius: 9px;
+}
+
+/* ---------------- 默认：保持克制，只统一圆角与阴影 ---------------- */
+html[data-style='default'] .el-card {
+  border-radius: var(--radius-lg);
+}
+
+/* 十套风格通用的导航选中态：细竖条 + 主色文字（不依赖具体布局） */
+html .app-menu .el-menu-item.is-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 20%;
+  bottom: 20%;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--primary);
+}
+
+html[data-style='mono'] .app-menu .el-menu-item.is-active::before,
+html[data-style='cyber'] .app-menu .el-menu-item.is-active::before {
+  border-radius: 0;
+  width: 2px;
+}
+
+/* ============================================================================
+   悬浮提示（el-tooltip）跟随当前风格：
+   底色用正文色、文字用卡片色（反相），保证任何风格下都清晰；
+   圆角/字号/字体跟随令牌，个别风格再给专属形态。
+   ========================================================================= */
+:root {
+  --tooltip-bg: var(--text-1);
+  --tooltip-fg: #fff;
+}
+
+html[data-theme='dark'] {
+  --tooltip-bg: color-mix(in srgb, var(--text-1) 92%, var(--bg-card));
+  --tooltip-fg: var(--bg-chat);
+}
+
+html[data-theme='light'] {
+  --tooltip-bg: color-mix(in srgb, var(--text-1) 94%, #000);
+  --tooltip-fg: #fff;
+}
+
+.el-popper.is-dark {
+  background: var(--tooltip-bg) !important;
+  color: var(--tooltip-fg) !important;
+  border-radius: var(--radius-md) !important;
+  font-family: inherit;
+  font-size: var(--font-sm);
+  line-height: 1.5;
+  padding: 6px 10px !important;
+  max-width: 320px;
+  box-shadow: var(--shadow-soft, 0 4px 16px rgba(0, 0, 0, 0.16)) !important;
+  border: 1px solid color-mix(in srgb, var(--primary) 18%, transparent) !important;
+}
+
+.el-popper.is-dark .el-popper__arrow::before {
+  background: var(--tooltip-bg) !important;
+  border: 1px solid color-mix(in srgb, var(--primary) 18%, transparent) !important;
+}
+
+/* 各风格的专属提示形态 */
+html[data-style='salon'] .el-popper.is-dark {
+  border-radius: 3px !important;
+  background: #fbf6ea !important;
+  color: #3b3128 !important;
+  border-color: #d8c9ab !important;
+  box-shadow: 0 2px 8px rgba(80, 60, 30, 0.16) !important;
+}
+
+html[data-style='salon'] .el-popper.is-dark .el-popper__arrow::before {
+  background: #fbf6ea !important;
+  border-color: #d8c9ab !important;
+}
+
+html[data-style='mono'] .el-popper.is-dark {
+  border-radius: 0 !important;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  border-color: var(--text-1) !important;
+}
+
+html[data-style='cyber'] .el-popper.is-dark {
+  border-radius: 3px !important;
+  border-color: var(--primary) !important;
+  box-shadow: 0 0 14px color-mix(in srgb, var(--primary) 40%, transparent) !important;
+  letter-spacing: 0.02em;
+}
+
+html[data-style='catppuccin'] .el-popper.is-dark {
+  border-radius: 12px !important;
+}
+
+html[data-style='ember'] .el-popper.is-dark {
+  background: color-mix(in srgb, var(--primary) 78%, #2b1206) !important;
+  color: #fff7ee !important;
+  border-color: transparent !important;
+}
+
+html[data-style='ember'] .el-popper.is-dark .el-popper__arrow::before {
+  background: color-mix(in srgb, var(--primary) 78%, #2b1206) !important;
+  border-color: transparent !important;
+}

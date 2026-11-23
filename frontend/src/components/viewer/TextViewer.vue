@@ -446,7 +446,7 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
   font-size: var(--font-base);
   line-height: 1.85;
   text-align: justify;
-  font-family: Consolas, 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   color: var(--text-1);
 }
 

@@ -28,6 +28,7 @@
           :data-page="n"
         >
           <canvas class="pv-canvas" />
+          <div class="pv-text-layer textLayer" />
           <div class="pv-page-no">{{ n }}</div>
         </div>
         <div v-if="!pageCount && !loading" class="pv-error"><el-empty description="PDF 无内容" /></div>
@@ -229,6 +230,8 @@ function renderVisible() {
       canvas.width = 0
       canvas.height = 0
     }
+    const layerDiv = el?.querySelector('.pv-text-layer')
+    if (layerDiv) layerDiv.innerHTML = ''
     p.renderedKey = ''
   }
 }
@@ -257,6 +260,28 @@ async function renderPage(n, token) {
     task = page.render({ canvasContext: canvas.getContext('2d'), viewport })
     p.task = task
     await task.promise
+    // 文本层：让 PDF 可划选/复制（与画布同尺寸，使用 CSS 像素视口）
+    const layerDiv = el.querySelector('.pv-text-layer')
+    if (layerDiv && token === renderToken) {
+      const textViewport = page.getViewport({ scale: cssScale })
+      layerDiv.innerHTML = ''
+      layerDiv.style.width = `${Math.floor(textViewport.width)}px`
+      layerDiv.style.height = `${Math.floor(textViewport.height)}px`
+      layerDiv.style.setProperty('--scale-factor', String(cssScale))
+      try {
+        const textContent = await page.getTextContent()
+        if (token === renderToken) {
+          const textLayer = new pdfjsLib.TextLayer({
+            textContentSource: textContent,
+            container: layerDiv,
+            viewport: textViewport,
+          })
+          await textLayer.render()
+        }
+      } catch {
+        // 文本层失败不影响画布阅读
+      }
+    }
     if (token === renderToken) p.renderedKey = scaleKey
   } catch {
     // RenderingCancelledException 是懒渲染的正常路径，其余单页失败也不致命
@@ -508,6 +533,30 @@ defineExpose({ getToc, jumpTo, applyLocator, applyPosition })
 
 .pv-canvas {
   display: block;
+}
+
+/* PDF 文本层：透明文字覆盖在画布上，用于划选/复制 */
+.pv-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  text-size-adjust: none;
+  transform-origin: 0 0;
+  z-index: 2;
+}
+
+.pv-text-layer span,
+.pv-text-layer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+}
+
+.pv-text-layer ::selection {
+  background: rgba(22, 119, 255, 0.25);
 }
 
 .pv-page-no {

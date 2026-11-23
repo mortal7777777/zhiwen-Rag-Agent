@@ -6,17 +6,16 @@
  * `reload` 为注入的完整刷新回调（保存后与服务端归一化对齐）。
  */
 import { computed, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import {
   exportProviders,
   getProviderPresets,
   importProviders,
-  listProviderModels,
   saveSettings,
-  speedtestProviders,
-  testProvider,
 } from '../api'
 import { headersToText, parseHeadersText, providerToPayload } from './providerPayload'
+import { useProviderModels } from './useProviderModels'
 
 export function useModelSettings(reload) {
   const settingsModel = ref(null)
@@ -39,6 +38,17 @@ export function useModelSettings(reload) {
   const rerankerProvider = ref('local')
   const rerankerApi = ref({ base_url: '', api_key: '', model: '' })
 
+  // 文档解析与 GPU 模型生命周期（2026-11-18）
+  const pdfParseBackend = ref('auto')
+  const paddleLazyStart = ref(true)
+  const paddleIdleSeconds = ref(600)
+  const paddlePagesPerProcess = ref(300)
+  const vlmFallback = ref(false)
+  const kbVisionEnabled = ref(true)
+  const kbVisionMaxImages = ref(3)
+  const gpuIdleEnabled = ref(true)
+  const gpuIdleMinutes = ref(30)
+
   const providerDialogVisible = ref(false)
   const providerDialogType = ref('chat')
   const providerSaving = ref(false)
@@ -50,6 +60,8 @@ export function useModelSettings(reload) {
     apiKey: '',
     thinkingEnabled: true,
     thinkingEffort: 'high',
+    supportsVision: false,
+    visionModelsText: '',
     presetKey: '',
     apiFormat: '',
     maxTokens: null,
@@ -59,18 +71,16 @@ export function useModelSettings(reload) {
   const presets = ref([])
   const speedtesting = ref(false)
 
-  // 模型管理对话框（勾选式编辑，存储仍是 list[str]）
-  const modelDialogVisible = ref(false)
-  const modelDialogProvider = ref(null)
-  const modelDialogOwnerName = ref('')
-  const modelDialogAll = ref([])
-  const modelDialogSelected = ref([])
-  const modelDialogFilter = ref('')
-  const modelDialogLoading = ref(false)
-  const modelDialogNew = ref('')
-
   const chatProviders = computed(() => providers.value.filter((p) => p.type === 'chat'))
   const visionProviders = computed(() => providers.value.filter((p) => p.type === 'vision'))
+
+  // 模型探测 / 模型管理对话框（独立 composable，状态与函数整体注入到返回对象）
+  const providerModels = useProviderModels({
+    providers,
+    providerForm,
+    providerSaving,
+    speedtesting,
+  })
 
   /** 把后端快照映射进模型域（原先内联在 loadSettings 里）。 */
   function applySnapshot(snapshot) {
@@ -83,10 +93,13 @@ export function useModelSettings(reload) {
         max_tokens: p.max_tokens ?? null,
         _keyInput: '',
         _modelsText: (p.models || []).join(', '),
+        _visionModelsText: (p.vision_models || []).join(', '),
+        supports_vision: p.supports_vision === true,
         _headersText: headersToText(p.headers),
         _testing: false,
         _testResult: null,
         _speedResult: null,
+        _expanded: false,
         thinking_enabled: p.thinking_enabled !== false,
         thinking_effort: p.thinking_effort || 'high',
       }))
@@ -118,6 +131,19 @@ export function useModelSettings(reload) {
         model: editable.reranker_api_model || '',
         _masked: editable.reranker_api_key || '',
       }
+      // 解析与 GPU 模型生命周期
+      pdfParseBackend.value = editable.pdf_parse_backend || 'auto'
+      paddleLazyStart.value = editable.paddle_ocr_lazy_start !== false
+      paddleIdleSeconds.value = Number(editable.paddle_ocr_idle_timeout_s ?? 600)
+      paddlePagesPerProcess.value = Number(
+        editable.paddle_ocr_pages_per_process ?? 300,
+      )
+      vlmFallback.value = editable.paddle_ocr_vlm_fallback === true
+      kbVisionEnabled.value = editable.kb_vision_image_answer !== false
+      kbVisionMaxImages.value = Number(editable.kb_vision_max_images ?? 3)
+      const idleMinutes = Number(editable.gpu_model_idle_unload_minutes ?? 30)
+      gpuIdleEnabled.value = idleMinutes > 0
+      gpuIdleMinutes.value = idleMinutes > 0 ? idleMinutes : 30
   }
 
   function openProviderDialog(type) {
@@ -130,6 +156,8 @@ export function useModelSettings(reload) {
       apiKey: '',
       thinkingEnabled: true,
       thinkingEffort: 'high',
+      supportsVision: false,
+      visionModelsText: '',
       presetKey: '',
       apiFormat: '',
       maxTokens: null,
@@ -166,36 +194,6 @@ export function useModelSettings(reload) {
     form.thinkingEffort = 'high'
   }
 
-  /** 对话框内拉取模型（草稿用明文 Key；不落库） */
-  async function fetchDraftModels() {
-    const form = providerForm.value
-    if (!form.base_url.trim()) {
-      ElMessage.warning('请先填写接口地址')
-      return
-    }
-    providerSaving.value = true
-    try {
-      const res = await listProviderModels({
-        base_url: form.base_url.trim(),
-        api_key: form.apiKey.trim(),
-        model: form.model.trim(),
-        api_format: form.apiFormat,
-      })
-      if (res.ok && res.models.length) {
-        const ids = res.models.map((m) => m.id)
-        form.modelsText = ids.join(', ')
-        if (!ids.includes(form.model)) form.model = ids[0]
-        ElMessage.success(`拉取到 ${ids.length} 个模型`)
-      } else {
-        ElMessage.warning(res.error || '未拉取到模型')
-      }
-    } catch (error) {
-      ElMessage.error(error.response?.data?.detail || '拉取模型失败')
-    } finally {
-      providerSaving.value = false
-    }
-  }
-
   async function confirmAddProvider() {
     const form = providerForm.value
     if (!form.name.trim() || !form.base_url.trim() || !form.model.trim()) {
@@ -226,12 +224,21 @@ export function useModelSettings(reload) {
           : {}),
         ...(isChat && form.maxTokens ? { max_tokens: Number(form.maxTokens) } : {}),
         ...(isChat && Object.keys(headers).length ? { headers } : {}),
+        supports_vision: isChat ? !!form.supportsVision : false,
+        vision_models: isChat
+          ? String(form.visionModelsText || '')
+              .split(/[,，]/)
+              .map((m) => m.trim())
+              .filter(Boolean)
+          : [],
         _keyInput: '',
         _modelsText: models.join(', '),
+        _visionModelsText: isChat ? (form.visionModelsText || '') : '',
         _headersText: isChat ? form.headersText : '',
         _testing: false,
         _testResult: null,
         _speedResult: null,
+        _expanded: true, // 新加供应商立即展开，方便继续补配置
         thinking_enabled: !isChat || form.thinkingEnabled,
         thinking_effort: isChat ? form.thinkingEffort : 'high',
       })
@@ -246,120 +253,6 @@ export function useModelSettings(reload) {
     } finally {
       providerSaving.value = false
     }
-  }
-
-  async function fetchChatModels(p) {
-    p._modelsLoading = true
-    try {
-      // 按卡片自身的配置拉取（修复"永远拉激活供应商"的既有 bug）；Key 未改
-      // 时传掩码 + id，由后端按"同 id 同 host"规则还原
-      const res = await listProviderModels(providerToPayload(p))
-      if (res.ok && res.models.length) {
-        const ids = res.models.map((m) => m.id)
-        p._modelsText = ids.join(', ')
-        if (!ids.includes(p.model)) p.model = ids[0]
-        ElMessage.success(`拉取到 ${ids.length} 个模型`)
-      } else {
-        ElMessage.warning(res.error || '未拉取到模型')
-      }
-    } catch (error) {
-      ElMessage.error(error.response?.data?.detail || '拉取模型失败')
-    } finally {
-      p._modelsLoading = false
-    }
-  }
-
-  /** 测试连接：恒 200，结果进 p._testResult（模板里显示徽标与错误 tooltip） */
-  async function testProviderCard(p) {
-    p._testing = true
-    try {
-      p._testResult = await testProvider(providerToPayload(p))
-    } catch (error) {
-      p._testResult = {
-        ok: false,
-        error: error.response?.data?.detail || String(error),
-      }
-    } finally {
-      p._testing = false
-    }
-  }
-
-  /** 全部测速：服务端并发跑已存配置，结果按 id 回填到各卡片 */
-  async function runSpeedtest() {
-    speedtesting.value = true
-    try {
-      const res = await speedtestProviders()
-      const byId = Object.fromEntries((res.results || []).map((r) => [r.id, r]))
-      for (const p of providers.value) {
-        if (byId[p.id]) p._speedResult = byId[p.id]
-      }
-      ElMessage.success('测速完成')
-    } catch (error) {
-      ElMessage.error(error.response?.data?.detail || '测速失败')
-    } finally {
-      speedtesting.value = false
-    }
-  }
-
-  // ---------------- 模型管理对话框（勾选式；存储仍是逗号列表） ----------------
-
-  function openModelDialog(p) {
-    modelDialogProvider.value = p
-    modelDialogOwnerName.value = p.name
-    modelDialogSelected.value = (p._modelsText || '')
-      .split(/[,，]/)
-      .map((m) => m.trim())
-      .filter(Boolean)
-    modelDialogAll.value = [...modelDialogSelected.value]
-    modelDialogFilter.value = ''
-    modelDialogNew.value = ''
-    modelDialogVisible.value = true
-    refreshModelOptions()
-  }
-
-  async function refreshModelOptions() {
-    const p = modelDialogProvider.value
-    if (!p) return
-    modelDialogLoading.value = true
-    try {
-      const res = await listProviderModels(providerToPayload(p))
-      if (res.ok && res.models.length) {
-        const ids = res.models.map((m) => m.id)
-        modelDialogAll.value = [...new Set([...modelDialogSelected.value, ...ids])]
-      } else if (res.error) {
-        ElMessage.warning(`在线列表拉取失败（${res.error}），可手动添加`)
-      }
-    } catch (error) {
-      ElMessage.warning(error.response?.data?.detail || '在线列表拉取失败，可手动添加')
-    } finally {
-      modelDialogLoading.value = false
-    }
-  }
-
-  function toggleModelOption(id, checked) {
-    const selected = modelDialogSelected.value
-    const idx = selected.indexOf(id)
-    if (checked && idx === -1) selected.push(id)
-    if (!checked && idx !== -1) selected.splice(idx, 1)
-  }
-
-  function addModelOption() {
-    const name = modelDialogNew.value.trim()
-    if (!name) return
-    if (!modelDialogAll.value.includes(name)) modelDialogAll.value.push(name)
-    if (!modelDialogSelected.value.includes(name)) modelDialogSelected.value.push(name)
-    modelDialogNew.value = ''
-  }
-
-  function modelDialogCommit() {
-    const p = modelDialogProvider.value
-    if (!p) return
-    const selected = modelDialogSelected.value
-    p._modelsText = selected.join(', ')
-    if (p.model && !selected.includes(p.model)) p.model = selected[0] || ''
-    if (!p.model && selected.length) p.model = selected[0]
-    modelDialogVisible.value = false
-    ElMessage.success(`已更新模型列表（${selected.length} 个），保存后生效`)
   }
 
   // ---------------- 导入 / 导出 ----------------
@@ -487,6 +380,18 @@ export function useModelSettings(reload) {
         reranker_provider: rerankerProvider.value,
         reranker_api_base_url: rerankerApi.value.base_url.trim(),
         reranker_api_model: rerankerApi.value.model.trim(),
+        // 文档解析与 GPU 模型生命周期
+        pdf_parse_backend: pdfParseBackend.value,
+        paddle_ocr_lazy_start: paddleLazyStart.value,
+        paddle_ocr_idle_timeout_s: Number(paddleIdleSeconds.value) || 0,
+        paddle_ocr_pages_per_process:
+          Number(paddlePagesPerProcess.value) || 0,
+        paddle_ocr_vlm_fallback: vlmFallback.value,
+        kb_vision_image_answer: kbVisionEnabled.value,
+        kb_vision_max_images: Number(kbVisionMaxImages.value) || 3,
+        gpu_model_idle_unload_minutes: gpuIdleEnabled.value
+          ? Math.max(1, Number(gpuIdleMinutes.value) || 30)
+          : 0,
       }
       if (tavilyKey.value.trim()) updates.tavily_api_key = tavilyKey.value.trim()
       if (embeddingApi.value.api_key.trim())
@@ -504,6 +409,7 @@ export function useModelSettings(reload) {
   }
 
   return {
+    ...providerModels,
     settingsModel,
     providers,
     activeChatId,
@@ -520,6 +426,15 @@ export function useModelSettings(reload) {
     embeddingApi,
     rerankerProvider,
     rerankerApi,
+    pdfParseBackend,
+    paddleLazyStart,
+    paddleIdleSeconds,
+    paddlePagesPerProcess,
+    vlmFallback,
+    kbVisionEnabled,
+    kbVisionMaxImages,
+    gpuIdleEnabled,
+    gpuIdleMinutes,
     providerDialogVisible,
     providerDialogType,
     providerSaving,
@@ -529,29 +444,12 @@ export function useModelSettings(reload) {
     ioBusy,
     exportProvidersToFile,
     importProvidersFromFile,
-    modelDialogVisible,
-    modelDialogProvider,
-    modelDialogOwnerName,
-    modelDialogAll,
-    modelDialogSelected,
-    modelDialogFilter,
-    modelDialogLoading,
-    modelDialogNew,
     chatProviders,
     visionProviders,
     applySnapshot,
     openProviderDialog,
     applyPreset,
-    fetchDraftModels,
     confirmAddProvider,
-    fetchChatModels,
-    testProviderCard,
-    runSpeedtest,
-    openModelDialog,
-    refreshModelOptions,
-    toggleModelOption,
-    addModelOption,
-    modelDialogCommit,
     onProviderEnabledChange,
     removeProvider,
     saveModelSettings,

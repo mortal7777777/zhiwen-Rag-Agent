@@ -6,7 +6,8 @@
  * 打开设置页时由 App.vue 的 watch(settingsVisible) 调 loadMcp() 刷新。
  */
 import { ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import {
   connectMcpServers,
   listMcpServers,

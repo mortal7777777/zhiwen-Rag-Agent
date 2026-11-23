@@ -5,7 +5,14 @@
       <div class="pane-sub">历史窗口 · 长期记忆 · 项目记忆 · 检查点</div>
     </div>
 
-    <div class="settings-section">
+    <SettingsSubnav
+      v-model="activeMemoryTab"
+      :tabs="memoryTabs"
+      storage-key="rag_memory_settings_tab"
+      label="记忆设置分组"
+    />
+
+    <div class="settings-section" v-show="activeMemoryTab === 'context'">
       <div class="settings-label">上下文窗口</div>
       <div class="generic-form">
         <div class="generic-row">
@@ -39,7 +46,7 @@
       </div>
     </div>
 
-    <div class="settings-section">
+    <div class="settings-section" v-show="activeMemoryTab === 'memory'">
       <div class="settings-label">长期记忆</div>
       <div class="generic-form">
         <div class="generic-row">
@@ -74,7 +81,7 @@
       </div>
     </div>
 
-    <div class="settings-section">
+    <div class="settings-section" v-show="activeMemoryTab === 'project'">
       <div class="section-head">
         <span class="settings-label">项目记忆（AGENTS.md）</span>
         <el-button size="small" @click="exportProjectMemory">导出</el-button>
@@ -98,7 +105,7 @@
       </div>
     </div>
 
-    <div class="settings-section">
+    <div class="settings-section" v-show="activeMemoryTab === 'checkpoints'">
       <div class="settings-label">检查点（原生快照）</div>
       <div class="generic-form">
         <div class="generic-row">
@@ -143,11 +150,28 @@
  * 表单域与保存来自 useSettingsForm；「项目记忆」导出/查看及其预览对话框
  * 属本面板专用，随组件走（对话框 append-to-body，单根节点内不影响父级 v-show）。
  */
-import { inject, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, inject, ref } from 'vue'
+import { ElMessage } from 'element-plus/es/components/message/index'
+import {
+  ChatDotRound,
+  Collection,
+  Document,
+  Timer,
+} from '@element-plus/icons-vue'
 import { exportProjectMemory as apiExportProjectMemory, getProjectMemory } from '../../api'
+import SettingsSubnav from './SettingsSubnav.vue'
 
 const { toolsForm, toolsSaving, saveToolsSettings } = inject('settingsForm')
+
+/** 当前记忆设置分组（记忆上次选择由 SettingsSubnav 负责） */
+const activeMemoryTab = ref('context')
+
+const memoryTabs = computed(() => [
+  { key: 'context', label: '上下文窗口', icon: ChatDotRound },
+  { key: 'memory', label: '长期记忆', icon: Collection },
+  { key: 'project', label: '项目记忆', icon: Document },
+  { key: 'checkpoints', label: '检查点', icon: Timer },
+])
 
 const memoryDialogVisible = ref(false)
 const memoryPath = ref('')

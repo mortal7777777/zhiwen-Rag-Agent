@@ -8,13 +8,21 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "check:chat": "node scripts/check_chat_utils.mjs",
+    "check:scope": "node scripts/check_scope_utils.mjs",
     "check:stream": "node scripts/check_stream_handlers.mjs",
     "check:typewriter": "node scripts/check_typewriter.mjs",
     "check:api": "node scripts/check_api_sse.mjs",
+    "check:inspector": "node scripts/check_inspector.mjs",
+    "check:suggestions": "node scripts/check_next_suggestions.mjs",
     "check:settings": "node scripts/check_settings_form.mjs",
     "check:payload": "node scripts/check_provider_payload.mjs",
-    "check": "npm run check:stream && npm run check:typewriter && npm run check:api && npm run check:settings && npm run check:payload",
-    "shot:cards": "node dev/shot_cards.mjs"
+    "check": "npm run check:chat && npm run check:scope && npm run check:stream && npm run check:typewriter && npm run check:api && npm run check:inspector && npm run check:suggestions && npm run check:settings && npm run check:payload",
+    "lint": "eslint src --max-warnings 9999",
+    "shot:cards": "node dev/shot_cards.mjs",
+    "smoke:chat": "node dev/smoke_chat.mjs",
+    "smoke:features": "node dev/smoke_features.mjs",
+    "smoke:selection": "node dev/smoke_selection.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
@@ -30,7 +38,12 @@
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@vitejs/plugin-vue": "^5.2.1",
+    "eslint": "^10.14.0",
+    "eslint-plugin-vue": "^10.12.1",
+    "globals": "^17.14.0",
+    "unplugin-vue-components": "^32.1.0",
     "vite": "^6.0.5"
   }
 }

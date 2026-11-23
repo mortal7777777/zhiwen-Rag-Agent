@@ -1,13 +1,16 @@
 <template>
-  <div class="knowledge-page">
+  <div :class="['knowledge-page', viewClass]">
     <!-- 索引状态卡片 -->
     <el-card shadow="never" class="status-card">
       <template #header>
         <div class="header-row">
           <span class="card-title">知识库管理</span>
-          <el-button type="warning" plain :loading="rebuilding" @click="handleRebuild">
-            重建索引
-          </el-button>
+          <div class="header-end">
+            <ViewLayoutSwitch v-model="kbView" :options="kbViewOptions" />
+            <el-button type="warning" plain :loading="rebuilding" @click="handleRebuild">
+              重建索引
+            </el-button>
+          </div>
         </div>
       </template>
 
@@ -29,6 +32,53 @@
           更改目录
         </el-button>
       </div>
+
+      <!-- 索引健康：账本指纹 vs 当前目录（增量重建的输入） -->
+      <div class="health-row">
+        <el-tag :type="health.stale ? 'warning' : 'success'">
+          文件 {{ health.current_files ?? '-' }} · 待更新
+          {{ (health.added_count || 0) + (health.changed_count || 0) }} · 已删除
+          {{ health.missing_count || 0 }}
+        </el-tag>
+        <span class="health-meta">
+          最近构建：{{ health.last_built_at || '-' }}
+          <template v-if="health.error"> · 状态异常</template>
+        </span>
+        <el-button size="small" @click="loadHealth">刷新健康</el-button>
+        <el-button
+          size="small"
+          type="primary"
+          plain
+          :disabled="!health.stale"
+          :loading="refreshingIndex"
+          @click="handleRefreshIndex"
+        >
+          应用增量
+        </el-button>
+      </div>
+      <el-collapse v-if="health.stale" class="health-files">
+        <el-collapse-item
+          v-if="health.added_files?.length"
+          :title="`新增/未索引文件（${health.added_count}）`"
+          name="added"
+        >
+          <div v-for="f in health.added_files" :key="f" class="health-file">{{ f }}</div>
+        </el-collapse-item>
+        <el-collapse-item
+          v-if="health.changed_files?.length"
+          :title="`内容已变化（${health.changed_count}，待重嵌）`"
+          name="changed"
+        >
+          <div v-for="f in health.changed_files" :key="f" class="health-file">{{ f }}</div>
+        </el-collapse-item>
+        <el-collapse-item
+          v-if="health.missing_files?.length"
+          :title="`磁盘已删除（${health.missing_count}，待清理）`"
+          name="missing"
+        >
+          <div v-for="f in health.missing_files" :key="f" class="health-file">{{ f }}</div>
+        </el-collapse-item>
+      </el-collapse>
     </el-card>
 
     <!-- 上传区域 -->
@@ -49,7 +99,7 @@
         <div class="el-upload__text">
           <template v-if="uploading">
             <el-icon class="is-loading"><Loading /></el-icon>
-            正在上传并索引（{{ uploadProgress || '准备中...' }}），请勿关闭页面...
+            正在上传（{{ uploadProgress || '准备中...' }}）...
           </template>
           <template v-else>
             拖拽文件到此处，或<em>点击选择</em>
@@ -57,19 +107,25 @@
         </div>
         <template #tip>
           <div class="el-upload__tip">
-            支持 txt / md / csv / doc / docx / xlsx / pdf / epub，上传后自动增量更新索引；
-            同名重传会提示把旧文件归档为历史版本，重复内容会给出查重警告
+            支持 txt / md / csv / doc / docx / xlsx / pdf / epub，上传后增量更新索引在
+            <b>后台</b>进行；同名重传会提示把旧文件归档为历史版本，重复内容会给出查重警告
+          </div>
+          <div v-if="ingesting" class="ingest-hint">
+            <el-icon class="is-loading"><Loading /></el-icon>
+            <span>
+              后台解析索引中{{ ingestPendingText }}——可离开本页，完成后自动刷新列表
+            </span>
           </div>
         </template>
       </el-upload>
       <el-button
         type="primary"
         class="upload-button"
-        :disabled="uploading"
-        :loading="uploading"
+        :disabled="uploading || ingesting"
+        :loading="uploading || ingesting"
         @click="handleUpload"
       >
-        上传并索引
+        {{ ingesting ? '后台索引中…' : '上传并索引' }}
       </el-button>
     </el-card>
 
@@ -121,9 +177,10 @@
           <template #default="{ row }">{{ formatSize(row.size) }}</template>
         </el-table-column>
         <el-table-column prop="modified" label="修改时间" width="170" />
-        <el-table-column label="操作" width="230" align="center" class-name="ops-cell">
+        <el-table-column label="操作" width="290" align="center" class-name="ops-cell">
           <template #default="{ row }">
             <el-button type="primary" link @click="handlePreview(row)">预览</el-button>
+            <el-button type="primary" link @click="askAboutDoc(row)">问此文档</el-button>
             <el-button type="primary" link @click="openMetaEdit(row)">分类</el-button>
             <el-button type="primary" link @click="openRename(row)">重命名</el-button>
             <el-button type="danger" link @click="handleDelete(row)">删除</el-button>
@@ -133,7 +190,7 @@
     </el-card>
 
     <!-- 文档预览：专业查看器（pdf/epub/docx/文本 按格式分发 + 目录 + 位置记忆） -->
-    <DocumentViewer ref="docViewerRef" />
+    <DocumentViewer ref="docViewerRef" @ask-selection="handleAskSelection" />
 
     <!-- 分类编辑对话框 -->
     <el-dialog v-model="metaEditVisible" title="文档分类" width="440px" append-to-body>
@@ -155,10 +212,13 @@
           </el-select>
         </el-form-item>
         <el-form-item label="标签">
-          <el-input
-            v-model="metaForm.tags"
-            placeholder="多个标签用逗号分隔，如：RAG, 教程"
-          />
+          <div class="meta-field">
+            <el-input
+              v-model="metaForm.tags"
+              placeholder="多个标签用逗号分隔，如：RAG, 教程"
+            />
+            <div class="meta-hint">标签仅备忘与展示，不参与检索；检索请使用「分类」筛选或对话页的「范围」。</div>
+          </div>
         </el-form-item>
         <el-form-item label="备注">
           <el-input
@@ -351,19 +411,26 @@ defineOptions({ name: 'KnowledgeView' })
 
 // 上次成功加载时间（初始视为刚加载，避免首次 onActivated 重复拉取）
 let lastLoadedAt = Date.now()
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled, Loading, ArrowDown } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
+import { useRouter } from 'vue-router'
+import { UploadFilled, Loading, ArrowDown, Grid, Files, List } from '@element-plus/icons-vue'
+import ViewLayoutSwitch from '../components/ViewLayoutSwitch.vue'
+import { usePageLayout } from '../composables/usePageLayout'
 import DocumentViewer from '../components/DocumentViewer.vue'
+import { seedChat } from '../composables/useChatSeed'
 import DirPicker from '../components/DirPicker.vue'
 import {
   archiveDocumentVersion,
   deleteDocument,
   deleteDocumentVersion,
+  getIndexHealth,
   getIndexStatus,
   getDocumentMeta,
   listDocuments,
   listDocumentVersions,
   rebuildIndex,
+  refreshIndex,
   renameDocument,
   restoreDocumentVersion,
   saveDocumentMeta,
@@ -371,9 +438,21 @@ import {
   uploadDocuments,
 } from '../api'
 
+const router = useRouter()
+
+// 页面布局变体（卡片 / 双栏 / 紧凑），差异见 styles/view-variants.css
+const kbViewOptions = [
+  { value: 'cards', label: '卡片', icon: Grid, hint: '卡片：状态 + 上传/文档顺序纵向排布' },
+  { value: 'split', label: '双栏', icon: Files, hint: '双栏：左侧状态常驻，右侧文档与上传' },
+  { value: 'dense', label: '紧凑', icon: List, hint: '紧凑：压缩内边距与标签，一屏看更多' },
+]
+const { variant: kbView, viewClass } = usePageLayout('rag_kb_view', kbViewOptions, 'cards')
 const documents = ref([])
 const status = ref({})
+const health = ref({})
+const refreshingIndex = ref(false)
 const uploading = ref(false)
+const ingesting = ref(false) // 后台增量索引进行中（上传/改名/恢复触发）
 const rebuilding = ref(false)
 const tableLoading = ref(false)
 const uploadRef = ref(null)
@@ -451,16 +530,80 @@ function formatSize(size) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
+/** 带着文档范围跳到对话页：ChatView 读取 query 后会把范围写进输入区 */
+function askAboutDoc(row) {
+  router.push({
+    path: '/',
+    query: { scope_doc: row.relative_path, scope_label: row.name },
+  })
+}
+
+/** 查看器划选 → 带原文与范围跳到对话页 */
+function handleAskSelection(payload) {
+  if (!payload?.text) return
+  const intents = {
+    explain: '请解释这段内容',
+    translate: '请翻译这段内容',
+    summarize: '请总结这段内容',
+  }
+  seedChat({
+    quote: {
+      text: payload.text,
+      context: payload.context || '',
+      source: payload.source || '',
+      page: payload.page ?? null,
+    },
+    scope: payload.source
+      ? {
+          type: 'doc',
+          value: payload.source,
+          label: payload.source.split('/').pop(),
+        }
+      : null,
+    question: intents[payload.intent] || intents.explain,
+  })
+  docViewerRef.value?.close?.()
+  router.push('/')
+}
+
 async function refresh({ silent = false } = {}) {
   try {
-    const [docs, indexStatus] = await Promise.all([listDocuments(), getIndexStatus()])
+    const [docs, indexStatus, indexHealth] = await Promise.all([
+      listDocuments(),
+      getIndexStatus(),
+      getIndexHealth().catch(() => null),
+    ])
     documents.value = docs
     status.value = indexStatus
+    if (indexHealth) health.value = indexHealth
     // 分类选项 = 当前使用的分类（含"未分类"文档不列出）
     categories.value = [...new Set(docs.map((d) => d.category).filter(Boolean))]
     lastLoadedAt = Date.now()
   } catch (error) {
     if (!silent) ElMessage.error(error.response?.data?.detail || '获取数据失败，请确认后端已启动')
+  }
+}
+
+async function loadHealth() {
+  try {
+    health.value = await getIndexHealth()
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '读取索引健康失败')
+  }
+}
+
+async function handleRefreshIndex() {
+  if (refreshingIndex.value) return
+  refreshingIndex.value = true
+  try {
+    health.value = await refreshIndex()
+    status.value = health.value
+    await refresh({ silent: true })
+    ElMessage.success('增量索引已应用')
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '增量更新失败')
+  } finally {
+    refreshingIndex.value = false
   }
 }
 
@@ -476,6 +619,8 @@ async function handleUpload() {
   uploading.value = true
   let ok = 0
   let skipped = 0
+  let pending = 0
+  let asyncIngest = false
   const failures = []
   try {
     // 逐文件上传：查重冲突（409）时弹确认，逐文件决策互不阻塞
@@ -483,8 +628,12 @@ async function handleUpload() {
       uploadProgress.value = `${i + 1}/${files.length} ${files[i].name}`
       try {
         const result = await uploadOne(files[i])
-        if (result === 'ok') ok += 1
-        else skipped += 1
+        asyncIngest = asyncIngest || !!result.indexAsync
+        if (result.status === 'ok') ok += 1
+        else if (result.status === 'pending') {
+          ok += 1
+          pending += 1
+        } else skipped += 1
       } catch (error) {
         failures.push(`${files[i].name}：${error.message || '上传失败'}`)
       }
@@ -497,34 +646,95 @@ async function handleUpload() {
     fileList.value = []
     await refresh()
   }
+  if (asyncIngest) startIngestPolling()
   const parts = []
   if (ok) parts.push(`成功 ${ok} 个`)
   if (skipped) parts.push(`跳过 ${skipped} 个`)
+  if (pending) parts.push(`${pending} 个待重建索引后生效`)
   if (failures.length) parts.push(`失败 ${failures.length} 个（${failures[0]}）`)
-  if (failures.length) ElMessage.warning(parts.join('，'))
+  if (failures.length || pending) ElMessage.warning(parts.join('，'))
   else ElMessage.success(parts.join('，') || '没有可上传的文件')
 }
 
 /** 上传单个文件：正常直传；409 查重冲突时弹窗确认，确认后带版本号重传。 */
 async function uploadOne(raw) {
   try {
-    await uploadDocuments([raw])
-    return 'ok'
+    const result = await uploadDocuments([raw])
+    return {
+      status: result?.indexPending ? 'pending' : 'ok',
+      indexAsync: !!result?.indexAsync,
+    }
   } catch (error) {
     const status = error.response?.status
     const detail = error.response?.data?.detail
     if (status !== 409 || !detail || !Array.isArray(detail.files) || !detail.files.length) {
-      throw new Error(typeof detail === 'string' ? detail : '上传失败')
+      throw new Error(typeof detail === 'string' ? detail : '上传失败', { cause: error })
     }
     const decision = await openUploadConflict(raw.name, detail.files[0])
-    if (!decision) return 'skipped'
-    await uploadDocuments([raw], {
+    if (!decision) return { status: 'skipped', indexAsync: false }
+    const result = await uploadDocuments([raw], {
       conflictPolicy: 'proceed',
       archiveVersionNo: decision.versionNo,
       archiveNote: decision.note,
     })
-    return 'ok'
+    return {
+      status: result?.indexPending ? 'pending' : 'ok',
+      indexAsync: !!result?.indexAsync,
+    }
   }
+}
+
+// ---------------- 后台增量索引轮询 ----------------
+
+/** 后台索引剩余文件数（账本差异即待索引集合，ingest 状态之外也算进度）。 */
+const ingestPendingText = computed(() => {
+  const st = health.value?.ingest || {}
+  const queued =
+    Number(health.value?.added_count || 0) + Number(health.value?.changed_count || 0)
+  if (st.running && queued > 0) return `（剩余约 ${queued} 个文件）`
+  if (st.running && st.reason === 'upload') return ''
+  return ''
+})
+
+let ingestPollTimer = null
+
+/**
+ * 轮询 /api/index/health 直到后台增量索引结束（上传/改名/恢复版本触发）。
+ * 页面刷新/切换回来时若索引仍在跑，onMounted 也会重新挂上轮询。
+ */
+function startIngestPolling() {
+  if (ingesting.value || ingestPollTimer) return
+  ingesting.value = true
+  const startedAt = Date.now()
+  ingestPollTimer = setInterval(async () => {
+    try {
+      health.value = await getIndexHealth()
+    } catch {
+      return // 网络抖动不打断轮询
+    }
+    const st = health.value?.ingest || {}
+    if (!st.running) {
+      clearInterval(ingestPollTimer)
+      ingestPollTimer = null
+      ingesting.value = false
+      if (st.error) {
+        ElMessage.warning(`后台索引结束：${st.error}`)
+      } else if (st.note) {
+        ElMessage.info(`后台索引结束：${st.note}`)
+      } else {
+        ElMessage.success('后台索引完成，知识库已更新')
+      }
+      await refresh({ silent: true })
+      return
+    }
+    // 兜底上限：异常卡住时停止轮询（索引仍在后台跑，手动刷新可看结果）
+    if (Date.now() - startedAt > 15 * 60 * 1000) {
+      clearInterval(ingestPollTimer)
+      ingestPollTimer = null
+      ingesting.value = false
+      ElMessage.info('后台索引仍在进行，可稍后手动刷新查看进度')
+    }
+  }, 2000)
 }
 
 function openUploadConflict(fileName, check) {
@@ -612,7 +822,7 @@ async function handleDelete(row) {
 async function handleRebuild() {
   try {
     await ElMessageBox.confirm(
-      '重建索引会删除旧索引并重新嵌入全部文档，可能耗时较长，确定继续吗？',
+      '重建会重新解析并嵌入全部文档，在后台执行（期间旧索引继续可用），可能耗时较长，确定继续吗？',
       '提示',
       { type: 'warning' },
     )
@@ -621,9 +831,14 @@ async function handleRebuild() {
   }
   rebuilding.value = true
   try {
-    status.value = await rebuildIndex()
-    ElMessage.success('索引重建完成')
-    await refresh()
+    const result = await rebuildIndex()
+    if (result?.started === false && result?.reason === 'already_running') {
+      ElMessage.info('索引重建已在后台进行中')
+    } else {
+      ElMessage.success('索引重建已转入后台，完成后自动切换；期间旧索引继续可检索')
+    }
+    status.value = await getIndexStatus()
+    await loadHealth()
   } catch (error) {
     ElMessage.error(error.response?.data?.detail || '重建失败')
   } finally {
@@ -894,6 +1109,8 @@ onMounted(() => {
   tableLoading.value = true
   refresh().finally(() => {
     tableLoading.value = false
+    // 页面刷新时后台索引仍在跑：重新挂上轮询（上传入口只在触发方挂）
+    if (health.value?.ingest?.running) startIngestPolling()
   })
 })
 
@@ -953,6 +1170,33 @@ onActivated(() => {
   flex-shrink: 0;
 }
 
+/* 索引健康：与数据目录同区展示，差异文件折叠展开 */
+.health-row {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: var(--font-xs);
+  color: var(--text-3);
+}
+
+.health-meta {
+  margin-right: auto;
+}
+
+.health-files {
+  margin-top: 8px;
+}
+
+.health-file {
+  font-family: var(--font-mono);
+  font-size: var(--font-2xs);
+  line-height: 1.6;
+  color: var(--text-2);
+  word-break: break-all;
+}
+
 .dir-hint {
   font-size: var(--font-xs);
   color: var(--text-3);
@@ -965,6 +1209,17 @@ onActivated(() => {
 
 .upload-button {
   margin-top: 12px;
+}
+
+/* 后台索引提示条（上传落盘后解析+嵌入在后台进行） */
+.ingest-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--primary-text);
+  font-size: var(--font-xs, 12px);
+  line-height: 1.6;
 }
 
 .category-filter {
@@ -1005,6 +1260,17 @@ onActivated(() => {
   font-size: var(--font-sm);
   color: var(--text-2);
   word-break: break-all;
+}
+
+.meta-field {
+  width: 100%;
+}
+
+.meta-hint {
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: var(--font-xs);
+  line-height: 1.5;
 }
 
 /* 版本管理 / 查重提示 */

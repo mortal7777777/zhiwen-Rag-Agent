@@ -1,32 +1,101 @@
 <template>
   <div class="chat-page">
-    <!-- 左侧：会话列表（可折叠） -->
-    <SessionList
-      v-model:collapsed="sessionCollapsed"
-      :sessions="sessions"
-      :active-id="activeId"
-      :loading="loading"
-      @new-chat="startNewChat"
-      @switch="switchSession"
-      @rename="handleRename"
-      @delete="handleDelete"
+    <!-- 左侧：会话列表（可折叠）。
+         单列布局（Claude/Hermes）下传送进侧栏插槽，与导航同列。 -->
+    <Teleport to="#nav-session-slot" :disabled="!singleColumn">
+      <SessionList
+        :collapsed="!singleColumn && sessionCollapsed"
+        :sessions="sessions"
+        :active-id="activeId"
+        :loading="loading"
+        :group-by-workspace="groupSessionsByWorkspace"
+        :search-results="sessionSearchResults"
+        :search-loading="sessionSearchLoading"
+        @new-chat="startNewChat"
+        @new-chat-in-workspace="startNewChatInWorkspace"
+        @switch="handleSwitchSession"
+        @rename="handleRename"
+        @delete="handleDelete"
+        @pin="handlePin"
+        @search="onSessionSearch"
+        @update:collapsed="sessionCollapsed = $event"
+      />
+    </Teleport>
+
+    <ResizeHandle
+      v-if="!singleColumn"
+      var-name="--session-width"
+      :min="184"
+      :max="380"
+      store-key="rag_session_width"
+      label="拖动调整会话列表宽度"
     />
 
     <!-- 右侧：对话主区 -->
     <main class="chat-main">
       <header class="chat-header">
         <div class="header-left">
-          <el-tooltip content="展开/收起会话列表" placement="bottom">
-            <div class="header-toggle" @click="sessionCollapsed = !sessionCollapsed">
+          <!-- 侧栏只有一个开关，放在标题左边：
+               悬浮（收起）态 → 点击固定住侧栏；固定态 → 点击收起为悬浮 -->
+          <el-tooltip :show-after="1000"
+            v-if="canToggleSidebar"
+            :content="sidebarFloating ? '固定侧栏' : '收起侧栏'"
+            placement="bottom"
+            :hide-after="800"
+          >
+            <button
+              type="button"
+              class="header-toggle"
+              :class="{ floating: sidebarFloating }"
+              :aria-label="sidebarFloating ? '固定侧栏' : '收起侧栏'"
+              @click="toggleSidebarPinned"
+            >
               <el-icon :size="16">
-                <Expand v-if="sessionCollapsed" />
+                <Expand v-if="sidebarFloating" />
                 <Fold v-else />
               </el-icon>
-            </div>
+            </button>
           </el-tooltip>
           <span class="chat-title">{{ currentTitle }}</span>
+          <el-tooltip
+            v-if="activeSession?.forked_from_conversation_id"
+            :show-after="800"
+            :content="forkSourceTooltip"
+            placement="bottom"
+            :hide-after="600"
+          >
+            <span class="fork-chip">
+              <el-icon :size="12"><Share /></el-icon>
+              分支
+            </span>
+          </el-tooltip>
+          <button
+            type="button"
+            class="workspace-chip"
+            :title="currentWorkspace ? `工作区：${currentWorkspace}` : '默认工作区（未绑定工作目录）'"
+            @click="openWorkspaceDialog"
+          >
+            <el-icon :size="13"><FolderOpened /></el-icon>
+            <span class="workspace-chip-name">{{ currentWorkspaceName }}</span>
+          </button>
         </div>
         <div class="header-actions">
+          <el-tooltip
+            v-if="activeId || messages.length"
+            :show-after="1000"
+            content="会话面板"
+            placement="bottom"
+            :hide-after="800"
+          >
+            <button
+              type="button"
+              :class="['header-icon-btn', { active: inspectorOpen }]"
+              aria-label="会话面板"
+              @click="toggleInspector"
+            >
+              <el-icon :size="16"><DataBoard /></el-icon>
+            </button>
+          </el-tooltip>
           <!-- 供应商快捷切换（只切供应商；管理入口跳设置页模型面板） -->
           <el-dropdown
             trigger="click"
@@ -52,21 +121,53 @@
             </template>
           </el-dropdown>
 
-          <el-tooltip content="上下文占用" placement="bottom">
-            <div
+          <!-- 思考强度快捷切换（当前对话供应商；对后续消息生效） -->
+          <el-dropdown
+            trigger="click"
+            :disabled="loading || thinkingBusy || !quickActiveId"
+            @command="onThinkingSwitch"
+          >
+            <span
+              :class="['model-switch-chip', 'thinking-chip', { busy: thinkingBusy }]"
+              title="思考强度（对后续消息生效）"
+            >
+              <el-icon :size="12"><MagicStick /></el-icon>
+              思考 {{ quickThinkingLabel }}
+            </span>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="off">关闭思考</el-dropdown-item>
+                <el-dropdown-item
+                  v-for="opt in thinkingOptions"
+                  :key="opt.value"
+                  :command="opt.value"
+                  :disabled="quickThinkingEnabled && quickThinkingEffort === opt.value"
+                >
+                  {{ opt.label }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+
+          <el-tooltip :show-after="1000" content="上下文占用" placement="bottom" :hide-after="800">
+            <button
+              type="button"
               :class="['header-icon-btn', { disabled: !activeId }]"
+              aria-label="上下文占用"
               @click="activeId && openContextDialog()"
             >
               <el-icon :size="16"><Histogram /></el-icon>
-            </div>
+            </button>
           </el-tooltip>
-          <el-tooltip content="会话快照" placement="bottom">
-            <div
+          <el-tooltip :show-after="1000" content="会话快照" placement="bottom" :hide-after="800">
+            <button
+              type="button"
               :class="['header-icon-btn', { disabled: !activeId }]"
+              aria-label="会话快照"
               @click="activeId && openTimeline()"
             >
               <el-icon :size="16"><Clock /></el-icon>
-            </div>
+            </button>
           </el-tooltip>
           <el-dropdown trigger="click">
             <div class="header-icon-btn header-more-btn" title="更多">
@@ -89,6 +190,8 @@
         </div>
       </header>
 
+      <div class="chat-body">
+      <div class="chat-column">
       <div
         ref="messagesRef"
         class="messages"
@@ -138,10 +241,11 @@
           </div>
         </div>
 
-        <!-- 消息列表 -->
+        <!-- 消息列表：key 用数据库 id / 本地 _localKey——rewind 会从中间 splice，
+             数组下标作 key 会让 Vue 复用错组件（MarkdownContent 内部状态串台） -->
         <div
           v-for="(msg, index) in messages"
-          :key="index"
+          :key="msg.id || msg._localKey || index"
           :class="['msg', msg.role]"
           :data-msg-index="index"
         >
@@ -164,14 +268,30 @@
                     alt="上传图片"
                   />
                 </div>
+                <div v-if="msg.files && msg.files.length" class="user-files">
+                  <span
+                    v-for="(file, i) in msg.files"
+                    :key="i"
+                    class="user-file-chip"
+                  >
+                    <el-icon :size="12"><Document /></el-icon>
+                    {{ file.name }}
+                  </span>
+                </div>
                 <span v-if="msg.content">{{ msg.content }}</span>
               </div>
-              <!-- 消息级回退：删除此消息及之后的对话，内容放回输入框重新编辑 -->
+              <!-- 消息级操作：回退重编 / 从此消息创建分支会话 -->
               <div v-if="msg.id && !loading" class="user-rewind">
-                <el-tooltip content="回退到此消息（删除其后对话并重新编辑）" placement="top">
+                <el-tooltip :show-after="1000" content="回退到此消息（删除其后对话并重新编辑）" placement="top" :hide-after="800">
                   <span class="rewind-btn" @click="rewindTo(msg)">
                     <el-icon :size="12"><RefreshLeft /></el-icon>
                     回退
+                  </span>
+                </el-tooltip>
+                <el-tooltip :show-after="1000" content="从此消息创建分支会话（复制此消息及之前的对话）" placement="top" :hide-after="800">
+                  <span class="rewind-btn" @click="forkFrom(msg)">
+                    <el-icon :size="12"><Share /></el-icon>
+                    分支
                   </span>
                 </el-tooltip>
               </div>
@@ -185,6 +305,8 @@
                 :plan-done="msg.planDone"
                 :plan-total="msg.planTotal"
                 :show-running="!!currentTool"
+                clickable
+                @open-panel="openPlanPanel"
               />
 
               <!-- 计划审批卡：模型进入计划模式后提交的结构化计划 -->
@@ -195,6 +317,13 @@
                 @confirm="confirmPlan(msg)"
                 @cancel="cancelPlan(msg)"
                 @keydown="onPlanCardKeydown(msg, $event)"
+              />
+              <!-- 向用户提问卡：模型调用 ask_user_question 后渲染 -->
+              <QuestionCard
+                v-if="msg.questionRequest && msg.questionRequest.state !== 'cancelled'"
+                :request="msg.questionRequest"
+                :loading="loading"
+                @submit="(answers) => submitQuestions(msg, answers)"
               />
               <!-- 中断未跑完：给「继续执行 / 丢弃这一轮」入口（刷新/切换会话恢复用） -->
               <div v-if="msg._unfinishedBar" class="suspension-bar interrupted-bar">
@@ -209,29 +338,55 @@
                 </span>
               </div>
 
+              <!-- 工具调用轨迹先于最终回答：回答应落在整段执行过程的最下方 -->
+              <ToolTraceList
+                v-if="msg.tool_trace && msg.tool_trace.length"
+                :items="msg.tool_trace"
+                :tool-name="toolName"
+                @open-detail="openInspectorDetail"
+              />
+
+              <!-- 人工确认（HITL）：等待用户批准/拒绝敏感操作 -->
+              <PermissionCard
+                v-if="msg.permissions && msg.permissions.length"
+                :permissions="msg.permissions"
+                :loading="loading"
+                :tool-name="toolName"
+                @decide="decidePermission"
+                @stop="stopSuspended"
+              />
+
               <div v-if="msg.content" class="assistant-content">
                 <MarkdownContent :content="msg.content" :plain="!!msg._streaming" />
                 <div class="msg-actions">
-                  <el-tooltip
+                  <el-tooltip :show-after="1000"
                     v-if="index === messages.length - 1"
                     content="重新生成"
                     placement="top"
-                  >
+                   :hide-after="800">
                     <el-icon class="copy-btn" @click="regenerateLast">
                       <RefreshRight />
                     </el-icon>
                   </el-tooltip>
-                  <el-tooltip content="复制回答" placement="top">
+                  <el-tooltip :show-after="1000" content="复制回答" placement="top" :hide-after="800">
                     <el-icon class="copy-btn" @click="copyText(msg.content)">
                       <CopyDocument />
                     </el-icon>
                   </el-tooltip>
                 </div>
               </div>
-              <div v-else-if="loading" class="assistant-content">
-                <span v-if="currentTool" class="status-chip">
+              <div
+                v-else-if="loading && index === messages.length - 1"
+                class="assistant-content"
+              >
+                <span
+                  v-if="activityLabel"
+                  class="status-chip"
+                  role="status"
+                  aria-live="polite"
+                >
                   <span class="status-spinner"></span>
-                  {{ currentTool }}
+                  {{ activityLabel }}
                   <span v-if="statusElapsed >= 3" class="status-time">· {{ statusElapsed }}s</span>
                 </span>
                 <span v-else class="dots"><i /><i /><i /></span>
@@ -245,23 +400,6 @@
               </div>
             </template>
 
-            <!-- 工具调用轨迹：有完整输出（detail）时可点击展开 -->
-            <ToolTraceList
-              v-if="msg.tool_trace && msg.tool_trace.length"
-              :items="msg.tool_trace"
-              :tool-name="toolName"
-            />
-
-            <!-- 人工确认（HITL）：等待用户批准/拒绝敏感操作 -->
-            <PermissionCard
-              v-if="msg.permissions && msg.permissions.length"
-              :permissions="msg.permissions"
-              :loading="loading"
-              :tool-name="toolName"
-              @decide="decidePermission"
-              @stop="stopSuspended"
-            />
-
             <!-- 引用来源 -->
             <SourceList
               v-if="msg.sources && msg.sources.length"
@@ -271,10 +409,39 @@
             />
           </div>
         </div>
+
+        <!-- 正文已开始后的唯一活动行（空正文阶段由消息内 chip 承担，两者不同时出现） -->
+        <div
+          v-if="loading && streamCharCount > 0"
+          class="run-activity"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="status-spinner"></span>
+          <span class="run-activity-text">{{ activityLabel || '处理中…' }}</span>
+          <span class="run-activity-time">{{ statusElapsed }}s</span>
+        </div>
       </div>
 
       <!-- 输入区（composer：textarea 在上、控制行在下） -->
-      <div class="input-area">
+      <div
+        class="input-area"
+        :class="{ 'drag-over': dragOver }"
+        @dragover.prevent="onDragOver"
+        @dragleave.prevent="onDragLeave"
+        @drop.prevent="onDrop"
+      >
+        <!-- 上滑查看历史时浮现：一键回到底部继续跟随生成 -->
+        <button
+          v-if="showJumpToLatest"
+          type="button"
+          class="jump-latest"
+          @click="jumpToLatest"
+        >
+          <el-icon :size="13"><Bottom /></el-icon>
+          回到最新
+        </button>
+
         <!-- 已附加图片预览 -->
         <div v-if="attachedImages.length" class="image-preview-row">
           <div
@@ -289,18 +456,81 @@
           </div>
         </div>
 
+        <!-- 已附加文档预览（文件名 + 大小 + 提取字符数） -->
+        <div v-if="attachedFiles.length" class="file-preview-row">
+          <div
+            v-for="file in attachedFiles"
+            :key="file.id"
+            :class="['file-chip', { warn: file.warning }]"
+            :title="file.warning || file.name"
+          >
+            <el-icon :size="14"><Document /></el-icon>
+            <span class="file-chip-name">{{ file.name }}</span>
+            <span class="file-chip-meta">
+              {{ formatFileSize(file.size) }}
+              <template v-if="file.chars"> · {{ formatCount(file.chars) }} 字符</template>
+            </span>
+            <el-icon class="file-chip-remove" @click="removeAttachment(file)">
+              <Close />
+            </el-icon>
+          </div>
+        </div>
+
+        <!-- 查看器划选的引用原文：随本轮问题一起发送 -->
+        <div v-if="quote" class="quote-chip">
+          <el-icon :size="13"><Document /></el-icon>
+          <span class="quote-chip-text">{{ quotePreview }}</span>
+          <span class="quote-chip-source">
+            {{ quote.source ? quote.source.split('/').pop() : '选中内容' }}
+            <template v-if="quote.page"> · p{{ quote.page }}</template>
+          </span>
+          <el-icon class="quote-chip-close" title="移除引用" @click="quote = null">
+            <Close />
+          </el-icon>
+        </div>
+
+        <!-- 下一步建议：Claude Code 式 ghost 文本（输入框内，Tab 采纳） -->
+
         <div class="input-box">
+          <!-- 输入框 @ 引用的知识库文档候选 -->
+          <div v-if="mention.open" class="mention-pop" role="listbox" aria-label="引用知识库文档">
+            <div class="mention-head">引用知识库文档（↑↓ 选择，Enter 确认）</div>
+            <div v-if="mention.loading" class="mention-empty">加载文档列表…</div>
+            <div v-else-if="!mentionItems.length" class="mention-empty">没有匹配的文档</div>
+            <button
+              v-for="(item, i) in mentionItems"
+              :key="item.path"
+              type="button"
+              :class="['mention-item', { active: i === mention.index }]"
+              @mousedown.prevent="pickMention(item)"
+              @mouseenter="mention.index = i"
+            >
+              <span class="mention-name">{{ item.name }}</span>
+              <span class="mention-path">{{ item.path }}</span>
+            </button>
+          </div>
           <el-input
             ref="questionInput"
             v-model="question"
             type="textarea"
             :rows="2"
             resize="none"
-            :disabled="hasSuspendedPending"
-            placeholder="输入你的问题，Enter 发送，Shift+Enter 换行 · 支持粘贴/上传图片"
-            @keydown.enter.exact.prevent="send"
+            :placeholder="ghostVisible ? '' : '输入你的问题，Enter 发送，Shift+Enter 换行 · @ 引用文档 · 支持粘贴/拖拽图片与文档'"
+            @keydown="onComposerKeydown"
+            @input="onComposerInput"
+            @blur="closeMention"
             @paste="onPaste"
           />
+          <!-- ghost 建议：叠在空输入框的文本起点上方，打字即消失 -->
+          <div v-if="ghostVisible" class="ghost-suggestion" aria-hidden="true">
+            <span class="ghost-suggestion-text">{{ ghostSuggestion }}</span>
+            <span
+              class="ghost-suggestion-hint"
+              @mousedown.prevent="acceptGhostSuggestion"
+            >
+              {{ nextSuggestionsLoading ? 'Tab 采纳 · 生成中' : 'Tab 采纳' }}
+            </span>
+          </div>
           <div class="composer-bar">
             <div class="composer-chips">
               <button
@@ -328,34 +558,111 @@
               >
                 <el-icon :size="13"><Collection /></el-icon>知识库
               </button>
+
+              <!-- 敏感操作确认模式快捷切换（对后续消息生效） -->
+              <el-dropdown
+                trigger="click"
+                :disabled="loading || modeBusy"
+                @command="onPermissionModeSwitch"
+              >
+                <button
+                  type="button"
+                  :class="[
+                    'composer-chip',
+                    'mode-chip',
+                    {
+                      on: quickPermissionMode !== 'ask',
+                      warn: quickPermissionMode === 'allow',
+                    },
+                  ]"
+                  :disabled="loading || modeBusy"
+                  title="敏感操作确认模式（对后续消息生效）"
+                >
+                  <el-icon :size="13"><Lock /></el-icon>{{ quickPermissionLabel }}
+                </button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="ask">每次确认</el-dropdown-item>
+                    <el-dropdown-item command="acceptedits">自动接受文件编辑</el-dropdown-item>
+                    <el-dropdown-item command="allow" divided>自动批准（谨慎）</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </div>
             <el-select
               v-model="templateId"
               class="composer-template"
               placeholder="模板"
-              :disabled="loading"
+              :disabled="loading || hasSuspendedPending"
             >
               <el-option label="默认模板" :value="0" />
               <el-option
-                v-for="t in templates"
+                v-for="t in availableTemplates"
                 :key="t.id"
                 :label="t.name"
                 :value="t.id"
               />
             </el-select>
+            <el-tooltip :show-after="1000"
+              content="限定知识库检索范围（单文档 / 整本书）"
+              placement="top"
+             :hide-after="800">
+              <button
+                type="button"
+                :class="['composer-chip', 'composer-scope', { on: !!kbScope }]"
+                :disabled="loading || hasSuspendedPending"
+                @click="openScopeDialog"
+              >
+                <el-icon :size="13"><Document /></el-icon>
+                {{ kbScope ? `范围：${kbScope.label}` : '范围：全部' }}
+                <span
+                  v-if="kbScope"
+                  class="scope-clear"
+                  title="清除范围"
+                  @click.stop="clearScope"
+                >×</span>
+              </button>
+            </el-tooltip>
+            <el-tooltip :show-after="1000"
+              v-if="activeId && promptLockTag"
+              :content="
+                promptLockTag.upgradable
+                  ? '有新提示词版本可应用（会断一次前缀缓存）'
+                  : '本会话锁定的提示词版本'
+              "
+              placement="top"
+             :hide-after="800">
+              <el-tag
+                :type="promptLockTag.type"
+                size="small"
+                class="composer-prompt-tag"
+                @click="openSessionPrompt"
+              >
+                {{ promptLockTag.text }}
+                <span v-if="promptLockTag.upgradable" class="prompt-dot" />
+              </el-tag>
+            </el-tooltip>
             <div class="composer-right">
-              <el-tooltip content="上传图片（支持 Ctrl+V 粘贴）" placement="top">
-                <div class="attach-btn" @click="imageInputRef.click()">
+              <el-tooltip :show-after="1000"
+                content="上传图片或文档（支持 Ctrl+V 粘贴、拖拽）"
+                placement="top"
+               :hide-after="800">
+                <button
+                  type="button"
+                  class="attach-btn"
+                  aria-label="上传图片或文档"
+                  @click="attachInputRef.click()"
+                >
                   <el-icon :size="17"><Picture /></el-icon>
-                </div>
+                </button>
               </el-tooltip>
               <input
-                ref="imageInputRef"
+                ref="attachInputRef"
                 type="file"
-                accept="image/*"
+                accept="image/*,.pdf,.doc,.docx,.xlsx,.csv,.epub,.txt,.md,.json,.py,.js,.ts,.vue,.html,.css,.xml,.yaml,.yml,.log,.sql,.sh,.ps1,.bat"
                 multiple
                 class="hidden-file-input"
-                @change="onImageFiles"
+                @change="onAttachFiles"
               />
               <el-button
                 v-if="loading"
@@ -370,7 +677,11 @@
                 type="primary"
                 circle
                 class="send-btn"
-                :disabled="hasSuspendedPending || (!question.trim() && !attachedImages.length)"
+                :disabled="
+                  hasSuspendedPending ||
+                  uploadingAttachments ||
+                  (!question.trim() && !attachedImages.length && !attachedFiles.length)
+                "
                 @click="send"
               >
                 <el-icon :size="16"><Promotion /></el-icon>
@@ -383,6 +694,47 @@
           <kbd>Ctrl</kbd> + <kbd>V</kbd> 粘贴图片
         </div>
       </div>
+      </div>
+
+      <!-- 右侧会话面板（仿 Claude 桌面端）：拖拽条放在面板左侧，贴着聊天区 -->
+      <ResizeHandle
+        v-if="inspectorVisible"
+        var-name="--inspector-width"
+        :min="220"
+        :max="480"
+        store-key="rag_inspector_width"
+        target="next"
+        invert
+        label="拖动调整会话面板宽度"
+      />
+      <WorkspacePanel
+        v-if="inspectorVisible"
+        ref="workspacePanelRef"
+        :session="activeSession"
+        :workspace="currentWorkspace"
+        :workspace-name="currentWorkspaceName"
+        :template-name="panelTemplateName"
+        :prompt-tag="promptLockTag"
+        :message-count="activeSession?.message_count || messages.length"
+        :messages="messages"
+        :active-id="activeId"
+        :loading="loading"
+        :plan="panelTask.plan"
+        :todos="panelTask.todos"
+        :plan-done="panelTask.planDone"
+        :plan-total="panelTask.planTotal"
+        :running="loading"
+        :run-id="turn.runId || ''"
+        :stats="contextStats"
+        :compacting="compacting"
+        :detail="inspectorDetail"
+        @change-workspace="openWorkspaceDialog"
+        @refresh-context="refreshPanelContext"
+        @compact="handleCompact"
+        @open-detail="openInspectorDetail"
+        @close-detail="closeInspectorDetail"
+      />
+      </div>
     </main>
 
     <!-- 模板管理对话框 -->
@@ -394,13 +746,30 @@
               <span class="tpl-name">{{ t.name }}</span>
               <el-tag v-if="t.is_system" size="small" type="info">内置</el-tag>
               <el-tag v-else size="small" type="success">自定义</el-tag>
+              <el-tag v-if="t.archived" size="small" type="warning">已归档</el-tag>
+              <el-tag v-if="t.latest_version_no" size="small" effect="plain">
+                v{{ t.latest_version_no }}
+              </el-tag>
+              <el-tag
+                v-if="t.conversation_count"
+                size="small"
+                type="warning"
+                effect="plain"
+              >
+                {{ t.conversation_count }} 个会话使用
+              </el-tag>
             </div>
             <div class="tpl-desc">{{ t.description || '暂无描述' }}</div>
           </div>
           <div class="tpl-actions">
-            <el-button size="small" @click="openTemplateEdit(t)">编辑</el-button>
+            <el-button size="small" text @click="openTemplateVersions(t)">版本</el-button>
+            <el-button size="small" text @click="handleCloneTemplate(t)">克隆</el-button>
+            <el-button v-if="!t.is_system" size="small" text @click="handleArchiveTemplate(t)">
+              {{ t.archived ? '恢复' : '归档' }}
+            </el-button>
+            <el-button size="small" :disabled="t.archived" @click="openTemplateEdit(t)">编辑</el-button>
             <el-button
-              v-if="!t.is_system"
+              v-if="!t.is_system && !t.conversation_count"
               size="small"
               type="danger"
               @click="handleDeleteTemplate(t)"
@@ -410,9 +779,14 @@
           </div>
         </div>
       </div>
-      <el-button type="primary" plain class="tpl-create" @click="openTemplateEdit(null)">
-        新建模板
-      </el-button>
+      <div class="tpl-footer">
+        <el-button type="primary" plain class="tpl-create" @click="openTemplateEdit(null)">
+          新建模板
+        </el-button>
+        <el-button plain @click="openPromptFragments">系统片段</el-button>
+        <el-button plain @click="auditPromptHealth">体检</el-button>
+        <el-button plain @click="openDefaultTemplate">默认模板</el-button>
+      </div>
 
       <el-dialog
         v-model="templateEditVisible"
@@ -444,13 +818,61 @@
               placeholder="提示词内容"
             />
           </el-form-item>
+          <el-form-item label="版本说明">
+            <el-input
+              v-model="templateForm.versionNote"
+              placeholder="本次改动说明（可选，写入版本历史）"
+            />
+          </el-form-item>
         </el-form>
         <template #footer>
+          <el-button text @click="normalizeTemplateBreaks">合并换行</el-button>
+          <el-button text @click="openTemplatePreview">预览</el-button>
           <el-button @click="templateEditVisible = false">取消</el-button>
           <el-button type="primary" @click="saveTemplate">保存</el-button>
         </template>
       </el-dialog>
     </el-dialog>
+
+    <el-dialog
+      v-model="defaultTemplateVisible"
+      title="默认助手（内置，只读）"
+      width="760px"
+      append-to-body
+    >
+      <div v-if="defaultTemplate" class="default-template-meta">
+        {{ defaultTemplate.name }} · v{{ defaultTemplate.latest_version_no ?? '?' }}
+        · {{ defaultTemplate.content.length }} 字
+        <span v-if="defaultTemplate.description"> · {{ defaultTemplate.description }}</span>
+      </div>
+      <pre class="default-template-content">{{ defaultTemplate?.content }}</pre>
+      <template #footer>
+        <el-button @click="defaultTemplateVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <PromptVersionsDialog
+      v-model="templateVersionsVisible"
+      kind="template"
+      :target-id="templateVersionTarget.id"
+      :title="`版本历史 · ${templateVersionTarget.title}`"
+      :readonly="templateVersionTarget.readonly"
+      @changed="onPromptArtifactsChanged"
+    />
+    <PromptFragmentsPanel
+      v-model="promptFragmentsVisible"
+      @changed="onPromptArtifactsChanged"
+    />
+    <PromptPreviewDialog
+      v-model="templatePreviewVisible"
+      :request="templatePreviewRequest"
+      :title="`模板预览 · ${templateForm.name || '未命名'}`"
+    />
+    <SessionPromptPanel
+      v-model="sessionPromptVisible"
+      :conversation-id="activeId"
+      @applied="onSessionPromptApplied"
+    />
 
     <!-- 长期记忆对话框 -->
     <el-dialog v-model="memoriesVisible" title="长期记忆" width="680px">
@@ -577,15 +999,20 @@
           <i :style="{ width: barPct(ctxEffectiveMessages, ctxHighWater) }" />
         </div>
         <div class="ctx-row">
-          <span class="ctx-label">估算 token</span>
+          <span class="ctx-label">发送 token</span>
           <span class="ctx-value">
-            {{ contextStats.estimated_tokens }} / {{ contextStats.token_budget }}
+            {{ ctxSentTokens }} / {{ contextStats.token_budget }}
+            <template v-if="ctxWindowTokens !== ctxSentTokens">
+              （窗口估算 {{ ctxWindowTokens }}，已裁剪）
+            </template>
           </span>
         </div>
         <div class="ctx-bar">
-          <i
-            :style="{ width: barPct(contextStats.estimated_tokens, contextStats.token_budget) }"
-          />
+          <i :style="{ width: barPct(ctxSentTokens, contextStats.token_budget) }" />
+        </div>
+        <div class="ctx-row" v-if="contextStats.budget_source">
+          <span class="ctx-label">预算来源</span>
+          <span class="ctx-value">{{ contextStats.budget_source }}</span>
         </div>
         <div class="ctx-row">
           <span class="ctx-label">滚动摘要</span>
@@ -683,26 +1110,109 @@
       </div>
     </el-drawer>
 
-    <!-- 引用「查看原文」文档查看器 -->
-    <DocumentViewer ref="docViewerRef" />
+    <!-- 知识库范围选择：单文档 / 整本书 -->
+    <el-dialog
+      v-model="scopeDialogVisible"
+      title="限定知识库范围"
+      width="560px"
+      append-to-body
+    >
+      <el-input
+        v-model="scopeQuery"
+        placeholder="搜索文档或书名"
+        clearable
+        class="scope-search"
+      />
+      <div class="scope-list">
+        <el-checkbox-group v-model="scopeDraft" class="scope-group">
+          <el-checkbox
+            v-for="opt in filteredScopeOptions"
+            :key="opt.key"
+            :value="opt.key"
+            class="scope-option"
+          >
+            <span class="scope-option-label">{{ opt.label }}</span>
+            <span class="scope-option-meta">{{ opt.meta }}</span>
+          </el-checkbox>
+        </el-checkbox-group>
+        <div v-if="!filteredScopeOptions.length" class="scope-empty">
+          没有匹配的文档
+        </div>
+      </div>
+      <template #footer>
+        <el-button text @click="clearDraft">清空</el-button>
+        <el-button @click="scopeDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="applyScope">应用</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 工作区选择：会话归组 + 文件/命令工具工作根 -->
+    <el-dialog
+      v-model="workspaceDialogVisible"
+      title="选择工作区"
+      width="560px"
+      append-to-body
+    >
+      <div class="workspace-dialog">
+        <div v-if="workspaceOptions.length" class="workspace-quick">
+          <button
+            v-for="opt in workspaceOptions"
+            :key="opt.path"
+            type="button"
+            :class="['workspace-option', { active: workspaceDraft === opt.path }]"
+            @click="workspaceDraft = opt.path"
+          >
+            <el-icon :size="13"><FolderOpened /></el-icon>
+            <span class="workspace-option-name">{{ opt.name }}</span>
+            <span class="workspace-option-path">{{ opt.path }}</span>
+          </button>
+          <button
+            type="button"
+            :class="['workspace-option', { active: !workspaceDraft }]"
+            @click="workspaceDraft = ''"
+          >
+            <el-icon :size="13"><FolderOpened /></el-icon>
+            <span class="workspace-option-name">默认工作区</span>
+            <span class="workspace-option-path">不绑定工作目录</span>
+          </button>
+        </div>
+        <div class="workspace-dialog-label">工作目录</div>
+        <DirPicker v-model="workspaceDraft" placeholder="留空 = 默认工作区" />
+        <div class="workspace-dialog-tip">
+          工作区会作为文件与命令工具的工作根；会话列表按工作区分组。
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="workspaceDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="workspaceSaving" @click="confirmWorkspace">
+          确定
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 引用「查看原文」文档查看器：划选后可解释/翻译/总结 -->
+    <DocumentViewer ref="docViewerRef" @ask-selection="handleAskSelection" />
   </div>
 </template>
 
 <script setup>
-import { computed, inject, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { createStreamHandlers } from '../composables/useAgentStream'
-import { useTypewriter } from '../composables/useTypewriter'
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus/es/components/message/index'
 import {
+  Bottom,
   Clock,
-  Close,
   Collection,
   CopyDocument,
   DataAnalysis,
+  DataBoard,
+  Document,
   Expand,
   Fold,
+  FolderOpened,
   Histogram,
   List,
+  Lock,
   MagicStick,
   Memo,
   MoreFilled,
@@ -712,414 +1222,896 @@ import {
   Promotion,
   RefreshLeft,
   RefreshRight,
+  Share,
   User,
   VideoPause,
   WarningFilled,
+  Close,
 } from '@element-plus/icons-vue'
 import MarkdownContent from '../components/MarkdownContent.vue'
+import DirPicker from '../components/DirPicker.vue'
 import DocumentViewer from '../components/DocumentViewer.vue'
+import WorkspacePanel from '../components/chat/WorkspacePanel.vue'
 import PermissionCard from '../components/chat/PermissionCard.vue'
 import PlanApprovalCard from '../components/chat/PlanApprovalCard.vue'
-import PlanSteps from '../components/chat/PlanSteps.vue'
+import QuestionCard from '../components/chat/QuestionCard.vue'
 import ToolTraceList from '../components/chat/ToolTraceList.vue'
 import SourceList from '../components/chat/SourceList.vue'
 import TodoPanel from '../components/chat/TodoPanel.vue'
 import SessionList from '../components/chat/SessionList.vue'
+import ResizeHandle from '../components/ResizeHandle.vue'
+import PromptFragmentsPanel from '../components/prompt/PromptFragmentsPanel.vue'
+import PromptPreviewDialog from '../components/prompt/PromptPreviewDialog.vue'
+import PromptVersionsDialog from '../components/prompt/PromptVersionsDialog.vue'
+import SessionPromptPanel from '../components/prompt/SessionPromptPanel.vue'
+
+import { useAttachments } from '../composables/useAttachments'
+import { useChatContext } from '../composables/useChatContext'
+import { useChatPreferences } from '../composables/useChatPreferences'
+import { useChatScroll } from '../composables/useChatScroll'
+import { useChatSessions } from '../composables/useChatSessions'
+import { useChatStream } from '../composables/useChatStream'
+import { useChatTurn } from '../composables/useChatTurn'
+import { useChatViewer } from '../composables/useChatViewer'
+import { useKbScope } from '../composables/useKbScope'
+import { consumeChatSeed } from '../composables/useChatSeed'
+import { useMemoriesPanel } from '../composables/useMemoriesPanel'
+import { usePromptAdmin } from '../composables/usePromptAdmin'
+import { useQuickSwitch } from '../composables/useQuickSwitch'
+import { useSuggestions } from '../composables/useSuggestions'
+import { useSuspension } from '../composables/useSuspension'
+import { useToolStatus } from '../composables/useToolStatus'
+import { getNextSuggestions, searchConversations, updateConversation } from '../api'
+import { isFailed, toolName } from '../composables/useChatUtils'
+import { buildLocalNextSuggestions } from '../utils/nextSuggestions'
 
 // keep-alive 按组件名匹配，显式声明
 defineOptions({ name: 'ChatView' })
-import {
-  abandonRun,
-  addMemory,
-  compactConversation,
-  consolidateMemories,
-  continueAgentRun,
-  createTemplate,
-  deleteConversation,
-  deleteMemory,
-  deleteTemplate,
-  getAgentContext,
-  getConversationMessages,
-  getConversationTimeline,
-  getPendingApproval,
-  getSettings,
-  getSuggestions,
-  getTodos,
-  listConversations,
-  listDocuments,
-  listMemories,
-  listTemplates,
-  renameConversation,
-  resumeAgentChat,
-  rewindConversation,
-  rollbackConversation,
-  streamAgentChat,
-  switchChatProvider,
-  updateMemory,
-  updateTemplate,
-} from '../api'
 
 const question = ref('')
 const loading = ref(false)
 const messages = ref([])
 const messagesRef = ref(null)
 const questionInput = ref(null)
-// 是否跟随最新内容自动滚动：用户上滑查看时暂停跟随，滚回底部后恢复
-const scrollFollow = ref(true)
-
-// 会话
-const sessions = ref([])
-const activeId = ref(null)
-const currentTitle = ref('新对话')
+const templateId = ref(0)
 const sessionCollapsed = ref(false)
 
-// 会话草稿：每个会话（含新对话 key='new'）独立保留输入框内容
-const drafts = ref({})
-// 会话消息内存缓存：切换时保存当前内存态（含生成中的消息），
-// 切回时优先用缓存，避免正在生成的内容丢失
-const sessionMessagesCache = {}
+// 单列布局：导航与会话列表同列（App 提供 appearance 实例）
+const appearance = inject('settingsAppearance', null)
+// 侧栏固定/悬浮：悬浮态下点标题左侧的图标即可固定回来
+const sidebarFloating = computed(() => !!appearance?.sidebarCollapsed?.value)
+const canToggleSidebar = computed(() => !!appearance && appearance.layoutMode.value !== 'topbar')
 
-// ---------------- 供应商快捷切换（头部下拉） ----------------
-// 读 /api/settings 快照（独立于设置页草稿）；切换走专用轻量端点：
-// 只清对话缓存，不触发嵌入/重排重载；本会话流式中禁用。
-// 已知边界：切换只影响后续 LLM 迭代，不中断进行中的 run（与设置页保存同语义）。
-const quickProviders = ref([])
-const quickActiveId = ref('')
-const quickModel = ref('')
-const quickBusy = ref(false)
-const openSettingsTab = inject('openSettingsTab', null)
+function toggleSidebarPinned() {
+  if (!appearance?.sidebarCollapsed) return
+  appearance.sidebarCollapsed.value = !appearance.sidebarCollapsed.value
+  // 从悬浮态固定回来时，把导航列重置为展开宽度内的默认值（不覆盖用户拖过的宽度）
+  document.documentElement.dataset.sidebarPeek = '0'
+}
 
-const quickActiveName = computed(
-  () => quickProviders.value.find((p) => p.id === quickActiveId.value)?.name || '',
+const singleColumn = computed(
+  () =>
+    !!appearance &&
+    (['claude', 'hermes'].includes(appearance.layoutMode.value) ||
+      !!appearance.mergedSidebar?.value),
+)
+// 会话列表按工作区分组（外观设置，默认开）
+const groupSessionsByWorkspace = computed(
+  () => !!appearance?.groupSessionsByWorkspace?.value,
 )
 
-async function loadQuickProviders() {
-  try {
-    const snapshot = await getSettings()
-    quickProviders.value = (snapshot.providers || []).filter(
-      (p) => p.type === 'chat' && p.enabled,
-    )
-    quickActiveId.value =
-      snapshot.active_chat_provider || quickProviders.value[0]?.id || ''
-    syncQuickModel()
-  } catch {
-    /* 后端未就绪时静默，不影响对话主流程 */
-  }
-}
+// ---------------- 会话搜索（后端：标题 / 工作区 / 消息正文） ----------------
+const sessionSearchResults = ref([])
+const sessionSearchLoading = ref(false)
+let sessionSearchSeq = 0
 
-function syncQuickModel() {
-  quickModel.value =
-    quickProviders.value.find((p) => p.id === quickActiveId.value)?.model || ''
-}
-
-async function onQuickSwitch(command) {
-  if (!command) return
-  if (command === '__manage__') {
-    openSettingsTab?.('models')
+async function onSessionSearch(query) {
+  const seq = ++sessionSearchSeq
+  const text = String(query || '').trim()
+  if (!text) {
+    sessionSearchResults.value = []
+    sessionSearchLoading.value = false
     return
   }
-  if (command === quickActiveId.value) return
-  quickBusy.value = true
+  sessionSearchLoading.value = true
   try {
-    const res = await switchChatProvider(command)
-    quickActiveId.value = res.active_chat_provider || command
-    syncQuickModel()
-    ElMessage.success(`已切换到 ${quickActiveName.value || command}（对后续消息生效）`)
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '切换失败')
-    await loadQuickProviders()
-  } finally {
-    quickBusy.value = false
-  }
-}
-
-function currentDraftKey() {
-  return activeId.value ?? 'new'
-}
-
-function saveDraft() {
-  drafts.value[currentDraftKey()] = question.value
-}
-
-function restoreDraft() {
-  question.value = drafts.value[currentDraftKey()] || ''
-}
-
-// 输入区选项
-const toolMode = ref('auto') // auto=自动（两者都启用）/ manual=手动
-const useWebSearch = ref(false)
-const useKnowledgeBase = ref(false)
-const templateId = ref(0)
-const templates = ref([])
-const currentTool = ref('')
-const statusElapsed = ref(0)
-let statusTickId = null
-watch(currentTool, (val) => {
-  if (val) {
-    statusElapsed.value = 0
-    if (!statusTickId) {
-      statusTickId = window.setInterval(() => {
-        statusElapsed.value += 1
-      }, 1000)
-    }
-  } else if (statusTickId) {
-    window.clearInterval(statusTickId)
-    statusTickId = null
-  }
-})
-onBeforeUnmount(() => {
-  if (statusTickId) window.clearInterval(statusTickId)
-})
-
-/** 结束当前打开的思考段（文本开始输出 / 工具开始 / 收尾时调用） */
-function closeThinkingSegment() {
-  if (!streamMsg || !streamMsg.tool_trace) return
-  const trace = streamMsg.tool_trace
-  const seg = trace[trace.length - 1]
-  if (seg && seg.kind === 'thinking' && !seg.done) {
-    seg.done = true
-    seg.duration = Math.max(
-      1,
-      Math.round((Date.now() - (seg._startedAt || Date.now())) / 1000),
-    )
-  }
-}
-let abortController = null
-let restoringTemplate = false // 切换会话时回填模板，不触发持久化写入
-
-// 打字机/增量流状态（缓冲区、节奏、撤回、跳过标记）已抽到
-// composables/useTypewriter.js（可单测：node frontend/scripts/check_typewriter.mjs）；
-// 本组件只持有"目标消息"并注入滚动副作用。
-let streamMsg = null
-const typewriter = useTypewriter({
-  getStreamMsg: () => streamMsg,
-  scrollToBottom,
-})
-// 兼容别名：其余逻辑沿用拆分前的名字（状态本体在 composable 里，单一属主）
-const pendingText = typewriter.pendingText
-const flushTypewriter = typewriter.flush
-const dropStreamedRound = typewriter.drop
-const startTypewriter = typewriter.start
-// 原生挂起（interrupt）的审批批次：{ conversationId, msg, submitted }
-let suspended = null
-
-// 附加图片（粘贴 / 上传，随消息发送给后端做视觉识别）
-let imageSeq = 0
-const attachedImages = ref([])
-const imageInputRef = ref(null)
-
-// 偏好持久化：开关/模板/侧栏折叠状态存 localStorage，组件重建后恢复
-const PREFS_KEY = 'rag_chat_prefs'
-const PANEL_KEY = 'rag_session_collapsed'
-
-function loadPrefs() {
-  try {
-    const raw = localStorage.getItem(PREFS_KEY)
-    if (raw) {
-      const prefs = JSON.parse(raw)
-      if (prefs.toolMode === 'auto' || prefs.toolMode === 'manual') {
-        toolMode.value = prefs.toolMode
-      }
-      if (toolMode.value === 'auto') {
-        // 自动模式下联网/知识库视为都开启
-        useWebSearch.value = true
-        useKnowledgeBase.value = true
-      } else {
-        useWebSearch.value = !!prefs.useWebSearch
-        useKnowledgeBase.value = !!prefs.useKnowledgeBase
-      }
-      if (typeof prefs.templateId === 'number') {
-        templateId.value = prefs.templateId
-      }
-    }
-    sessionCollapsed.value = localStorage.getItem(PANEL_KEY) === '1'
+    const items = await searchConversations(text)
+    if (seq !== sessionSearchSeq) return
+    sessionSearchResults.value = Array.isArray(items) ? items : []
   } catch {
-    // 浏览器禁用 localStorage 时忽略，不影响使用
+    if (seq === sessionSearchSeq) sessionSearchResults.value = []
+  } finally {
+    if (seq === sessionSearchSeq) sessionSearchLoading.value = false
   }
 }
 
-function savePrefs() {
+/** 搜索结果可能不在当前列表快照里：先并入列表再切，避免工作区/标题显示为空。 */
+function handleSwitchSession(session) {
+  if (!session) return
+  if (!sessions.value.some((s) => s.id === session.id)) {
+    sessions.value = [session, ...sessions.value]
+  }
+  switchSession(session)
+}
+// 会话草稿：每个会话（含新对话 key='new'）独立保留输入框内容
+const drafts = ref({})
+// 会话消息内存缓存：LRU（最近访问优先，上限 5 个会话）。Map 保序，切换时
+// 保存当前内存态（含生成中的消息）；超限淘汰最久未访问的（下次切回重新拉取）。
+const MESSAGE_CACHE_LIMIT = 5
+const sessionMessagesCache = new Map()
+// 检索范围按会话缓存：避免上一个会话的范围泄漏到下一个会话
+const scopeCache = {}
+const activeId = ref(null)
+const currentTitle = ref('新对话')
+
+// ---------------- 工作区（会话 project_dir） ----------------
+// 已有会话读写会话字段；新对话（尚未落库）先暂存在本地，首轮发送时随请求带给后端
+const pendingWorkspace = ref(null)
+const workspaceDialogVisible = ref(false)
+const workspaceDraft = ref('')
+const workspaceSaving = ref(false)
+
+/** 工作区显示名：目录 basename（兼容 \ 与 /）；空 = 默认工作区 */
+function workspaceDisplayName(path) {
+  if (!path) return '默认工作区'
+  const trimmed = String(path).replace(/[\\/]+$/, '')
+  const index = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'))
+  const base = index >= 0 ? trimmed.slice(index + 1) : trimmed
+  return base || trimmed || String(path)
+}
+
+// ---------------- 右侧会话面板（可收起） ----------------
+const INSPECTOR_KEY = 'rag_inspector_open'
+
+function readInspectorOpen() {
   try {
-    localStorage.setItem(
-      PREFS_KEY,
-      JSON.stringify({
-        toolMode: toolMode.value,
-        useWebSearch: useWebSearch.value,
-        useKnowledgeBase: useKnowledgeBase.value,
-        templateId: templateId.value,
-      }),
-    )
-    localStorage.setItem(PANEL_KEY, sessionCollapsed.value ? '1' : '0')
+    return localStorage.getItem(INSPECTOR_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+
+const inspectorOpen = ref(readInspectorOpen())
+const inspectorVisible = computed(
+  () => inspectorOpen.value && (activeId.value != null || messages.value.length > 0),
+)
+// 工具详情：保存原始 tool_trace 条目引用（流式期间详情要跟着更新），切会话即清空
+const inspectorDetail = ref(null)
+const workspacePanelRef = ref(null)
+
+function openInspectorDetail(entry) {
+  if (!entry) return
+  inspectorDetail.value = entry
+  inspectorOpen.value = true
+}
+
+function closeInspectorDetail() {
+  inspectorDetail.value = null
+}
+
+/** 聊天里的计划/任务清单 → 打开面板的计划分区 */
+function openPlanPanel() {
+  inspectorDetail.value = null
+  inspectorOpen.value = true
+  nextTick(() => workspacePanelRef.value?.openSection('plan'))
+}
+
+watch(activeId, () => {
+  inspectorDetail.value = null
+})
+// 面板里的任务区：取最后一条 assistant 消息的 todos/plan（流式期间实时更新）
+const panelTask = computed(() => {
+  const last = [...messages.value].reverse().find((m) => m.role === 'assistant')
+  return {
+    plan: last?.plan || [],
+    todos: last?.todos || [],
+    planDone: last?.planDone ?? null,
+    planTotal: last?.planTotal ?? null,
+  }
+})
+
+watch(inspectorOpen, (value) => {
+  try {
+    localStorage.setItem(INSPECTOR_KEY, value ? '1' : '0')
+  } catch {
+    // ignore
+  }
+})
+
+function toggleInspector() {
+  inspectorOpen.value = !inspectorOpen.value
+  if (!inspectorOpen.value) inspectorDetail.value = null
+  // 窄屏面板是右侧浮层：打开时收起会话抽屉，避免两个浮层叠在一起
+  if (inspectorOpen.value && typeof window !== 'undefined' && window.innerWidth < 1024) {
+    sessionCollapsed.value = true
+  }
+}
+
+const INSPECTOR_WIDTH_KEY = 'rag_inspector_width'
+const INSPECTOR_WIDTH_MIN = 220
+const INSPECTOR_WIDTH_MAX = 480
+
+/** 恢复拖动保存的面板宽度（ResizeHandle 只负责写 localStorage）。 */
+function restoreInspectorWidth() {
+  try {
+    const px = parseInt(localStorage.getItem(INSPECTOR_WIDTH_KEY) || '', 10)
+    if (!Number.isFinite(px)) return
+    const clamped = Math.min(INSPECTOR_WIDTH_MAX, Math.max(INSPECTOR_WIDTH_MIN, px))
+    document.documentElement.style.setProperty('--inspector-width', `${clamped}px`)
   } catch {
     // ignore
   }
 }
 
-watch(toolMode, (value) => {
-  // 打开自动 = 联网/知识库都开启；关闭自动 = 都不开启（可再单独勾选）
-  if (value === 'auto') {
-    useWebSearch.value = true
-    useKnowledgeBase.value = true
-  } else {
-    useWebSearch.value = false
-    useKnowledgeBase.value = false
-  }
+function onGlobalKeydown(event) {
+  if (!(event.ctrlKey || event.metaKey) || !event.shiftKey) return
+  if (String(event.key || '').toLowerCase() !== 'b') return
+  // keep-alive 下其他页仍持有监听：只在对话页响应
+  if (route.path !== '/' && route.name !== 'chat') return
+  event.preventDefault()
+  toggleInspector()
+}
+
+const { scrollFollow, onMessagesScroll, scrollToBottom } = useChatScroll({
+  messagesRef,
 })
 
-// 模板跟随会话：切换模板时立即写入当前会话，下次切回来自动恢复
-watch(templateId, (value) => {
-  if (restoringTemplate || loading.value || !activeId.value) return
-  const payload = {
-    title: currentTitle.value || '新对话',
-    template_id: value || 0,
-  }
-  renameConversation(activeId.value, payload).catch(() => {
-    // 保存失败不打断对话，下次发送消息时后端会再同步
-  })
-})
-
-watch(
-  [toolMode, useWebSearch, useKnowledgeBase, templateId, sessionCollapsed],
-  savePrefs,
+// 上滑离开底部时浮现「回到最新」
+const showJumpToLatest = computed(
+  () => !scrollFollow.value && messages.value.length > 0,
 )
 
-// 模板管理
-const templateManagerVisible = ref(false)
-const templateEditVisible = ref(false)
-const templateForm = ref({
-  id: null,
-  name: '',
-  category: 'general',
-  description: '',
-  content: '',
+function jumpToLatest() {
+  scrollFollow.value = true
+  scrollToBottom(true)
+}
+
+// 本轮已输出字数（流式消息正文长度）
+const streamCharCount = computed(() => {
+  const last = messages.value[messages.value.length - 1]
+  return last?.role === 'assistant' ? String(last.content || '').length : 0
+})
+const {
+  currentTool,
+  statusElapsed,
+  activityLabel,
+  setActivity,
+  clearActivity,
+} = useToolStatus()
+const prefs = useChatPreferences({ templateId, sessionCollapsed })
+const promptAdmin = usePromptAdmin({
+  activeId,
+  currentTitle,
+  loading,
+  templateId,
+})
+const attachments = useAttachments()
+const { suggestions, loadSuggestions } = useSuggestions()
+const quick = useQuickSwitch()
+const route = useRoute()
+const router = useRouter()
+const {
+  kbScope,
+  scopeDocs,
+  scopeDialogVisible,
+  scopeQuery,
+  scopeDraft,
+  filteredScopeOptions,
+  openScopeDialog,
+  ensureScopeDocs,
+  addDocPaths,
+  clearDraft,
+  applyScope,
+  clearScope,
+} = useKbScope()
+// 查看器划选的原文（随本轮发送，发送后清空）
+const quote = ref(null)
+const quotePreview = computed(() => {
+  const text = String(quote.value?.text || '').replace(/\s+/g, ' ').trim()
+  return text.length > 120 ? `${text.slice(0, 120)}…` : text
 })
 
-// 长期记忆
-const memoriesVisible = ref(false)
-const memories = ref([])
-const memoryEditVisible = ref(false)
-const consolidating = ref(false)
-const memoryForm = ref({ id: null, content: '', category: 'profile' })
-// 长记忆折叠：默认两行截断，点击展开
-const expandedMemoryIds = ref(new Set())
-function toggleMemoryExpand(id) {
-  const next = new Set(expandedMemoryIds.value)
-  next.has(id) ? next.delete(id) : next.add(id)
-  expandedMemoryIds.value = next
-}
-function fmtMemoryDate(v) {
-  if (!v) return '未知'
-  const d = new Date(v)
-  if (Number.isNaN(d.getTime())) return '未知'
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-// 是否连归档记忆一起显示（归档 = 停用但保留，不参与召回/导出）
-const showArchived = ref(false)
+// ---------------- 输入框 @ 引用知识库文档 ----------------
+const mention = reactive({
+  open: false,
+  loading: false,
+  query: '',
+  index: 0,
+})
 
-const categoryMap = {
-  profile: '用户画像',
-  preference: '喜好偏好',
-  project: '工作项目',
-  decision: '重要决定',
-  lesson: '教训与应对',
-  other: '其他',
+function composerTextarea() {
+  return questionInput.value?.$el?.querySelector?.('textarea') || null
 }
 
-function categoryLabel(key) {
-  return categoryMap[key] || key
+function closeMention() {
+  mention.open = false
+  mention.loading = false
+  mention.query = ''
+  mention.index = 0
 }
 
-function categoryTagType(key) {
-  return (
-    {
-      profile: 'primary',
-      preference: 'success',
-      project: 'warning',
-      decision: 'danger',
-      lesson: 'info',
-      other: 'info',
-    }[key] || 'info'
-  )
-}
-
-// 欢迎页建议问题：由后端生成（知识库 / 热点新闻 / 最近任务），6 小时刷新
-const suggestionIcons = { kb: Collection, news: Position, general: MagicStick, recent: Clock }
-// 建议卡副描述：后端只返回 type/text，前端按类型补一行能力说明
-const suggestionDescs = {
-  kb: '检索知识库文档，回答附带出处',
-  news: '联网检索最新资讯',
-  general: '通用对话、写作与润色',
-  recent: '接着最近的任务继续',
-}
-const suggestions = ref([])
-
-async function loadSuggestions() {
-  try {
-    const items = await getSuggestions()
-    suggestions.value = items.map((item) => ({
-      icon: suggestionIcons[item.type] || MagicStick,
-      text: item.text,
-      desc: suggestionDescs[item.type] || '直接开始对话',
-    }))
-  } catch {
-    suggestions.value = [
-      { icon: Collection, text: '知识库里的文档主要讲了什么？', desc: suggestionDescs.kb },
-      { icon: MagicStick, text: '帮我写一封简洁的工作周报', desc: suggestionDescs.general },
-      { icon: Position, text: '今天有什么值得关注的新闻？', desc: suggestionDescs.news },
-    ]
-  }
-}
-
-function toolName(name) {
-  if (name && name.startsWith('mcp_')) {
-    return `MCP · ${name.slice(4).replace(/_/g, ' ')}`
-  }
-  return (
-    {
-      knowledge_base_search: '知识库检索',
-      web_search: '联网搜索',
-      image_to_text: '图片识别',
-      read_file: '读取文件',
-      list_dir: '查看目录',
-      grep_search: '搜索代码',
-      write_file: '写入文件',
-      edit_file: '编辑文件',
-      delete_file: '删除文件',
-      bash: '执行命令',
-      command_tool: '执行命令',
-      file_tool: '文件操作',
-      todo_update: '任务清单',
-      subagent: '子代理',
-      add_document: '添加知识库文档',
-      skill_view: '查看技能',
-      write_skill: '沉淀技能',
-      dispatch_subtasks: '并行子任务',
-      enter_plan_mode: '进入计划模式',
-      exit_plan_mode: '提交计划',
-      verify: '验证结果',
-    }[name] || name
-  )
-}
-
-function onMessagesScroll() {
-  const el = messagesRef.value
-  if (!el) return
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100
-  scrollFollow.value = atBottom
-}
-
-let scrollRaf = null
-function scrollToBottom(force = false) {
-  // 把 24ms 打字机与各事件触发的滚动合并到每帧最多一次，
-  // 避免高频改 scrollTop 造成底部抖动/文字跳动
-  if (scrollRaf) return
-  scrollRaf = requestAnimationFrame(() => {
-    scrollRaf = null
-    if (messagesRef.value && (force || scrollFollow.value)) {
-      messagesRef.value.scrollTop = messagesRef.value.scrollHeight
+const mentionItems = computed(() => {
+  const q = mention.query.trim().toLowerCase()
+  const seen = new Set()
+  const out = []
+  for (const doc of scopeDocs.value) {
+    const path = doc?.relative_path
+    if (!path || seen.has(path)) continue
+    const name = doc.name || path.split(/[\\/]/).pop() || path
+    if (
+      q &&
+      !name.toLowerCase().includes(q) &&
+      !path.toLowerCase().includes(q)
+    ) {
+      continue
     }
+    seen.add(path)
+    out.push({ path, name })
+    if (out.length >= 8) break
+  }
+  return out
+})
+
+async function onComposerInput() {
+  if (question.value.trim()) ghostDismissed.value = true
+  const el = composerTextarea()
+  if (!el) {
+    closeMention()
+    return
+  }
+  const cursor = el.selectionStart ?? question.value.length
+  const before = question.value.slice(0, cursor)
+  // 光标前最后一个 @ 起的裸词（中文通常不加空格，因此不要求 @ 前有空白）
+  const match = before.match(/@([^\s@]*)$/)
+  if (!match) {
+    closeMention()
+    return
+  }
+  mention.open = true
+  mention.query = match[1]
+  mention.index = 0
+  if (!scopeDocs.value.length) {
+    mention.loading = true
+    await ensureScopeDocs()
+    if (mention.open) mention.loading = false
+  }
+}
+
+function pickMention(item) {
+  if (!item) return
+  const el = composerTextarea()
+  const text = question.value
+  // 以当前光标重新定位 @ 词，避免期间移动光标导致拼接错位
+  const cursor = el?.selectionStart ?? text.length
+  const match = text.slice(0, cursor).match(/@([^\s@]*)$/)
+  const at = match ? cursor - match[1].length - 1 : -1
+  if (at >= 0) {
+    question.value = text.slice(0, at) + text.slice(cursor)
+  }
+  addDocPaths([{ relative_path: item.path, name: item.name }])
+  closeMention()
+  nextTick(() => {
+    const box = composerTextarea()
+    box?.focus()
+    const pos = at >= 0 ? Math.min(at, question.value.length) : question.value.length
+    box?.setSelectionRange(pos, pos)
   })
 }
+
+function isPlainEnter(event) {
+  return (
+    event.key === 'Enter' &&
+    !event.shiftKey &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    !event.isComposing
+  )
+}
+
+function onComposerKeydown(event) {
+  // ghost 建议：Tab 采纳 / Esc 忽略；打字走 input 事件自动消失
+  if (event.key === 'Tab' && ghostVisible.value) {
+    event.preventDefault()
+    acceptGhostSuggestion()
+    return
+  }
+  if (event.key === 'Escape' && ghostVisible.value) {
+    event.preventDefault()
+    ghostDismissed.value = true
+    return
+  }
+  // Claude Code 同款：空输入框 Enter = 采纳并直接发送
+  if (isPlainEnter(event) && ghostVisible.value) {
+    event.preventDefault()
+    question.value = ghostSuggestion.value
+    ghostDismissed.value = true
+    send()
+    return
+  }
+  if (mention.open) {
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      closeMention()
+      return
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const len = mentionItems.value.length
+      if (len) {
+        mention.index =
+          (mention.index + (event.key === 'ArrowDown' ? 1 : -1) + len) % len
+      }
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closeMention()
+      return
+    }
+    if (isPlainEnter(event)) {
+      event.preventDefault()
+      if (mentionItems.value.length) {
+        pickMention(mentionItems.value[mention.index] || mentionItems.value[0])
+      } else {
+        closeMention()
+        send()
+      }
+      return
+    }
+  }
+  if (isPlainEnter(event)) {
+    event.preventDefault()
+    send()
+  }
+}
+
+function handleAskSelection(payload) {
+  if (!payload?.text) return
+  quote.value = {
+    text: payload.text,
+    context: payload.context || '',
+    source: payload.source || '',
+    page: payload.page ?? null,
+  }
+  if (payload.source) {
+    kbScope.value = {
+      type: 'doc',
+      value: payload.source,
+      label: payload.source.split('/').pop(),
+    }
+  }
+  const intents = {
+    explain: '请解释这段内容',
+    translate: '请翻译这段内容',
+    summarize: '请总结这段内容',
+  }
+  if (!question.value.trim()) {
+    question.value = intents[payload.intent] || intents.explain
+  }
+  docViewerRef.value?.close?.()
+  nextTick(() => questionInput.value?.focus())
+}
+const { docViewerRef, openSourceDoc, handleMessageClick } = useChatViewer({
+  messages,
+})
+const {
+  turn,
+  typewriter,
+  closeThinkingSegment,
+} = useChatTurn({ scrollToBottom })
+
+// 范围跟随会话：离开时保存、进入时恢复（与草稿/消息缓存同口径）
+function scopeKey() {
+  return activeId.value ?? 'new'
+}
+
+function saveScopeForSession() {
+  scopeCache[scopeKey()] = kbScope.value
+}
+
+function restoreScopeForSession() {
+  kbScope.value = scopeCache[scopeKey()] || null
+}
+
+function dropScopeForSession(id) {
+  delete scopeCache[id]
+}
+
+// 会话域：hooks 里的 suspension 在运行时才被调用（setup 期间不触发）
+const {
+  sessions,
+  loadSessions,
+  startNewChat,
+  switchSession,
+  handleRename,
+  handlePin,
+  handleDelete,
+  upsertSession,
+  rewindTo,
+  forkFrom,
+  reloadMessages,
+} = useChatSessions({
+  messages,
+  loading,
+  question,
+  questionInput,
+  activeId,
+  currentTitle,
+  sessionCollapsed,
+  sessionMessagesCache,
+  messageCacheLimit: MESSAGE_CACHE_LIMIT,
+  drafts,
+  scrollToBottom,
+  hooks: {
+    onLeave: () => {
+      saveScopeForSession()
+      suspension.reset()
+    },
+    onEnter: (id) => {
+      promptAdmin.loadConversationPrompt(id)
+      restoreScopeForSession()
+    },
+    onRestorePending: (id) => suspension.restorePendingApproval(id),
+    onNewChat: () => {
+      promptAdmin.clearConversationPrompt()
+      restoreScopeForSession()
+      pendingWorkspace.value = null
+    },
+    setTemplateFromSession: (value) => promptAdmin.setTemplateFromSession(value),
+    onSessionDeleted: dropScopeForSession,
+  },
+})
+
+// ---------------- 工作区：当前值 / 候选列表 / 赋值 ----------------
+const activeSession = computed(
+  () => sessions.value.find((s) => s.id === activeId.value) || null,
+)
+
+/** 当前会话的 fork 来源（源会话已被删除时为 null，但会话本身仍标记为分支） */
+const activeForkSource = computed(() => {
+  const origin = activeSession.value?.forked_from_conversation_id
+  return origin ? sessions.value.find((s) => s.id === origin) || null : null
+})
+const forkSourceTooltip = computed(() =>
+  activeForkSource.value
+    ? `分支自「${activeForkSource.value.title}」`
+    : '分支会话（来源会话已删除或不可见）',
+)
+const currentWorkspace = computed(() =>
+  activeId.value != null
+    ? activeSession.value?.project_dir || ''
+    : pendingWorkspace.value || '',
+)
+const currentWorkspaceName = computed(() => workspaceDisplayName(currentWorkspace.value))
+
+/** 工作区头的「+」：新建对话并绑定该工作区（首轮发送把 project_dir 带给后端）。 */
+function startNewChatInWorkspace(path) {
+  startNewChat()
+  pendingWorkspace.value = String(path || '').trim() || null
+  nextTick(() => questionInput.value?.focus())
+  if (pendingWorkspace.value) {
+    ElMessage.success(
+      `新对话已绑定工作区 ${workspaceDisplayName(pendingWorkspace.value)}（工具将在此目录下工作）`,
+    )
+  }
+}
+const workspaceOptions = computed(() => {
+  const seen = new Map()
+  for (const s of sessions.value) {
+    const path = s.project_dir
+    if (!path || seen.has(path)) continue
+    seen.set(path, { path, name: workspaceDisplayName(path) })
+  }
+  return [...seen.values()]
+})
+
+function openWorkspaceDialog() {
+  workspaceDraft.value = currentWorkspace.value
+  workspaceDialogVisible.value = true
+}
+
+async function confirmWorkspace() {
+  if (workspaceSaving.value) return
+  const value = (workspaceDraft.value || '').trim()
+  if (activeId.value == null) {
+    pendingWorkspace.value = value || null
+    workspaceDialogVisible.value = false
+    ElMessage.success(value ? '新对话将归入该工作区' : '新对话使用默认工作区')
+    return
+  }
+  workspaceSaving.value = true
+  try {
+    // "" = 清除（后端把空串归一化为 null）；null 会被当作"不修改"
+    const updated = await updateConversation(activeId.value, { project_dir: value })
+    if (activeSession.value) activeSession.value.project_dir = updated.project_dir
+    workspaceDialogVisible.value = false
+    ElMessage.success(
+      updated.project_dir
+        ? `已归入工作区 ${workspaceDisplayName(updated.project_dir)}`
+        : '已切换到默认工作区',
+    )
+    await loadSessions()
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '设置工作区失败')
+  } finally {
+    workspaceSaving.value = false
+  }
+}
+
+// 新会话首轮：SSE session 事件只带 id/title，立即刷新列表拿到 project_dir，
+// 让会话马上落入正确的工作区组（发送收尾的 reloadSessions 再兜底一次）
+watch(activeId, (id, prev) => {
+  if (id != null && prev == null) loadSessions()
+})
+
+// ---------------- 输入框「下一步建议」 ----------------
+
+const nextSuggestions = ref([])
+const nextSuggestionsLoading = ref(false)
+const ghostDismissed = ref(false)
+let nextSuggestionsReq = 0
+
+const ghostSuggestion = computed(() => nextSuggestions.value[0] || '')
+// Claude Code 式：只在空输入框、不在生成中、无 @ 候选时显示
+const ghostVisible = computed(
+  () =>
+    !loading.value &&
+    !ghostDismissed.value &&
+    !question.value.trim() &&
+    !mention.open &&
+    Boolean(ghostSuggestion.value),
+)
+
+/** 回答完成后：先用本地启发式即时展示，再异步换成小模型生成的 3 条。 */
+async function loadNextSuggestions() {
+  const convId = activeId.value
+  if (!convId) return
+  ghostDismissed.value = false
+  const lastAssistant = [...messages.value]
+    .reverse()
+    .find((m) => m && m.role === 'assistant')
+  const local = buildLocalNextSuggestions(lastAssistant)
+  if (local.length) nextSuggestions.value = local
+  const req = ++nextSuggestionsReq
+  nextSuggestionsLoading.value = true
+  try {
+    const items = await getNextSuggestions(convId)
+    // 请求期间切了会话/开始了新一轮：旧响应不能落到新界面
+    if (req !== nextSuggestionsReq || activeId.value !== convId) return
+    if (Array.isArray(items) && items.length) {
+      nextSuggestions.value = items.slice(0, 3)
+    }
+  } catch {
+    // 小模型失败/关闭：保留本地建议
+  } finally {
+    if (req === nextSuggestionsReq) nextSuggestionsLoading.value = false
+  }
+}
+
+/** Tab / 点击「Tab 采纳」：把 ghost 建议填入输入框并聚焦（不自动发送）。 */
+function acceptGhostSuggestion() {
+  const text = ghostSuggestion.value
+  if (!text) return
+  ghostDismissed.value = true
+  question.value = text
+  nextTick(() => questionInput.value?.focus())
+}
+
+// 开始新一轮 / 切会话：清空旧建议，避免误导
+watch(loading, (value) => {
+  if (value) {
+    nextSuggestions.value = []
+    ghostDismissed.value = true
+    nextSuggestionsReq += 1
+    nextSuggestionsLoading.value = false
+  }
+})
+watch(activeId, () => {
+  nextSuggestions.value = []
+  ghostDismissed.value = true
+  nextSuggestionsReq += 1
+  nextSuggestionsLoading.value = false
+})
+
+const suspension = useSuspension({
+  activeId,
+  currentTitle,
+  loading,
+  setActivity,
+  clearActivity,
+  messages,
+  questionInput,
+  turn,
+  typewriter,
+  closeThinkingSegment,
+  scrollToBottom,
+  upsertSession,
+  reloadSessions: loadSessions,
+  reloadPrompt: (id) => promptAdmin.loadConversationPrompt(id),
+  reloadMessages,
+  onAnswerComplete: () => loadNextSuggestions(),
+})
+
+const {
+  autoRunning,
+  hasSuspendedPending,
+  decidePermission,
+  confirmPlan,
+  cancelPlan,
+  onPlanCardKeydown,
+  submitQuestions,
+  stopSuspended,
+  restorePendingApproval,
+  continueInterrupted,
+  abandonInterrupted,
+} = suspension
+
+const { send, stop, regenerateLast, ask } = useChatStream({
+  activeId,
+  question,
+  messages,
+  loading,
+  setActivity,
+  clearActivity,
+  turn,
+  typewriter,
+  attachments,
+  prefs,
+  templateId,
+  kbScope,
+  quote,
+  projectDir: currentWorkspace,
+  suspension,
+  scrollFollow,
+  scrollToBottom,
+  reloadSessions: loadSessions,
+  reloadPrompt: promptAdmin.loadConversationPrompt,
+  clearDraft: () => {
+    drafts.value[activeId.value ?? 'new'] = ''
+  },
+})
+
+const {
+  contextVisible,
+  contextStats,
+  compacting,
+  ctxEffectiveMessages,
+  ctxSentTokens,
+  ctxWindowTokens,
+  ctxHighWater,
+  barPct,
+  fmtCtxTokens,
+  openContextDialog,
+  loadContextStats,
+  onContextClose,
+  timelineVisible,
+  timelineLoading,
+  timelineItems,
+  openTimeline,
+  formatCheckpointTime,
+  rollbackTo,
+  handleCompact,
+} = useChatContext({
+  activeId,
+  loading,
+  reloadMessages,
+  scrollToBottom,
+})
+
+// 右侧面板上下文统计：打开面板、切换会话、每轮跑完时静默刷新
+function refreshPanelContext() {
+  loadContextStats(activeId.value)
+}
+
+watch([inspectorVisible, activeId], () => {
+  if (inspectorVisible.value && activeId.value != null) loadContextStats(activeId.value)
+})
+
+watch(loading, (value, prev) => {
+  if (prev && !value && inspectorVisible.value && activeId.value != null) {
+    loadContextStats(activeId.value)
+  }
+})
+
+const {
+  memoriesVisible,
+  memories,
+  memoryEditVisible,
+  consolidating,
+  memoryForm,
+  expandedMemoryIds,
+  showArchived,
+  categoryMap,
+  categoryLabel,
+  categoryTagType,
+  formatMemoryDate: fmtMemoryDate,
+  toggleMemoryExpand,
+  openMemories,
+  loadMemories,
+  handleArchiveMemory,
+  openMemoryEdit,
+  saveMemory,
+  handleConsolidate,
+  handleDeleteMemory,
+} = useMemoriesPanel()
+
+const {
+  attachedImages,
+  attachedFiles,
+  attachInputRef,
+  uploadingAttachments,
+  dragOver,
+  onAttachFiles,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onPaste,
+  removeAttachment,
+  removeImage,
+} = attachments
+
+const {
+  quickProviders,
+  quickActiveId,
+  quickModel,
+  quickBusy,
+  quickActiveName,
+  quickPermissionMode,
+  quickPermissionLabel,
+  quickThinkingEnabled,
+  quickThinkingEffort,
+  quickThinkingLabel,
+  thinkingOptions,
+  modeBusy,
+  thinkingBusy,
+  loadQuickProviders,
+  onQuickSwitch,
+  onPermissionModeSwitch,
+  onThinkingSwitch,
+} = quick
+
+const {
+  templates,
+  availableTemplates,
+  templateManagerVisible,
+  templateEditVisible,
+  templateForm,
+  promptFragmentsVisible,
+  templateVersionsVisible,
+  templateVersionTarget,
+  templatePreviewVisible,
+  templatePreviewRequest,
+  defaultTemplateVisible,
+  defaultTemplate,
+  sessionPromptVisible,
+  promptLockTag,
+  loadTemplates,
+  openTemplateManager,
+  loadConversationPrompt,
+  openSessionPrompt,
+  openTemplateVersions,
+  openPromptFragments,
+  openDefaultTemplate,
+  handleCloneTemplate,
+  handleArchiveTemplate,
+  onPromptArtifactsChanged,
+  onSessionPromptApplied,
+  openTemplateEdit,
+  openTemplatePreview,
+  normalizeTemplateBreaks,
+  auditPromptHealth,
+  saveTemplate,
+  handleDeleteTemplate,
+} = promptAdmin
+
+// 右侧面板显示用的模板名
+const panelTemplateName = computed(() => {
+  if (!templateId.value) return '默认模板'
+  const found = (templates.value || []).find((t) => t.id === templateId.value)
+  return found?.name || '自定义模板'
+})
+
+const { toolMode, useWebSearch, useKnowledgeBase, loadPrefs } = prefs
 
 async function copyText(text) {
   try {
@@ -1130,1153 +2122,49 @@ async function copyText(text) {
   }
 }
 
-/** 把审批参数格式化成多行展示文本（预览大段内容，避免刷屏） */
-function formatArgs(args) {
-  if (!args || !Object.keys(args).length) return ''
-  const lines = []
-  for (const [k, v] of Object.entries(args)) {
-    if (v === '' || v == null) continue
-    const text = typeof v === 'string' ? v : JSON.stringify(v)
-    const preview = text.length > 160 ? `${text.slice(0, 160)}…（共 ${text.length} 字符）` : text
-    lines.push(`${k}: ${preview}`)
-  }
-  return lines.join('\n')
-}
-
-/** 用户批准/拒绝敏感操作（选项卡：0=批准，1=拒绝，2=批准并永久记住） */
-async function decidePermission(p, optionIndex) {
-  if (!p || p.status !== 'pending') return
-  const approve = optionIndex !== 1
-  const remember = optionIndex === 2
-  // 记录决定；整批决定齐了由 maybeSubmitSuspension 一次性提交（/agent/resume）
-  p._decision = {
-    call_id: p.id,
-    approve,
-    reason: p.reason || '',
-    remember_session: false,
-    remember_forever: !!remember && approve,
-  }
-  p.status = approve ? 'approved' : 'denied'
-  if (remember && approve) {
-    p.reason = (p.reason ? `${p.reason}；` : '') + '已记住，下次不再询问'
-  }
-  await maybeSubmitSuspension()
-}
-
-/** 待审批的请求：当前查看会话的消息里第一个 pending 卡片。
- * 不能用 streamMsg（它是"最近一次发送"的流）：并行会话时用户在 A 会话
- * 看审批卡，键盘快捷会落到 B 会话的流上甚至失效；按会话扫描才对。 */
-function pendingPermission() {
-  if (!messages.value) return null
-  for (const msg of messages.value) {
-    const p = (msg.permissions || []).find((x) => x.status === 'pending')
-    if (p) return p
-  }
-  return null
-}
-
-/** 按 id 找待审批项：键盘焦点在哪个卡片上，就应该操作哪个卡片 */
-function findPendingPermission(id) {
-  if (!id || !messages.value) return null
-  for (const msg of messages.value) {
-    const p = (msg.permissions || []).find(
-      (x) => x.id === id && x.status === 'pending',
-    )
-    if (p) return p
-  }
-  return null
-}
-
-/** 跳到审批选项卡：焦点移入卡片，方便用 ↑↓/数字/Enter 操作 */
-function focusPermissionCard() {
-  const p = pendingPermission()
-  if (!p) return
-  const active = document.activeElement
-  // 用户正在输入问题时不强抢焦点（审批卡片仍在，点击即可进入选项卡）
-  const typing = active && active.tagName === 'TEXTAREA' && active.value?.length > 0
-  if (typing) return
-  p._focusIndex = 0
-  nextTick(() => {
-    // 注意：data-perm-id 在外层包装 div 上（.permission-card 是其子元素），
-    // 选择器必须用后代写法，否则查不到元素、focus() 静默失败，
-    // 导致键盘（数字/Enter）全部无效
-    const card = document.querySelector(`[data-perm-id="${p.id}"] .permission-opts`)
-    card?.focus()
-  })
-}
-
-/** 全局键盘：数字键在任何位置都可用（不会抢走输入框焦点，也避免"键盘按不动"）；
- * 方向键/Enter/Esc 需要焦点在审批卡片内，防止误触批准。 */
-function onPermissionKeydown(event) {
-  // 在输入框里打字时，数字和 Enter 保持文本语义
-  const tag = event.target?.tagName
-  if (tag === 'INPUT' || tag === 'TEXTAREA') return
-  // 焦点在哪个卡片上就操作哪个（多张待审批卡片时不能都落到第一张）
-  const cardEl = event.target.closest?.('[data-perm-id]')
-  const p = cardEl
-    ? findPendingPermission(cardEl.getAttribute('data-perm-id'))
-    : pendingPermission()
-  if (!p) return
-  const count = p.rememberable ? 3 : 2
-  if (event.key >= '1' && event.key <= String(count)) {
-    event.preventDefault()
-    decidePermission(p, Number(event.key) - 1)
-    return
-  }
-  // 其余按键（含 Enter 批准）只在卡片内生效：焦点不在卡片里时按 Enter
-  // 多半是在做别的事，误批准写文件/执行命令的代价太高
-  if (!cardEl) return
-  if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
-    event.preventDefault()
-    p._focusIndex = (p._focusIndex + 1) % count
-  } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
-    event.preventDefault()
-    p._focusIndex = (p._focusIndex + count - 1) % count
-  } else if (event.key === 'Enter') {
-    // 焦点在某个选项按钮上时交给原生激活（焦点在"拒绝"上按 Enter 就该拒绝）
-    if (event.target.closest?.('.perm-opt')) return
-    event.preventDefault()
-    decidePermission(p, p._focusIndex ?? 0)
-  } else if (event.key === 'Escape') {
-    event.preventDefault()
-    questionInput.value?.focus()
-  }
-}
-
-function isFailed(content) {
-  return content && content.startsWith('请求失败')
-}
-
-// ---------------- 会话 ----------------
-
-async function loadSessions() {
-  try {
-    sessions.value = await listConversations()
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '加载会话失败')
-  }
-}
-
-function startNewChat() {
-  // 生成中也允许新建：流式消息对象独立于会话数组，切走不影响后台生成
-  saveDraft()
-  if (activeId.value != null) sessionMessagesCache[activeId.value] = messages.value
-  activeId.value = null
-  currentTitle.value = '新对话'
-  messages.value = []
-  restoreDraft()
-}
-
-async function switchSession(session) {
-  if (session.id === activeId.value) return
-  // 保存当前会话的草稿与内存消息（含生成中的内容），再切换
-  saveDraft()
-  if (activeId.value != null) sessionMessagesCache[activeId.value] = messages.value
-  activeId.value = session.id
-  currentTitle.value = session.title
-  // 窄屏（<1024）会话栏为抽屉模式：选中会话后自动收起（媒体查询见样式末尾）
-  if (typeof window !== 'undefined' && window.innerWidth < 1024) sessionCollapsed.value = true
-  restoringTemplate = true
-  templateId.value = session.template_id || 0
-  restoringTemplate = false
-  if (sessionMessagesCache[session.id]) {
-    // 本会话有内存缓存（正在生成 / 刚切走）：直接用，不重新拉取，
-    // streamMsg 继续写入同一个消息对象，切回即看到完整内容
-    messages.value = sessionMessagesCache[session.id]
-    scrollToBottom(true)
+/** 知识库页「问此文档」跳转：?scope_doc=... / ?scope_book=... */
+function applyScopeFromRoute() {
+  const query = route.query
+  if (query.scope_doc) {
+    const path = String(query.scope_doc)
+    kbScope.value = {
+      type: 'doc',
+      value: path,
+      label: String(query.scope_label || path.split('/').pop()),
+    }
+  } else if (query.scope_book) {
+    const title = String(query.scope_book)
+    kbScope.value = { type: 'book', value: title, label: title }
   } else {
-    try {
-      const history = await getConversationMessages(session.id)
-      messages.value = history.map(mapHistoryMessage)
-      // 恢复 TodoWrite 任务清单，挂到最近一条助手消息（若有）
-      try {
-        const todoRes = await getTodos(session.id)
-        const lastAssistant = [...messages.value].reverse().find((m) => m.role === 'assistant')
-        if (lastAssistant && todoRes.todos?.length) lastAssistant.todos = todoRes.todos
-      } catch {
-        // 任务清单读取失败不阻塞会话加载
-      }
-      scrollToBottom(true)
-      // 挂起中的审批不在 MySQL 里（finalize 才落库）：刷新/切换后按后端状态恢复审批卡
-      restorePendingApproval(session.id)
-    } catch (error) {
-      ElMessage.error(error.response?.data?.detail || '加载历史消息失败')
-    }
-  }
-  restoreDraft()
-}
-
-async function handleRename(session) {
-  try {
-    const { value } = await ElMessageBox.prompt(
-      '输入新的会话标题',
-      '重命名',
-      { inputValue: session.title, confirmButtonText: '确定', cancelButtonText: '取消' },
-    )
-    const updated = await renameConversation(session.id, value.trim())
-    session.title = updated.title
-    if (session.id === activeId.value) {
-      currentTitle.value = updated.title
-    }
-  } catch (error) {
-    if (error !== 'cancel' && error !== 'close') {
-      ElMessage.error(error.response?.data?.detail || '重命名失败')
-    }
-  }
-}
-
-async function handleDelete(session) {
-  try {
-    await ElMessageBox.confirm(
-      `确定删除「${session.title}」吗？其全部对话记录将被删除。`,
-      '提示',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
-    )
-  } catch {
     return
   }
-  try {
-    await deleteConversation(session.id)
-    // 清理该会话的内存缓存与草稿
-    delete sessionMessagesCache[session.id]
-    delete drafts.value[session.id]
-    if (session.id === activeId.value) {
-      startNewChat()
-    }
-    await loadSessions()
-    ElMessage.success('会话已删除')
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '删除失败')
-  }
+  router.replace({ path: route.path, query: {} })
 }
 
-function upsertSession(data) {
-  const index = sessions.value.findIndex((s) => s.id === data.conversation_id)
-  const item = { id: data.conversation_id, title: data.title || '新对话', message_count: 0 }
-  if (index >= 0) {
-    if (data.title) sessions.value[index].title = data.title
-  } else if (data.conversation_id) {
-    sessions.value.unshift(item)
-  }
-}
-
-/** 后端历史消息 → 前端消息对象（含 id：消息级回退要用） */
-function mapHistoryMessage(m) {
-  return {
-    id: m.id,
-    role: m.role,
-    content: m.content,
-    tool_trace: (m.tool_trace || []).map((t) => ({ ...t, _open: false })),
-    sources: m.sources || [],
-    permissions: [],
-    todos: [],
-    plan: [],
-    planTotal: 0,
-    _sourcesOpen: false,
-    _streaming: false,
-  }
-}
-
-/** 消息级回退：删除该消息及其之后的所有对话，内容放回输入框重新编辑 */
-async function rewindTo(msg) {
-  if (loading.value || !activeId.value || !msg.id) return
-  try {
-    await ElMessageBox.confirm(
-      '将删除这条消息及其之后的所有对话记录，并把内容放回输入框，确定回退？',
-      '回退确认',
-      { type: 'warning', confirmButtonText: '回退', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
-  try {
-    const result = await rewindConversation(activeId.value, msg.id)
-    const history = await getConversationMessages(activeId.value)
-    messages.value = history.map(mapHistoryMessage)
-    question.value = msg.content || ''
-    const extra = result.summary_reset ? '，滚动摘要已重置' : ''
-    ElMessage.success(`已回退（删除 ${result.removed} 条消息${extra}），内容已放回输入框`)
-    nextTick(() => questionInput.value?.focus())
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '回退失败')
-  }
-}
-
-// ---------------- 上下文占用面板（/context · /compact） ----------------
-
-const contextVisible = ref(false)
-const contextStats = ref(null)
-const compacting = ref(false)
-
-// 下一轮实际发给模型的历史条数（后端 effective_history_messages；
-// 会话累计 message_count 含已并入滚动摘要的部分，两者通常不同）
-const ctxEffectiveMessages = computed(
-  () =>
-    contextStats.value?.effective_history_messages ??
-    contextStats.value?.message_count ??
-    0,
-)
-// 压缩触发水位（1.5×上限）：窗口超过它后压缩到上限条数，
-// 画进度条按水位对比，避免"70/60"这类超 100% 的显示
-const ctxHighWater = computed(
-  () =>
-    contextStats.value?.history_high_water_messages ??
-    contextStats.value?.history_max_messages ??
-    1,
-)
-
-function barPct(cur, cap) {
-  if (!cap) return '0%'
-  return `${Math.min(100, Math.round((cur / cap) * 100))}%`
-}
-
-function fmtCtxTokens(n) {
-  if (n == null) return '-'
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
-  return String(n)
-}
-
-// 请求序号：关闭/重开对话框时使进行中的请求失效，防止旧请求
-// 超时后误关新打开的对话框（竞态）
-let contextReqId = 0
-
-async function openContextDialog() {
-  if (!activeId.value) return
-  const reqId = ++contextReqId
-  contextVisible.value = true
-  contextStats.value = null
-  try {
-    const stats = await getAgentContext(activeId.value)
-    if (reqId === contextReqId) contextStats.value = stats
-  } catch (error) {
-    if (reqId !== contextReqId) return // 过期请求（用户已关闭/重开），忽略
-    ElMessage.error(error.response?.data?.detail || '读取上下文统计失败')
-    contextVisible.value = false
-  }
-}
-
-function onContextClose() {
-  // 关闭时作废进行中的请求：15s 超时回调不会再触碰对话框状态
-  contextReqId++
-}
-
-// ---------------- 会话快照时间线（原生检查点，时间旅行） ----------------
-
-const timelineVisible = ref(false)
-const timelineLoading = ref(false)
-const timelineItems = ref([])
-
-async function openTimeline() {
-  if (!activeId.value) return
-  timelineVisible.value = true
-  timelineLoading.value = true
-  try {
-    const res = await getConversationTimeline(activeId.value)
-    timelineItems.value = res.items || []
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '读取快照失败')
-    timelineItems.value = []
-  } finally {
-    timelineLoading.value = false
-  }
-}
-
-function formatCheckpointTime(ts) {
-  if (!ts) return '—'
-  try {
-    return new Date(ts).toLocaleString('zh-CN', { hour12: false })
-  } catch {
-    return String(ts)
-  }
-}
-
-async function rollbackTo(cp) {
-  if (!activeId.value || loading.value) return
-  try {
-    await ElMessageBox.confirm(
-      `回滚把消息历史与任务清单恢复到该快照（${formatCheckpointTime(cp.created_at)}，` +
-        `消息 ${cp.messages} 条）；比它新的消息会从会话里删除，仍可从更新的快照回滚回来。确定继续？`,
-      '回滚到快照',
-      { type: 'warning', confirmButtonText: '回滚', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
-  try {
-    const res = await rollbackConversation(activeId.value, cp.checkpoint_id)
-    const history = await getConversationMessages(activeId.value)
-    messages.value = history.map(mapHistoryMessage)
-    try {
-      const todoRes = await getTodos(activeId.value)
-      const lastAssistant = [...messages.value]
-        .reverse()
-        .find((m) => m.role === 'assistant')
-      if (lastAssistant && todoRes.todos?.length) lastAssistant.todos = todoRes.todos
-    } catch {
-      // 任务清单刷新失败不影响回滚结果
-    }
-    timelineVisible.value = false
-    ElMessage.success(`已回滚（恢复 ${res.restored_messages} 条消息）`)
-    scrollToBottom(true)
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '回滚失败')
-  }
-}
-
-async function handleCompact() {
-  if (!activeId.value || compacting.value) return
-  compacting.value = true
-  try {
-    const result = await compactConversation(activeId.value)
-    if (result.compacted) {
-      ElMessage.success(
-        `已压缩：保留最近 ${result.kept_messages} 条，${result.summarized_messages} 条并入摘要`,
-      )
-    } else {
-      ElMessage.info(result.reason || '无需压缩')
-    }
-    contextStats.value = await getAgentContext(activeId.value)
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '压缩失败')
-  } finally {
-    compacting.value = false
-  }
-}
-
-// ---------------- 引用溯源 ----------------
-
-// 知识库文档列表缓存（旧索引来源无 relative_path 时按文件名反查）
-let kbDocCache = { at: 0, list: [] }
-
-const docViewerRef = ref(null)
-
-async function openSourceDoc(src) {
-  let path = src.relative_path
-  if (!path) {
-    try {
-      if (Date.now() - kbDocCache.at > 60_000) {
-        kbDocCache.list = await listDocuments()
-        kbDocCache.at = Date.now()
-      }
-      const match = kbDocCache.list.find((d) => d.name === src.source)
-      if (!match) {
-        ElMessage.warning('未在知识库找到该文档（可能已删除；重建索引后可带精确路径）')
-        return
-      }
-      path = match.relative_path
-    } catch {
-      ElMessage.error('获取知识库文档列表失败')
+/** 桌面深链：?conv=<id> 直接打开对应会话（会话列表可能仍在加载，短暂等待） */
+async function applyConvFromRoute() {
+  const convId = Number(route.query.conv)
+  if (!Number.isFinite(convId) || convId <= 0) return
+  router.replace({ path: route.path, query: {} })
+  for (let i = 0; i < 20; i += 1) {
+    const found = (sessions.value || []).find((s) => Number(s.id) === convId)
+    if (found) {
+      switchSession(found)
       return
     }
-  }
-  docViewerRef.value?.open(path, {
-    page: src.page ?? null,
-    anchorText: (src.content || '').slice(0, 120),
-  })
-}
-
-function handleMessageClick(event) {
-  const citeEl = event.target.closest('[data-cite]')
-  if (!citeEl) return
-  const msgEl = event.target.closest('.msg')
-  if (!msgEl) return
-  const index = Number(msgEl.dataset.msgIndex)
-  const msg = messages.value[index]
-  if (!msg) return
-  const no = Number(citeEl.dataset.cite)
-  if (!Array.isArray(msg.sources) || msg.sources.length === 0 || no < 1) return
-
-  // 按来源自身的 index 定位（数组下标不一定等于引用编号）
-  let pos = msg.sources.findIndex((src) => Number(src?.index) === no)
-  if (pos < 0 && no <= msg.sources.length) pos = no - 1
-  if (pos < 0) return
-
-  // 展开来源面板并高亮对应条目
-  msg._sourcesOpen = true
-  nextTick(() => {
-    const items = msgEl.querySelectorAll('.source-item')
-    const target = items[pos]
-    if (!target) return
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    target.classList.add('flash')
-    setTimeout(() => target.classList.remove('flash'), 1600)
-  })
-}
-
-// ---------------- 长期记忆 ----------------
-
-async function openMemories() {
-  memoriesVisible.value = true
-  await loadMemories()
-}
-
-async function loadMemories() {
-  try {
-    memories.value = await listMemories(showArchived.value ? 'all' : 'active')
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '加载记忆失败')
+    await new Promise((resolve) => setTimeout(resolve, 150))
   }
 }
 
-async function handleArchiveMemory(memory) {
-  const archived = memory.status !== 'archived'
-  try {
-    await updateMemory(memory.id, { status: archived ? 'archived' : 'active' })
-    await loadMemories()
-    ElMessage.success(archived ? '已归档（不再参与召回，可随时恢复）' : '已恢复')
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || (archived ? '归档失败' : '恢复失败'))
-  }
-}
-
-function openMemoryEdit(memory) {
-  memoryForm.value = memory
-    ? { id: memory.id, content: memory.content, category: memory.category }
-    : { id: null, content: '', category: 'profile' }
-  memoryEditVisible.value = true
-}
-
-async function saveMemory() {
-  const form = memoryForm.value
-  if (!form.content.trim()) {
-    ElMessage.warning('内容不能为空')
-    return
-  }
-  try {
-    if (form.id) {
-      await updateMemory(form.id, {
-        content: form.content.trim(),
-        category: form.category,
-      })
-    } else {
-      await addMemory({ content: form.content.trim(), category: form.category })
-    }
-    memoryEditVisible.value = false
-    await loadMemories()
-    ElMessage.success(form.id ? '记忆已更新' : '记忆已添加')
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '保存失败')
-  }
-}
-
-async function handleConsolidate() {
-  consolidating.value = true
-  try {
-    const result = await consolidateMemories()
-    await loadMemories()
-    ElMessage.success(
-      `整理完成：合并 ${result.merged || 0} 条，归档 ${result.archived || 0} 条`,
-    )
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '整理失败')
-  } finally {
-    consolidating.value = false
-  }
-}
-
-async function handleDeleteMemory(memory) {
-  try {
-    await ElMessageBox.confirm('确定删除这条记忆吗？', '提示', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-    })
-  } catch {
-    return
-  }
-  try {
-    await deleteMemory(memory.id)
-    memories.value = memories.value.filter((m) => m.id !== memory.id)
-    ElMessage.success('已删除')
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '删除失败')
-  }
-}
-
-// ---------------- 发送 ----------------
-
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result)
-    reader.onerror = () => reject(new Error('读取图片失败'))
-    reader.readAsDataURL(file)
-  })
-}
-
-async function addImageFiles(files) {
-  for (const file of files) {
-    if (!file.type || !file.type.startsWith('image/')) continue
-    if (attachedImages.value.length >= 6) {
-      ElMessage.warning('最多同时上传 6 张图片')
-      break
-    }
-    try {
-      const dataUrl = await fileToDataUrl(file)
-      attachedImages.value.push({ id: ++imageSeq, dataUrl })
-    } catch (error) {
-      ElMessage.error(error.message || '读取图片失败')
-    }
-  }
-}
-
-function onImageFiles(event) {
-  addImageFiles(Array.from(event.target.files || []))
-  event.target.value = ''
-}
-
-/** 支持在输入框直接 Ctrl+V 粘贴截图/图片 */
-function onPaste(event) {
-  const items = event.clipboardData?.items || []
-  const files = []
-  for (const item of items) {
-    if (item.kind === 'file' && item.type.startsWith('image/')) {
-      const file = item.getAsFile()
-      if (file) files.push(file)
-    }
-  }
-  if (files.length) {
-    event.preventDefault()
-    addImageFiles(files)
-  }
-}
-
-function removeImage(id) {
-  attachedImages.value = attachedImages.value.filter((img) => img.id !== id)
-}
-
-function stop() {
-  if (abortController) {
-    abortController.abort()
-  }
-}
-
-/** 重新生成最后一条回答（复用其对应的用户问题） */
-function regenerateLast() {
-  if (loading.value) return
-  const last = messages.value[messages.value.length - 1]
-  if (!last || last.role !== 'assistant') return
-  let userMsg = null
-  for (let i = messages.value.length - 2; i >= 0; i--) {
-    if (messages.value[i].role === 'user') {
-      userMsg = messages.value[i]
-      break
-    }
-  }
-  if (!userMsg) return
-  messages.value.pop()
-  question.value = userMsg.content
-  send({ skipUserPush: true })
-}
-
-function ask(suggestion) {
-  question.value = suggestion.text
-  send()
-}
-
-/** 计划确认：把（可编辑的）计划作为决定经 /agent/resume 提交，同一 run 继续执行 */
-function confirmPlan(msg) {
-  const approval = msg.planApproval
-  if (!approval || loading.value) return
-  const steps = String(approval.text || '')
-    .split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean)
-  if (!steps.length) {
-    ElMessage.warning('计划不能为空')
-    return
-  }
-  approval.steps = steps
-  approval.state = 'confirmed'
-  if (!suspended || suspended.submitted) return
-  suspended.planPending = false
-  suspended.submitted = true
-  runResumeStream(
-    suspended.conversationId,
-    suspendedCards()
-      .map((c) => c._decision)
-      .filter(Boolean),
-    false,
-    { approved: true, steps, reason: '' },
-  )
-}
-
-function cancelPlan(msg) {
-  const approval = msg.planApproval
-  if (!approval) return
-  if (approval._suspended && suspended && !suspended.submitted) {
-    // 原生挂起：拒绝计划 → 同一 run 继续（模型可调整后重新提交）
-    approval.state = 'cancelled'
-    suspended.planPending = false
-    suspended.submitted = true
-    runResumeStream(
-      suspended.conversationId,
-      suspendedCards()
-        .map((c) => c._decision)
-        .filter(Boolean),
-      false,
-      { approved: false, steps: [], reason: '用户取消了该计划' },
-    )
-    return
-  }
-  approval.state = 'cancelled'
-}
-
-/** 计划卡键盘：Enter / Ctrl+Enter 确认，Esc 取消（输入框内 Enter 保留换行语义） */
-function onPlanCardKeydown(msg, event) {
-  const approval = msg?.planApproval
-  if (!approval || approval.state !== 'pending') return
-  const inTextarea = event.target?.tagName === 'TEXTAREA'
-  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-    event.preventDefault()
-    confirmPlan(msg)
-  } else if (event.key === 'Escape') {
-    event.preventDefault()
-    cancelPlan(msg)
-  } else if (event.key === 'Enter' && !inTextarea) {
-    event.preventDefault()
-    confirmPlan(msg)
-  }
-}
-
-/** 计划卡出现时把焦点移进去，键盘可直接 Enter 确认（不抢输入框的焦点） */
-function focusPlanCard() {
-  nextTick(() => {
-    const card = document.querySelector('.plan-approval-box[data-plan-state="pending"]')
-    if (!card) return
-    if (document.activeElement === questionInput.value) {
-      // 正在输入下一句话时不打断（点击卡片即可进入键盘操作）
-      if ((questionInput.value?.value?.length || 0) > 0) return
-    }
-    card.focus?.()
-  })
-}
-
-/**
- * 一轮问答/恢复流的事件处理器（send 与挂起恢复共用同一套渲染逻辑）。
- * 处理器通过模块级 streamMsg 写入目标助手消息：调用前先把它指到正确的气泡。
- *
- * 事件→状态 的映射本体已抽到 composables/useAgentStream.js（可单测，见
- * scripts/check_stream_handlers.mjs）；这里只注入组件作用域的依赖：
- * - state：只读的 ref/对象；
- * - actions：组件副作用回调；
- * - live：需要实时读写的组件级 let（值捕获会读到旧值）。
- */
-function buildStreamHandlers() {
-  return createStreamHandlers({
-    state: { activeId, currentTitle, currentTool, streamMsg, pendingText },
-    actions: {
-      closeThinkingSegment,
-      dropStreamedRound,
-      flushTypewriter,
-      focusPermissionCard,
-      focusPlanCard,
-      pushSuspendedCards,
-      scrollToBottom,
-      startTypewriter,
-      toolName,
-      upsertSession,
-    },
-    live: {
-      getSkipNextToken: typewriter.getSkipNextToken,
-      setSkipNextToken: typewriter.setSkipNextToken,
-      getStreamedLen: typewriter.getStreamedLen,
-      setStreamedLen: typewriter.setStreamedLen,
-      setSuspended: (v) => {
-        suspended = v
-      },
-    },
-  })
-}
-
-/** 把挂起的待审批项渲染成卡片（挂起事件与刷新恢复共用同一形态） */
-function pushSuspendedCards(msg, ops) {
-  for (const op of ops || []) {
-    msg.permissions.push({
-      id: op.call_id,
-      tool: op.name,
-      summary: op.summary || `${toolName(op.name)} 需要确认`,
-      args_text: formatArgs(op.arguments),
-      args: op.arguments || {},
-      status: 'pending',
-      reason: '',
-      rememberable: op.name === 'bash' || op.name === 'command_tool',
-      _focusIndex: 0,
-      _suspended: true,
-      _decision: null,
-    })
-  }
-}
-
-/** 挂起批次是否还有未决定的操作/计划（用于禁用输入框/发送键） */
-const hasSuspendedPending = computed(() =>
-  messages.value.some(
-    (m) =>
-      (m.permissions || []).some((p) => p._suspended && !p._decision) ||
-      (m.planApproval &&
-        m.planApproval._suspended &&
-        m.planApproval.state === 'pending'),
-  ),
-)
-
-/** 当前挂起批次的全部卡片（跨消息收集，按 _suspended 标记） */
-function suspendedCards() {
-  const out = []
-  for (const msg of messages.value) {
-    for (const p of msg.permissions || []) {
-      if (p._suspended) out.push(p)
-    }
-  }
-  return out
-}
-
-/** 全部卡片都已决定 → 一次性提交，开恢复流续跑同一条回答 */
-async function maybeSubmitSuspension() {
-  if (!suspended || suspended.submitted) return
-  if (suspended.planPending) return // 等计划卡确认/拒绝：由 confirmPlan/cancelPlan 提交
-  const cards = suspendedCards()
-  if (!cards.length || cards.some((c) => !c._decision)) return
-  suspended.submitted = true
-  await runResumeStream(
-    suspended.conversationId,
-    cards.map((c) => c._decision),
-    false,
-  )
-}
-
-/** 挂起期间点「全部拒绝并停止」：全拒 + stopped，收尾语义与停止生成一致 */
-async function stopSuspended() {
-  if (!suspended || suspended.submitted) return
-  const cards = suspendedCards()
-  for (const c of cards) {
-    if (!c._decision) {
-      c._decision = { call_id: c.id, approve: false, reason: '用户停止了回答' }
-      c.status = 'denied'
-    }
-  }
-  const plan = suspended.planPending
-    ? { approved: false, steps: [], reason: '用户停止了回答' }
-    : null
-  suspended.submitted = true
-  await runResumeStream(
-    suspended.conversationId,
-    cards.map((c) => c._decision),
-    true,
-    plan,
-  )
-}
-
-/** 提交决定后恢复挂起运行：新 SSE 流继续写回同一条助手消息 */
-async function runResumeStream(conversationId, decisions, stopped, plan = null) {
-  if (!conversationId || loading.value) return
-  flushTypewriter()
-  if (suspended && suspended.msg) streamMsg = suspended.msg
-  loading.value = true
-  currentTool.value = '正在继续…'
-  abortController = new AbortController()
-  const body = {
-    conversation_id: conversationId,
-    decisions,
-    stopped: !!stopped,
-  }
-  if (plan) body.plan = plan
-  try {
-    await resumeAgentChat(
-      body,
-      buildStreamHandlers(),
-      { signal: abortController.signal },
-    )
-  } catch (error) {
-    flushTypewriter()
-    if (error.name === 'AbortError' || error.message === 'aborted') {
-      dropStreamedRound()
-      if (streamMsg) streamMsg.content = streamMsg.content || '（已停止生成）'
-    } else {
-      const detail = error.message || '恢复执行失败，请确认后端服务已启动'
-      ElMessage.error(detail)
-      if (streamMsg) streamMsg.content = streamMsg.content || `恢复失败：${detail}`
-    }
-  } finally {
-    abortController = null
-    loading.value = false
-    currentTool.value = ''
-    if (streamMsg) streamMsg._streaming = false
-    suspended = null
-    await loadSessions()
-    scrollToBottom()
-  }
-}
-
-/**
- * 刷新/切换会话后按后端状态恢复未完成的一轮。
- * 挂起/中断的一轮还没落库（finalize 才写 MySQL），不恢复的话会话会被闸门挡住。
- */
-async function restorePendingApproval(conversationId) {
-  if (!conversationId || loading.value) return
-  try {
-    const res = await getPendingApproval(conversationId)
-    if (!res) return
-    // 幂等：先清掉上一次恢复出的提示条/卡片载体
-    messages.value = messages.value.filter((m) => !m._unfinishedBar)
-    if (!res.pending && !res.interrupted) return
-    let target = [...messages.value].reverse().find((m) => m.role === 'assistant')
-    if (!target || res.interrupted) {
-      target = {
-        role: 'assistant',
-        content: '',
-        sources: [],
-        tool_trace: [],
-        permissions: [],
-        todos: [],
-        plan: [],
-        planTotal: 0,
-        planDone: 0,
-        planCurrent: null,
-        _sourcesOpen: false,
-        _streaming: false,
-      }
-      messages.value.push(target)
-    }
-    target.permissions = target.permissions || []
-    streamMsg = target
-    if (res.interrupted) {
-      // 进程被杀/异常退出留下的半成品：给「继续执行/丢弃」入口
-      target._unfinishedBar = true
-      scrollToBottom()
-      return
-    }
-    suspended = { conversationId, msg: target, submitted: false, planPending: false }
-    pushSuspendedCards(target, res.ops)
-    if (res.plan && (res.plan.steps || []).length) {
-      suspended.planPending = true
-      target.planApproval = {
-        text: (res.plan.steps || []).map((s) => String(s)).join('\n'),
-        steps: (res.plan.steps || []).map((s) => String(s)),
-        summary: res.plan.summary || '',
-        state: 'pending',
-        _suspended: true,
-      }
-      focusPlanCard()
-    } else {
-      focusPermissionCard()
-    }
-    scrollToBottom()
-  } catch {
-    // 恢复失败不阻塞会话加载
-  }
-}
-
-/** 续跑被中断的运行：新 SSE 流渲染进提示条所在气泡 */
-async function continueInterrupted(msg) {
-  if (!activeId.value || loading.value) return
-  flushTypewriter()
-  streamMsg = msg
-  msg._unfinishedBar = false
-  loading.value = true
-  currentTool.value = '正在继续执行…'
-  abortController = new AbortController()
-  try {
-    await continueAgentRun(activeId.value, buildStreamHandlers(), {
-      signal: abortController.signal,
-    })
-  } catch (error) {
-    flushTypewriter()
-    if (error.name === 'AbortError' || error.message === 'aborted') {
-      dropStreamedRound()
-      if (streamMsg) streamMsg.content = streamMsg.content || '（已停止生成）'
-    } else {
-      const detail = error.message || '续跑失败，请确认后端服务已启动'
-      ElMessage.error(detail)
-      msg._unfinishedBar = true
-    }
-  } finally {
-    abortController = null
-    loading.value = false
-    currentTool.value = ''
-    if (streamMsg) streamMsg._streaming = false
-    await loadSessions()
-    scrollToBottom()
-  }
-}
-
-/** 丢弃未完成的运行：删除原生检查点线程，解除闸门 */
-async function abandonInterrupted(msg) {
-  if (!activeId.value || loading.value) return
-  try {
-    await abandonRun(activeId.value)
-    messages.value = messages.value.filter((m) => m !== msg)
-    ElMessage.success('已丢弃未完成的运行，可以继续对话')
-    scrollToBottom()
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '丢弃失败，请重试')
-  }
-}
-
-async function send(options = {}) {
-  flushTypewriter() // 清理上一轮残留（如异常中断）
-  const hasImages = attachedImages.value.length > 0
-  const text = question.value.trim() || (hasImages ? '请识别并描述这张图片' : '')
-  if (!text || loading.value) return
-  if (hasSuspendedPending.value) {
-    ElMessage.warning('请先处理待确认的操作（批准或拒绝后自动继续）')
-    return
-  }
-  const imageDataUrls = attachedImages.value.map((img) => img.dataUrl)
-
-  if (!options.skipUserPush) {
-    messages.value.push({ role: 'user', content: text, images: imageDataUrls })
-  }
-  const assistantMsg = {
-    role: 'assistant',
-    content: '',
-    sources: [],
-    tool_trace: [],
-    permissions: [],
-    todos: [],
-    plan: [],
-    planTotal: 0,
-    planDone: 0,
-    planCurrent: null,
-    _sourcesOpen: false,
-    _streaming: true,
-  }
-  messages.value.push(assistantMsg)
-  // 用响应式代理引用消息：typewriter 每帧增量更新 content 时能触发渲染
-  streamMsg = messages.value[messages.value.length - 1]
-  typewriter.resetRound()
-  question.value = ''
-  // 发送成功：清空该会话草稿（内容已发出）
-  drafts.value[currentDraftKey()] = ''
-  attachedImages.value = []
-  loading.value = true
-  currentTool.value = '正在理解问题…'
-  abortController = new AbortController()
-  scrollFollow.value = true
-  scrollToBottom(true)
-
-  // 根据开关状态计算后端 tool_mode
-  let effectiveMode = 'none'
-  if (toolMode.value === 'auto' || (useWebSearch.value && useKnowledgeBase.value)) {
-    effectiveMode = 'auto'
-  } else if (useWebSearch.value) {
-    effectiveMode = 'web'
-  } else if (useKnowledgeBase.value) {
-    effectiveMode = 'knowledge'
-  }
-  const payload = {
-    question: text,
-    images: imageDataUrls,
-    conversation_id: activeId.value,
-    tool_mode: effectiveMode,
-    template_id: templateId.value || null,
-  }
-  try {
-    await streamAgentChat(payload, buildStreamHandlers(), {
-      signal: abortController.signal,
-    })
-  } catch (error) {
-    flushTypewriter()
-    if (error.name === 'AbortError' || error.message === 'aborted') {
-      // 用户主动停止生成：撤回本轮未完成的正文（与后端"不落半截回答"一致），
-      // 早前轮次已确认的正文保留
-      dropStreamedRound()
-      streamMsg.content = streamMsg.content || '（已停止生成）'
-    } else {
-      const detail = error.message || '请求失败，请确认后端服务已启动'
-      ElMessage.error(detail)
-      streamMsg.content = streamMsg.content || `请求失败：${detail}`
-      if (detail.includes('待确认') || detail.includes('被中断')) {
-        // 后端闸门：该会话还有挂起审批/中断未跑完 → 恢复卡片或提示条，让用户先处理
-        await restorePendingApproval(activeId.value)
-      }
-    }
-  } finally {
-    abortController = null
-    loading.value = false
-    currentTool.value = ''
-    if (streamMsg) streamMsg._streaming = false
-    await loadSessions()
-    scrollToBottom()
-  }
-}
-
-// ---------------- 模板管理 ----------------
-
-async function loadTemplates() {
-  try {
-    templates.value = await listTemplates()
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '加载模板失败')
-  }
-}
-
-function openTemplateManager() {
-  templateManagerVisible.value = true
-  loadTemplates()
-}
-
-function openTemplateEdit(tpl) {
-  if (tpl && tpl.is_system) {
-    ElMessage.warning('内置模板不可编辑，可新建自定义模板')
-    return
-  }
-  templateForm.value = tpl
-    ? {
-        id: tpl.id,
-        name: tpl.name,
-        category: tpl.category,
-        description: tpl.description,
-        content: tpl.content,
-      }
-    : { id: null, name: '', category: 'general', description: '', content: '' }
-  templateEditVisible.value = true
-}
-
-async function saveTemplate() {
-  const form = templateForm.value
-  if (!form.name.trim() || !form.content.trim()) {
-    ElMessage.warning('名称和内容不能为空')
-    return
-  }
-  try {
-    const payload = {
-      name: form.name.trim(),
-      category: form.category,
-      description: form.description.trim(),
-      content: form.content,
-    }
-    if (form.id) {
-      await updateTemplate(form.id, payload)
-    } else {
-      await createTemplate(payload)
-    }
-    templateEditVisible.value = false
-    await loadTemplates()
-    ElMessage.success(form.id ? '模板已更新' : '模板已创建')
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '保存失败')
-  }
-}
-
-async function handleDeleteTemplate(tpl) {
-  try {
-    await ElMessageBox.confirm(
-      `确定删除模板「${tpl.name}」吗？`,
-      '提示',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
-  try {
-    await deleteTemplate(tpl.id)
-    if (templateId.value === tpl.id) templateId.value = 0
-    await loadTemplates()
-    ElMessage.success('模板已删除')
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '删除失败')
-  }
+/** 知识库页划选后通过模块 store 带到对话页 */
+function applyChatSeed() {
+  const seed = consumeChatSeed()
+  if (!seed) return
+  if (seed.quote) quote.value = seed.quote
+  if (seed.scope) kbScope.value = seed.scope
+  // 不覆盖用户已有的草稿：只在本轮输入为空时预填快捷问题
+  if (seed.question && !question.value.trim()) question.value = seed.question
+  nextTick(() => questionInput.value?.focus())
 }
 
 onMounted(() => {
@@ -2285,1181 +2173,27 @@ onMounted(() => {
   loadTemplates()
   loadSuggestions()
   loadQuickProviders()
+  applyScopeFromRoute()
+  applyConvFromRoute()
+  applyChatSeed()
+  restoreInspectorWidth()
+  window.addEventListener('keydown', onGlobalKeydown)
   // 窄屏（<1024）默认收起会话栏（抽屉模式，见样式媒体查询）
   if (window.innerWidth < 1024) sessionCollapsed.value = true
-  window.addEventListener('keydown', onPermissionKeydown, true)
 })
 
 // keep-alive 回到本页时刷新供应商列表（设置页可能改过启用/名称）
-onActivated(loadQuickProviders)
+onActivated(() => {
+  loadQuickProviders()
+  applyScopeFromRoute()
+  applyConvFromRoute()
+  applyChatSeed()
+})
 
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onPermissionKeydown, true)
   typewriter.dispose() // 停掉打字机定时器，避免回调打到已卸载组件上
+  window.removeEventListener('keydown', onGlobalKeydown)
 })
 </script>
 
-<style scoped>
-.chat-page {
-  height: calc(100vh - 32px);
-  display: flex;
-  gap: 16px;
-}
-
-/* ============ 对话主区 ============ */
-.chat-main {
-  flex: 0 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  width: min(100%, var(--chat-content-width, 70%));
-  margin: 0 auto;
-  background: var(--bg-chat);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  overflow: hidden;
-}
-
-.chat-header {
-  height: 54px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-/* 顶栏动作区：供应商 chip + 高频图标钮 + 「更多」下拉 */
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  flex-shrink: 0;
-}
-
-/* 顶栏图标钮：与左端折叠钮同一视觉语言（32px 圆角方钮） */
-.header-icon-btn {
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  color: var(--text-2);
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
-}
-
-.header-icon-btn:hover {
-  background: var(--bg-hover);
-  color: var(--primary-text);
-}
-
-.header-icon-btn.disabled {
-  color: var(--text-3);
-  cursor: not-allowed;
-}
-
-.header-icon-btn.disabled:hover {
-  background: transparent;
-  color: var(--text-3);
-}
-
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.header-toggle {
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  color: var(--text-3);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.header-toggle:hover {
-  background: var(--bg-hover);
-  color: var(--primary);
-}
-
-/* 供应商快捷切换 chip：当前「供应商 · 模型」，点击展开下拉 */
-.model-switch-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 300px;
-  padding: 4px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-card);
-  font-size: var(--font-xs);
-  color: var(--text-1);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.2s;
-}
-
-.model-switch-chip:hover {
-  border-color: var(--primary);
-  color: var(--primary-text);
-}
-
-.model-switch-chip.busy {
-  opacity: 0.6;
-  pointer-events: none;
-}
-
-.model-switch-model {
-  color: var(--text-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.chat-title {
-  font-size: var(--font-lg);
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.messages {
-  flex: 1;
-  min-width: 0;
-  width: 100%;
-  overflow-y: auto;
-  padding: 20px 24px;
-  /* 防止浏览器滚动锚定与打字机滚动打架造成跳动 */
-  overflow-anchor: none;
-}
-
-/* 欢迎页 */
-.welcome {
-  height: 100%;
-  width: 100%;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  text-align: center;
-  padding: 28px 12px;
-  overflow-y: auto;
-}
-
-.welcome-mark {
-  flex-shrink: 0;
-  margin-top: auto;
-}
-
-.welcome-title,
-.welcome-sub {
-  flex-shrink: 0;
-}
-
-.welcome .suggestions {
-  flex-shrink: 0;
-}
-
-.welcome-mark {
-  width: 64px;
-  height: 64px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-lg);
-  color: var(--text-on-brand);
-  background: var(--primary-grad);
-  /* 品牌光晕：外圈扩散光 + 下方柔影 */
-  box-shadow: 0 0 0 10px color-mix(in srgb, var(--primary) 7%, transparent),
-    0 10px 28px color-mix(in srgb, var(--primary) 32%, transparent);
-  margin-bottom: 20px;
-}
-
-.welcome-glyph {
-  font-family: var(--font-display);
-  font-size: 30px;
-  font-weight: 700;
-  line-height: 1;
-  letter-spacing: 0.02em;
-  transform: translateY(-1px);
-}
-
-.welcome-title {
-  font-size: var(--font-3xl);
-  font-weight: 700;
-  margin-bottom: 8px;
-}
-
-.welcome-sub {
-  color: var(--text-3);
-  font-size: var(--font-base);
-  margin-bottom: 32px;
-  max-width: 100%;
-  padding: 0 12px;
-}
-
-.suggestions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  width: 100%;
-  max-width: 640px;
-}
-
-/* 奇数张建议卡：最后一张通栏，避免半行空格 */
-.suggestions .suggestion:last-child:nth-child(odd) {
-  grid-column: 1 / -1;
-}
-
-.suggestion {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-card-2);
-  cursor: pointer;
-  text-align: left;
-  transition: border-color var(--dur-base) var(--ease-out),
-    background var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out),
-    transform var(--dur-base) var(--ease-out);
-}
-
-.suggestion:hover {
-  border-color: var(--primary);
-  background: var(--bg-active);
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px color-mix(in srgb, var(--primary) 12%, transparent);
-}
-
-.suggestion-icon {
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  background: var(--bg-active);
-  color: var(--primary);
-}
-
-.suggestion-body {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-}
-
-.suggestion-text {
-  color: var(--text-1);
-  font-size: var(--font-base);
-  font-weight: 500;
-  line-height: 1.4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
-}
-
-.suggestion:hover .suggestion-text {
-  color: var(--primary);
-}
-
-.suggestion-desc {
-  color: var(--text-3);
-  font-size: var(--font-xs);
-  line-height: 1.4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
-}
-
-.suggestions {
-  animation: fade-up var(--dur-slow) var(--ease-out) both;
-}
-
-/* 欢迎页能力标签行（静态展示） */
-.capability-chips {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: var(--space-2);
-  margin-top: var(--space-5);
-  margin-bottom: auto;
-  padding: 0 12px;
-  flex-shrink: 0;
-}
-
-.capability-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--bg-card-2);
-  color: var(--text-3);
-  font-size: var(--font-xs);
-}
-
-.capability-chip .el-icon {
-  color: var(--primary);
-}
-
-
-/* 消息 */
-.msg {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 24px;
-  max-width: 880px;
-  margin-left: auto;
-  margin-right: auto;
-}
-
-.msg.user {
-  flex-direction: row-reverse;
-}
-
-.avatar {
-  width: 36px;
-  height: 36px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-md);
-}
-
-.avatar.user {
-  background: var(--user-avatar-grad);
-  color: var(--text-on-brand);
-  box-shadow: 0 4px 10px rgba(255, 154, 90, 0.3);
-}
-
-.avatar.assistant {
-  background: var(--primary-grad);
-  color: var(--text-on-brand);
-  box-shadow: 0 4px 10px rgba(111, 91, 255, 0.3);
-}
-
-.msg-body {
-  flex: 1;
-  min-width: 0;
-  max-width: calc(100% - 48px);
-}
-
-.msg.user .msg-body {
-  display: flex;
-  justify-content: flex-end;
-  /* 撑满整行：否则 msg-body 收缩到气泡宽度，气泡的 max-width:70%
-     以自身宽度为参照（自引用收缩），实际换行宽度只有整行的 ~62% */
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.user-bubble {
-  max-width: 70%;
-  padding: 10px 16px;
-  border-radius: var(--radius-md) var(--radius-md) var(--radius-xs) var(--radius-md);
-  background: var(--user-bubble-bg);
-  border: 1px solid var(--user-bubble-border);
-  color: var(--user-bubble-text);
-  line-height: 1.7;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: var(--font-base);
-}
-
-.user-images {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-
-.user-img {
-  max-width: 220px;
-  max-height: 220px;
-  border-radius: var(--radius-md);
-  object-fit: cover;
-  display: block;
-  border: 1px solid color-mix(in srgb, var(--primary) 18%, transparent);
-}
-
-/* 消息级回退：悬停用户消息出现"回退"入口 */
-.user-msg-group {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  /* 占满整行：否则 group 收缩到气泡宽度，气泡 max-width:70% 以自身为参照
-     （自引用收缩），短文本也会被压窄换行（如两个字拆成两行） */
-  width: 100%;
-}
-
-.user-rewind {
-  margin-top: 3px;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-
-.msg.user:hover .user-rewind {
-  opacity: 1;
-}
-
-.rewind-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: var(--font-xs);
-  color: var(--text-3);
-  cursor: pointer;
-  user-select: none;
-}
-
-.rewind-btn:hover {
-  color: var(--primary);
-}
-
-/* 上下文占用面板 */
-.ctx-stats {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.ctx-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  font-size: var(--font-sm);
-}
-
-.ctx-label {
-  color: var(--text-3);
-}
-
-.ctx-value {
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.ctx-bar {
-  height: 6px;
-  border-radius: var(--radius-xs);
-  background: var(--bg-card-3, rgba(128, 128, 128, 0.12));
-  overflow: hidden;
-}
-
-.ctx-bar i {
-  display: block;
-  height: 100%;
-  border-radius: var(--radius-xs);
-  background: linear-gradient(90deg, var(--primary), var(--success));
-  transition: width 0.3s;
-}
-
-.ctx-note {
-  margin-top: 4px;
-  font-size: var(--font-xs);
-  line-height: 1.6;
-  color: var(--text-3);
-}
-
-.ctx-sub {
-  font-size: var(--font-2xs);
-  color: var(--text-3);
-}
-
-.assistant-content {
-  position: relative;
-  padding: 14px 18px;
-  border-radius: var(--radius-md) var(--radius-md) var(--radius-md) var(--radius-xs);
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  /* 轻量化：常驻阴影改 hover 才显（边框保留） */
-  box-shadow: none;
-  transition: box-shadow var(--dur-base) var(--ease-out);
-}
-
-.assistant-content:hover {
-  box-shadow: var(--shadow-soft);
-}
-
-.status-time {
-  color: var(--text-3);
-  font-weight: 400;
-}
-
-/* 消息动作（复制/重生成）：卡底左对齐，hover 浮现（覆盖式，不占正文高度） */
-.msg-actions {
-  position: absolute;
-  bottom: 6px;
-  left: 12px;
-  display: flex;
-  gap: var(--space-1);
-  padding: 2px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg-card) 88%, transparent);
-  opacity: 0;
-  transition: opacity var(--dur-base) var(--ease-out);
-}
-
-.assistant-content:hover .msg-actions {
-  opacity: 1;
-}
-
-.copy-btn {
-  color: var(--text-3);
-  cursor: pointer;
-  padding: 4px;
-  border-radius: var(--radius-sm);
-}
-
-.copy-btn:hover {
-  color: var(--primary);
-  background: var(--bg-active);
-}
-
-.typing-tool {
-  color: var(--primary);
-  font-size: var(--font-base);
-}
-
-.status-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 12px;
-  border-radius: var(--radius-pill);
-  background: var(--bg-active);
-  color: var(--primary);
-  font-size: var(--font-sm);
-  font-weight: 500;
-}
-
-.status-spinner {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  border: 2px solid var(--primary-soft);
-  border-top-color: var(--primary);
-  animation: status-spin 0.8s linear infinite;
-}
-
-@keyframes status-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.dots {
-  display: inline-flex;
-  gap: 4px;
-  padding: 4px 0;
-}
-
-.dots i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--text-3);
-  animation: bounce 1.2s infinite;
-}
-
-.dots i:nth-child(2) {
-  animation-delay: 0.15s;
-}
-
-.dots i:nth-child(3) {
-  animation-delay: 0.3s;
-}
-
-@keyframes bounce {
-  0%,
-  60%,
-  100% {
-    transform: translateY(0);
-    opacity: 0.6;
-  }
-  30% {
-    transform: translateY(-4px);
-    opacity: 1;
-  }
-}
-
-/* 挂起条基样式：供「中断未跑完」条复用（审批卡内的一份随 PermissionCard 组件走） */
-.suspension-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px dashed var(--border);
-  background: var(--bg-soft, transparent);
-  font-size: var(--font-xs);
-  color: var(--text-2);
-}
-
-/* 中断未跑完（进程被杀/异常退出）：警示色 */
-.interrupted-bar {
-  border-color: var(--warning);
-  color: var(--warning-text);
-}
-
-/* 会话快照时间线（抽屉） */
-.timeline-hint {
-  color: var(--text-2);
-  font-size: var(--font-sm);
-  padding: 8px 2px;
-}
-
-.timeline-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.timeline-item {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 8px 10px;
-}
-
-.timeline-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.timeline-time {
-  flex: 1;
-  font-size: var(--font-sm);
-  font-weight: 600;
-}
-
-.timeline-meta {
-  margin-top: 4px;
-  font-size: var(--font-xs);
-  color: var(--text-2);
-}
-
-.timeline-plan {
-  margin-top: 4px;
-  font-size: var(--font-xs);
-  color: var(--text-2);
-  line-height: 1.5;
-}
-
-.suspension-actions {
-  display: inline-flex;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
-/* ============ 输入区 ============ */
-.input-area {
-  flex-shrink: 0;
-  min-width: 0;
-  width: 100%;
-  padding: 12px 24px 14px;
-  border-top: 1px solid var(--border);
-}
-
-/* 附加图片预览 */
-.image-preview-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.image-preview-item {
-  position: relative;
-  width: 64px;
-  height: 64px;
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  border: 1px solid var(--border-strong);
-  background: var(--bg-chat);
-}
-
-.image-preview-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.image-preview-remove {
-  position: absolute;
-  top: 3px;
-  right: 3px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.55);
-  color: var(--text-on-brand);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.image-preview-remove:hover {
-  background: rgba(245, 108, 108, 0.9);
-}
-
-.input-box {
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
-  padding: var(--space-3) var(--space-3) var(--space-2);
-  background: var(--bg-card-2);
-  transition: border-color var(--dur-base) var(--ease-out),
-    background var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
-}
-
-.input-box:focus-within {
-  border-color: var(--primary);
-  background: var(--bg-chat);
-  box-shadow: 0 0 0 3px var(--primary-soft);
-}
-
-.input-box :deep(.el-textarea__inner) {
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  padding: 0;
-  font-size: var(--font-base);
-  line-height: 1.6;
-}
-
-/* 控制行：开关 chips + 模板选择 + 附件/发送 */
-.composer-bar {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
-  flex-wrap: wrap;
-}
-
-.composer-chips {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.composer-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: 3px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: transparent;
-  color: var(--text-3);
-  font-size: var(--font-xs);
-  font-family: inherit;
-  line-height: 1.6;
-  cursor: pointer;
-  transition: color var(--dur-fast) var(--ease-out),
-    border-color var(--dur-fast) var(--ease-out),
-    background var(--dur-fast) var(--ease-out);
-}
-
-.composer-chip:hover:not(:disabled) {
-  border-color: var(--primary);
-  color: var(--primary);
-}
-
-.composer-chip.on {
-  border-color: transparent;
-  background: var(--bg-active);
-  color: var(--primary);
-  font-weight: 600;
-}
-
-.composer-chip:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.composer-template {
-  width: 140px;
-  flex-shrink: 0;
-}
-
-.composer-right {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.attach-btn {
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  color: var(--text-3);
-  cursor: pointer;
-  transition: color var(--dur-fast) var(--ease-out),
-    background var(--dur-fast) var(--ease-out);
-}
-
-.attach-btn:hover {
-  color: var(--primary);
-  background: var(--bg-hover);
-}
-
-.hidden-file-input {
-  display: none;
-}
-
-.send-btn {
-  width: 34px;
-  height: 34px;
-  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-2) 100%);
-  border: none;
-  box-shadow: 0 4px 10px color-mix(in srgb, var(--primary) 30%, transparent);
-}
-
-.send-btn.is-disabled {
-  background: var(--border-strong);
-  box-shadow: none;
-}
-
-.stop-btn {
-  background: var(--danger);
-  box-shadow: 0 4px 10px rgba(245, 108, 108, 0.3);
-}
-
-.stop-btn:hover {
-  background: color-mix(in srgb, var(--danger) 88%, white);
-}
-
-/* 快捷键提示：kbd 键帽样式，仅输入区聚焦时浮现（触屏常显） */
-.input-foot {
-  margin-top: 6px;
-  text-align: center;
-  color: var(--text-3);
-  font-size: var(--font-xs);
-  opacity: 0;
-  transition: opacity var(--dur-base) var(--ease-out);
-}
-
-.input-area:focus-within .input-foot {
-  opacity: 1;
-}
-
-.input-foot kbd {
-  display: inline-block;
-  min-width: 16px;
-  margin: 0 1px;
-  padding: 0 4px;
-  border: 1px solid var(--border);
-  border-bottom-width: 2px;
-  border-radius: var(--radius-xs);
-  background: var(--bg-card-2);
-  color: var(--text-2);
-  font-family: inherit;
-  font-size: var(--font-2xs);
-  line-height: 1.5;
-}
-
-@media (hover: none) {
-  .input-foot {
-    opacity: 1;
-  }
-}
-
-/* 失败提示 */
-.failed-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-  padding: 8px 12px;
-  border-radius: var(--radius-md);
-  background: var(--danger-bg);
-  border: 1px solid var(--danger-border);
-  color: var(--danger);
-  font-size: var(--font-sm);
-}
-
-.failed-icon {
-  flex-shrink: 0;
-}
-
-/* ============ 模板管理 ============ */
-.tpl-list {
-  max-height: 380px;
-  overflow-y: auto;
-  margin-bottom: 12px;
-}
-
-.tpl-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  margin-bottom: 8px;
-}
-
-.tpl-info {
-  flex: 1;
-  min-width: 0;
-  margin-right: 12px;
-}
-
-.tpl-name-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.tpl-name {
-  font-weight: 600;
-  font-size: var(--font-base);
-}
-
-.tpl-desc {
-  color: var(--text-3);
-  font-size: var(--font-xs);
-  margin-top: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tpl-actions {
-  flex-shrink: 0;
-}
-
-.tpl-create {
-  width: 100%;
-}
-
-/* 长期记忆 */
-.memory-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.memory-hint {
-  color: var(--text-3);
-  font-size: var(--font-sm);
-  line-height: 1.7;
-}
-
-.memory-actions {
-  flex-shrink: 0;
-  display: flex;
-  gap: 8px;
-}
-
-.memory-empty {
-  color: var(--text-3);
-  text-align: center;
-  padding: 32px 0;
-  font-size: var(--font-sm);
-}
-
-.memory-list {
-  max-height: 420px;
-  overflow-y: auto;
-}
-
-.memory-item {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  margin-bottom: 8px;
-}
-
-.memory-item.is-archived {
-  opacity: 0.6;
-}
-
-.memory-item:hover {
-  border-color: color-mix(in srgb, var(--primary) 18%, var(--border));
-}
-
-.memory-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-}
-
-.memory-main .memory-tag {
-  flex-shrink: 0;
-}
-
-.memory-body {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.memory-content {
-  font-size: var(--font-base);
-  color: var(--text-1);
-  line-height: 1.6;
-  /* 长路径/URL 等无空格长串要能折行，否则会溢出顶住右侧的编辑/归档/删除按钮 */
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  /* 默认两行截断、点击展开（条目多时保证列表可扫读） */
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  cursor: pointer;
-}
-
-.memory-content.expanded {
-  -webkit-line-clamp: unset;
-  display: block;
-  overflow: visible;
-}
-
-.memory-meta {
-  display: flex;
-  gap: 10px;
-  font-size: var(--font-xs);
-  color: var(--text-3);
-}
-
-.memory-archived-flag {
-  color: var(--warning-text);
-}
-
-.memory-ops {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  white-space: nowrap;
-}
-
-/* 操作降权：默认灰字（悬浮才出提示色，删除悬浮才红） */
-.memory-ops :deep(.el-button.is-link) {
-  color: var(--text-3);
-}
-
-.memory-ops :deep(.el-button.is-link:hover) {
-  color: var(--primary-text);
-}
-
-.memory-ops :deep(.el-button--danger.is-link) {
-  color: var(--text-3);
-}
-
-.memory-ops :deep(.el-button--danger.is-link:hover) {
-  color: var(--danger-text);
-}
-
-.memory-archived-toggle {
-  margin-right: 4px;
-}
-
-/* ============ 响应式（阶段4） ============ */
-@media (max-width: 1024px) {
-
-  .chat-header {
-    overflow-x: auto;
-  }
-}
-
-@media (max-width: 768px) {
-  .chat-page {
-    height: calc(100vh - 16px);
-  }
-
-  .messages {
-    padding: 12px 10px;
-  }
-
-  .chat-header {
-    padding: 0 10px;
-  }
-
-  .msg {
-    max-width: 100%;
-  }
-
-  .suggestions {
-    grid-template-columns: 1fr;
-  }
-}
-/* ============ 界面风格细节（设置页切换；令牌见 theme.css）============ */
-.welcome-title,
-.chat-title {
-  font-family: var(--font-display);
-}
-
-/* 静奢雅致：AI 头像去渐变（墨版），整体更静 */
-:global(html[data-style='quiet'] .avatar.assistant) {
-  background: var(--text-1);
-  box-shadow: none;
-}
-
-/* 书斋暖读：圆形头像 + 墨色印记 + 琥珀动作 */
-:global(html[data-style='salon'] .avatar) {
-  border-radius: 50%;
-}
-
-:global(html[data-style='salon'] .avatar.assistant) {
-  background: var(--text-1);
-  box-shadow: none;
-}
-
-:global(html[data-style='salon'] .welcome-mark) {
-  border-radius: 50%;
-  background: var(--text-1);
-  color: var(--bg-panel);
-  box-shadow: 0 8px 22px color-mix(in srgb, var(--text-1) 26%, transparent);
-}
-
-:global(html[data-style='salon'] .welcome-mark .welcome-glyph) {
-  font-family: var(--font-display);
-}
-
-:global(html[data-style='salon'] .send-btn) {
-  background: var(--text-1);
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--text-1) 25%, transparent);
-}
-
-:global(html[data-style='salon'] .send-btn:hover:not(.is-disabled)) {
-  background: var(--primary);
-}
-
-</style>
+<style scoped src="../styles/chat-view.css"></style>

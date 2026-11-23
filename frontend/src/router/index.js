@@ -19,6 +19,12 @@ const routes = [
     component: () => import('../views/RunsView.vue'),
     meta: { title: '运行记录' },
   },
+  {
+    path: '/prompts',
+    name: 'prompts',
+    component: () => import('../views/PromptWorkbenchView.vue'),
+    meta: { title: '提示词工作台' },
+  },
 ]
 
 const router = createRouter({

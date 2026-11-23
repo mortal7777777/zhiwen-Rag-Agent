@@ -62,6 +62,108 @@
     </div>
 
     <div class="settings-section">
+      <div class="settings-label">布局</div>
+      <div class="layout-options">
+        <div
+          v-for="opt in layoutOptions"
+          :key="opt.value"
+          :class="['theme-card', 'layout-card', { active: layoutMode === opt.value }]"
+          @click="layoutMode = opt.value"
+        >
+          <div class="lay-wire" :class="'lay-' + opt.value">
+            <span class="lw-side">
+              <i class="lw-dot"></i>
+              <i class="lw-dot"></i>
+              <i class="lw-dot"></i>
+            </span>
+            <span class="lw-main">
+              <i class="lw-bar"></i>
+              <i class="lw-line"></i>
+              <i class="lw-line short"></i>
+            </span>
+          </div>
+          <div class="theme-meta">
+            <span class="theme-name">{{ opt.label }}</span>
+            <el-icon v-if="layoutMode === opt.value" class="theme-check">
+              <CircleCheckFilled />
+            </el-icon>
+          </div>
+        </div>
+      </div>
+      <div class="merged-row">
+        <div class="merged-text">
+          <span class="merged-title">会话列表与导航合并为一条侧栏</span>
+          <span class="merged-desc">
+            开启后导航收成图标条，会话列表紧贴其右侧、同底色无圆角，视觉上是一条栏
+            （Claude / Hermes 桌面端的主流做法）。关闭则是两条独立栏。
+          </span>
+        </div>
+        <el-switch v-model="mergedSidebar" />
+      </div>
+      <div class="merged-row">
+        <div class="merged-text">
+          <span class="merged-title">按工作区分类会话</span>
+          <span class="merged-desc">
+            会话按工作目录分组：置顶会话单独置顶，其余按工作区分组、组内再按时间分桶。
+            工作区同时是文件与命令工具的工作根；关闭则回到纯时间分组。
+          </span>
+        </div>
+        <el-switch v-model="groupSessionsByWorkspace" />
+      </div>
+      <div class="settings-tip">
+        布局改骨架：导航位置、侧栏形态、图标体系。配色与字体各自独立，可自由组合。
+      </div>
+
+      <div class="settings-label" style="margin-top: 22px">主页样式</div>
+      <div class="layout-options home-options">
+        <div
+          v-for="opt in homeOptions"
+          :key="opt.value"
+          :class="['theme-card', 'home-card', { active: homeStyle === opt.value }]"
+          @click="homeStyle = opt.value"
+        >
+          <div class="home-wire" :class="'hw-' + opt.value">
+            <span class="hw-mark"></span>
+            <span class="hw-title"></span>
+            <span class="hw-input"></span>
+            <span class="hw-chip"></span>
+            <span class="hw-chip"></span>
+          </div>
+          <div class="theme-meta">
+            <span class="theme-name">{{ opt.label }}</span>
+            <el-icon v-if="homeStyle === opt.value" class="theme-check">
+              <CircleCheckFilled />
+            </el-icon>
+          </div>
+        </div>
+      </div>
+      <div class="settings-tip">
+        只影响空对话时的欢迎页：图标、问候语、推荐问法与输入区排布。四种都能关掉欢迎语。
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-label">字体</div>
+      <div class="font-options">
+        <div
+          v-for="opt in fontOptions"
+          :key="opt.value"
+          :class="['theme-card', 'font-card', { active: fontMode === opt.value }]"
+          @click="fontMode = opt.value"
+        >
+          <span class="font-sample" :style="opt.stack ? { fontFamily: opt.stack } : null">
+            Aa 知识库
+          </span>
+          <span class="font-name">{{ opt.label }}</span>
+        </div>
+      </div>
+      <div class="settings-tip">
+        「跟随风格」时每种界面风格自带默认字体：书斋/炭火 → 宋体，森野 → 楷体，
+        素墨/赛博 → 等宽，静雅 → 等线，其余 → 系统无衬线。正文会整站跟随。
+      </div>
+    </div>
+
+    <div class="settings-section">
       <div class="settings-label">内容宽度</div>
       <el-segmented
         v-model="contentWidth"
@@ -97,7 +199,17 @@
 import { computed, inject } from 'vue'
 import { CircleCheckFilled } from '@element-plus/icons-vue'
 
-const { theme, contentWidth, styleMode, applyWidth } = inject('settingsAppearance')
+const {
+  theme,
+  contentWidth,
+  styleMode,
+  layoutMode,
+  fontMode,
+  mergedSidebar,
+  applyWidth,
+  homeStyle,
+  groupSessionsByWorkspace,
+} = inject('settingsAppearance')
 
 const themeOptions = [
   { value: 'light', label: '浅色' },
@@ -110,10 +222,44 @@ const widthOptions = [
   { label: '宽', value: '85%' },
   { label: '全宽', value: '100%' },
 ]
+// 布局：图标体系与导航形态都不同，不是同一套骨架换皮
+const homeOptions = [
+  { value: 'classic', label: '经典问候' },
+  { value: 'minimal', label: '极简无欢迎语' },
+  { value: 'hero', label: '巨幅标题 + 推荐卡' },
+  { value: 'studio', label: '工作台入口' },
+]
+
+const layoutOptions = [
+  { value: 'standard', label: '标准侧栏' },
+  { value: 'rail', label: '极简导轨' },
+  { value: 'island', label: '浮岛卡片' },
+  { value: 'topbar', label: '顶部横栏' },
+  { value: 'claude', label: 'Claude 桌面' },
+  { value: 'hermes', label: 'Hermes 桌面' },
+]
+// 字体：栈全部走 theme.css 里的令牌，避免预览与实际不一致
+const fontOptions = [
+  { value: 'auto', label: '跟随风格', stack: null },
+  { value: 'ui', label: '雅黑 / Segoe', stack: 'var(--font-ui)' },
+  { value: 'sans', label: '苹方 / 雅黑', stack: 'var(--font-sans)' },
+  { value: 'dengxian', label: '等线', stack: 'var(--font-dengxian)' },
+  { value: 'serif', label: '宋体', stack: 'var(--font-serif)' },
+  { value: 'kai', label: '楷体', stack: 'var(--font-kai)' },
+  { value: 'fangsong', label: '仿宋', stack: 'var(--font-fangsong)' },
+  { value: 'mono', label: '等宽', stack: 'var(--font-mono)' },
+]
 const styleOptions = [
   { value: 'default', label: '默认（品牌蓝）' },
   { value: 'quiet', label: '静奢雅致' },
   { value: 'salon', label: '书斋暖读' },
+  { value: 'teal', label: '墨玉（Hermes Teal）' },
+  { value: 'midnight', label: '子夜（Midnight）' },
+  { value: 'mono', label: '素墨（Mono）' },
+  { value: 'ember', label: '炭火（Ember）' },
+  { value: 'cyber', label: '赛博（Cyberpunk）' },
+  { value: 'catppuccin', label: '卡布（Catppuccin）' },
+  { value: 'everforest', label: '森野（Everforest）' },
 ]
 
 const widthLabel = computed(

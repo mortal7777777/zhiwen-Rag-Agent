@@ -1,0 +1,1049 @@
+/* ============================================================================
+   界面布局（data-layout）—— 只改"骨架"，配色仍由风格（data-style）决定。
+
+   六种布局，差异是结构性的，不是换色：
+   - standard 标准：左侧悬浮侧栏 + 文字导航（默认，无覆写）
+   - rail     导轨：侧栏收成 76px 常驻图标条，选中项是渐变实心块
+   - island   浮岛：侧栏更像独立卡片（更大圆角/更强投影），菜单变胶囊
+   - topbar   顶栏：导航升到页面顶部横向排布，选中态变底部指示条
+   - claude   Claude 桌面：侧栏贴边同底、扁平导航、主区整幅平铺
+   - hermes   Hermes 桌面：侧栏贴边满高 + 发丝边线 + 品牌块下边线
+
+   注意：el-aside 的宽度来自模板内联样式，覆写必须 !important；菜单文字用
+   CSS 隐藏而不是 v-if（避免切换布局时整棵菜单重渲染）。
+   ========================================================================= */
+
+/* ==================== 导轨（rail） ==================== */
+html[data-layout="rail"] .app-aside {
+  width: 76px !important;
+  margin: 16px 0 16px 12px;
+}
+
+html[data-layout="rail"] .logo {
+  height: 56px;
+  justify-content: center;
+  padding: 0;
+}
+
+html[data-layout="rail"] .logo-text {
+  display: none;
+}
+
+html[data-layout="rail"] .logo-mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+}
+
+html[data-layout="rail"] .app-menu {
+  width: 76px;
+  padding: 2px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+html[data-layout="rail"] .app-menu .el-menu-item {
+  width: 52px;
+  height: 48px;
+  justify-content: center;
+  margin-bottom: 6px;
+  padding: 0 !important;
+  border-radius: 14px;
+}
+
+html[data-layout="rail"] .app-menu .el-menu-item:hover {
+  transform: none;
+}
+
+html[data-layout="rail"] .app-menu .menu-title,
+html[data-layout="rail"] .app-menu .el-menu-item .el-icon {
+  margin: 0 !important;
+}
+
+html[data-layout="rail"] .app-menu .menu-title {
+  display: none;
+}
+
+/* 选中：渐变实心块（白字压实心按钮的对比度已在风格层保证 ≥4.5） */
+html[data-layout="rail"] .app-menu .el-menu-item.is-active {
+  background: var(--primary-grad);
+  color: #fff;
+  box-shadow: var(--shadow-pop);
+}
+
+html[data-layout="rail"] .app-menu .el-menu-item.is-active::before {
+  display: none;
+}
+
+html[data-layout="rail"] .aside-footer {
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 12px 0;
+}
+
+html[data-layout="rail"] .app-main {
+  padding-left: 12px;
+}
+
+/* ==================== 浮岛（island） ==================== */
+html[data-layout="island"] .app-aside {
+  margin: 20px 0 20px 20px;
+  border: none;
+  border-radius: 22px;
+  box-shadow: var(--shadow-pop);
+}
+
+html[data-layout="island"] .logo {
+  height: 68px;
+  padding: 0 20px;
+  gap: 12px;
+}
+
+html[data-layout="island"] .logo-mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+}
+
+html[data-layout="island"] .logo-text {
+  font-size: var(--font-lg);
+  letter-spacing: 1px;
+}
+
+html[data-layout="island"] .app-menu {
+  padding: 6px 12px;
+}
+
+html[data-layout="island"] .app-menu .el-menu-item {
+  height: 46px;
+  margin-bottom: 6px;
+  padding-left: 14px !important;
+  border-radius: var(--radius-pill);
+}
+
+html[data-layout="island"] .app-menu .el-menu-item:hover {
+  transform: none;
+}
+
+html[data-layout="island"] .app-menu .el-menu-item.is-active {
+  background: var(--primary-grad);
+  color: #fff;
+  box-shadow: var(--shadow-pop);
+}
+
+html[data-layout="island"] .app-menu .el-menu-item.is-active::before {
+  display: none;
+}
+
+html[data-layout="island"] .aside-footer {
+  border-top: none;
+  padding-bottom: 16px;
+}
+
+html[data-layout="island"] .app-main {
+  padding: 20px;
+}
+
+/* ==================== 顶栏（topbar） ==================== */
+html[data-layout="topbar"] .app-container {
+  flex-direction: column;
+}
+
+html[data-layout="topbar"] .app-aside {
+  width: auto !important;
+  height: 60px;
+  margin: 12px 16px 0;
+  padding: 0 8px;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+html[data-layout="topbar"] .logo {
+  height: 100%;
+  padding: 0 10px 0 4px;
+}
+
+html[data-layout="topbar"] .logo-text {
+  display: none;
+}
+
+html[data-layout="topbar"] .app-menu {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  width: auto;
+  padding: 0 6px;
+  overflow: visible;
+}
+
+html[data-layout="topbar"] .app-menu .el-menu-item {
+  width: auto;
+  height: 38px;
+  margin: 0 2px;
+  padding: 0 14px;
+  border-radius: var(--radius-pill);
+}
+
+html[data-layout="topbar"] .app-menu .el-menu-item:hover {
+  transform: none;
+}
+
+html[data-layout="topbar"] .app-menu .el-menu-item.is-active {
+  background: transparent;
+  color: var(--primary-text);
+}
+
+/* 选中态改成底部指示条 */
+html[data-layout="topbar"] .app-menu .el-menu-item.is-active::before {
+  left: 14px;
+  right: 14px;
+  top: auto;
+  bottom: 0;
+  width: auto;
+  height: 2px;
+  transform: none;
+}
+
+html[data-layout="topbar"] .aside-footer {
+  border-top: none;
+  padding: 0;
+  gap: 2px;
+}
+
+/* 顶栏下"收起导航"没有意义（宽度恒定 100%） */
+html[data-layout="topbar"] .nav-toggle {
+  display: none;
+}
+
+html[data-layout="topbar"] .app-main {
+  padding-top: 12px;
+}
+
+@media (max-width: 960px) {
+  html[data-layout="topbar"] .app-menu .menu-title {
+    display: none;
+  }
+
+  html[data-layout="topbar"] .app-menu .el-menu-item {
+    padding: 0 12px;
+  }
+}
+
+/* ==================== 聊天页高度补偿 ====================
+   .chat-page 默认按 calc(100vh - 32px) 算（标准布局：上下各 16px）。
+   浮岛把主区内边距加到 20px，顶栏把主区整体下推 72px，都要跟着收，
+   否则会话面板底部会溢出视口。 */
+html[data-layout="island"] .chat-page {
+  height: calc(100vh - 40px);
+}
+
+html[data-layout="topbar"] .chat-page {
+  height: calc(100vh - 100px);
+}
+
+@media (max-width: 768px) {
+  html[data-layout="island"] .chat-page {
+    height: calc(100vh - 24px);
+  }
+
+  html[data-layout="topbar"] .chat-page {
+    height: calc(100vh - 88px);
+  }
+}
+/* ==================== Claude 风（claude） ====================
+   参考 Claude 桌面端：侧栏与页面同底、贴边无卡片、收起圆角与投影；
+   导航是扁平行（选中＝浅底，无渐变条），主区整幅平铺、内容居中。
+   ========================================================================= */
+html[data-layout="claude"] .app-aside {
+  width: 248px !important;
+  margin: 0;
+  border: none;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--bg-panel);
+}
+
+html[data-layout="claude"] .logo {
+  height: 54px;
+  padding: 0 14px;
+  gap: 9px;
+}
+
+html[data-layout="claude"] .logo-mark {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--primary);
+  box-shadow: none;
+}
+
+html[data-layout="claude"] .logo-text {
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+html[data-layout="claude"] .app-menu {
+  width: 100%;
+  padding: 4px 8px;
+}
+
+/* 扁平行：无论折叠状态都保持整行（该布局宽度固定，不需要图标条形态） */
+html[data-layout="claude"] .app-menu .el-menu-item,
+html[data-layout="claude"] .app-aside.is-collapsed .app-menu .el-menu-item {
+  width: auto;
+  height: 36px;
+  justify-content: flex-start;
+  padding: 0 10px !important;
+  margin-bottom: 2px;
+  border-radius: 9px;
+  color: var(--text-2);
+}
+
+html[data-layout="claude"] .app-menu .el-menu-item .el-icon,
+html[data-layout="claude"] .app-aside.is-collapsed .app-menu .el-menu-item .el-icon {
+  margin-right: 10px !important;
+}
+
+html[data-layout="claude"] .app-menu .menu-title,
+html[data-layout="claude"] .app-aside.is-collapsed .menu-title {
+  display: inline;
+}
+
+html[data-layout="claude"] .app-menu .el-menu-item:hover {
+  transform: none;
+  background: var(--bg-hover);
+}
+
+html[data-layout="claude"] .app-menu .el-menu-item.is-active {
+  background: var(--bg-active);
+  color: var(--text-1);
+  font-weight: 600;
+  box-shadow: none;
+}
+
+html[data-layout="claude"] .app-menu .el-menu-item.is-active::before {
+  display: none;
+}
+
+html[data-layout="claude"] .aside-footer {
+  justify-content: flex-start;
+  gap: 4px;
+  padding: 8px;
+}
+
+/* 主区整幅平铺：去掉 16px 外框，页面自己决定留白 */
+html[data-layout="claude"] .app-main {
+  padding: 0;
+}
+
+html[data-layout="claude"] .chat-page {
+  height: 100vh;
+  gap: 0;
+}
+
+html[data-layout="claude"] .chat-main {
+  border: none;
+  border-radius: 0;
+  background: var(--bg-app);
+}
+
+html[data-layout="claude"] .session-panel {
+  border: none;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+html[data-layout="claude"] .knowledge-page,
+html[data-layout="claude"] .runs-page,
+html[data-layout="claude"] .pw-page {
+  padding: 26px 30px 34px;
+}
+
+/* 卡片：只留发丝边，取消投影（Claude 的"纸面"观感） */
+html[data-layout="claude"] .el-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: none !important;
+  background: var(--bg-card);
+}
+
+html[data-layout="claude"] .el-card__header {
+  padding: 13px 18px;
+}
+
+html[data-layout="claude"] .el-card__body {
+  padding: 16px 18px;
+}
+
+/* 用户气泡同样去边框，只用浅底 */
+html[data-layout="claude"] .msg.user .msg-body {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+/* ---- Claude 风设置页：左竖排导航 + 右内容，整幅更高 ---- */
+html[data-layout="claude"] .settings-dialog,
+html[data-layout="hermes"] .settings-dialog {
+  position: relative;
+  width: min(1040px, 96vw) !important;
+}
+
+html[data-layout="claude"] .settings-card,
+html[data-layout="hermes"] .settings-card {
+  flex-direction: row;
+  height: min(780px, 88vh);
+}
+
+html[data-layout="claude"] .settings-topbar,
+html[data-layout="hermes"] .settings-topbar {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  width: 212px;
+  padding: 14px 10px;
+  border-bottom: none;
+  border-right: 1px solid var(--border);
+  background: var(--bg-card-2);
+}
+
+html[data-layout="claude"] .settings-brand {
+  padding: 0 6px 8px;
+}
+
+html[data-layout="claude"] .settings-tabs,
+html[data-layout="hermes"] .settings-tabs {
+  flex: none;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 2px;
+}
+
+html[data-layout="claude"] .settings-tab,
+html[data-layout="hermes"] .settings-tab {
+  width: 100%;
+}
+
+html[data-layout="claude"] .settings-tab-inner,
+html[data-layout="hermes"] .settings-tab-inner {
+  width: 100%;
+  justify-content: flex-start;
+  padding: 8px 10px;
+}
+
+html[data-layout="claude"] .settings-tab.active .settings-tab-inner {
+  background: var(--bg-active);
+  color: var(--text-1);
+  font-weight: 600;
+  box-shadow: none;
+}
+
+html[data-layout="claude"] .settings-close,
+html[data-layout="hermes"] .settings-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+}
+
+html[data-layout="claude"] .settings-content,
+html[data-layout="hermes"] .settings-content {
+  padding: 26px 30px 34px;
+}
+
+/* ==================== Hermes 风（hermes） ====================
+   参考 Hermes 桌面端：侧栏贴边满高、1px 右边线、品牌块带下边线、
+   导航密排 + 左侧 2px 主色条，主区扁平、页头带发丝分隔。
+   ========================================================================= */
+html[data-layout="hermes"] .app-aside {
+  width: 264px !important;
+  margin: 0;
+  border: none;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--bg-sidebar);
+}
+
+html[data-layout="hermes"] .logo {
+  height: 56px;
+  padding: 0 14px;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-layout="hermes"] .logo-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+html[data-layout="hermes"] .logo-text {
+  font-size: var(--font-base);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+html[data-layout="hermes"] .app-menu {
+  width: 100%;
+  padding: 8px;
+  border-top: none;
+}
+
+html[data-layout="hermes"] .app-menu .el-menu-item,
+html[data-layout="hermes"] .app-aside.is-collapsed .app-menu .el-menu-item {
+  width: auto;
+  height: 36px;
+  justify-content: flex-start;
+  padding: 0 10px !important;
+  margin-bottom: 2px;
+  border-radius: 6px;
+}
+
+html[data-layout="hermes"] .app-menu .el-menu-item .el-icon,
+html[data-layout="hermes"] .app-aside.is-collapsed .app-menu .el-menu-item .el-icon {
+  margin-right: 10px !important;
+}
+
+html[data-layout="hermes"] .app-menu .menu-title,
+html[data-layout="hermes"] .app-aside.is-collapsed .menu-title {
+  display: inline;
+}
+
+html[data-layout="hermes"] .app-menu .el-menu-item:hover {
+  transform: none;
+}
+
+/* 选中：浅底 + 2px 主色条（Hermes 的边线式指示，不用渐变块） */
+html[data-layout="hermes"] .app-menu .el-menu-item.is-active {
+  background: var(--bg-active);
+  color: var(--primary-text);
+  font-weight: 600;
+}
+
+html[data-layout="hermes"] .app-menu .el-menu-item.is-active::before {
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  height: auto;
+  width: 2px;
+  transform: none;
+  background: var(--primary);
+}
+
+html[data-layout="hermes"] .aside-footer {
+  justify-content: flex-start;
+  gap: 4px;
+  padding: 8px;
+}
+
+html[data-layout="hermes"] .app-main {
+  padding: 0 16px 16px;
+}
+
+html[data-layout="hermes"] .chat-page {
+  height: calc(100vh - 16px);
+}
+
+html[data-layout="hermes"] .chat-main {
+  border-radius: 10px;
+}
+
+/* 页头统一成"标题 + 发丝分隔线"的条带 */
+html[data-layout="hermes"] .header-row,
+html[data-layout="hermes"] .pw-header {
+  padding-bottom: 12px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-layout="hermes"] .el-card {
+  border-radius: 10px;
+  box-shadow: none !important;
+}
+
+html[data-layout="hermes"] .el-card__header {
+  padding: 12px 16px;
+}
+
+html[data-layout="hermes"] .el-card__body {
+  padding: 14px 16px;
+}
+
+/* ---- Hermes 风设置页：左竖排导航，选中项带 2px 主色条 ---- */
+html[data-layout="hermes"] .settings-tab.active .settings-tab-inner {
+  background: var(--bg-active);
+  color: var(--text-1);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+
+@media (max-width: 1100px) {
+  html[data-layout="claude"] .app-aside {
+    width: 208px !important;
+  }
+
+  html[data-layout="hermes"] .app-aside {
+    width: 216px !important;
+  }
+
+  html[data-layout="claude"] .settings-topbar,
+  html[data-layout="hermes"] .settings-topbar {
+    width: 178px;
+  }
+}
+
+/* ==================== 合并单栏（data-sidebar="merged"） ====================
+   导航收成图标条，会话列表紧贴其右侧、同底色、无圆角、共用一条外框，
+   视觉上是一条宽侧栏。放在文件末尾：与 claude/hermes 的宽度规则同特异性，
+   靠顺序覆盖（合并优先）。
+   ========================================================================= */
+html[data-sidebar="merged"] .app-aside {
+  width: 64px !important;
+  border-right: none;
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+}
+
+/* 合并 = 导航与会话列表同列（不是图标条）：
+   旧设计把合并当成 64px 图标条，导致"图标旁的字没了"，
+   现在导航保持图标 + 文字，宽度由 --nav-width 决定。 */
+html[data-sidebar="merged"] .logo {
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 12px;
+}
+
+html[data-sidebar="merged"] .logo-text {
+  display: inline;
+}
+
+html[data-sidebar="merged"] .app-menu {
+  width: 100%;
+  padding: 4px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+html[data-sidebar="merged"] .app-menu .el-menu-item {
+  width: 100%;
+  height: 38px;
+  justify-content: flex-start;
+  gap: 10px;
+  margin-bottom: 2px;
+  padding: 0 10px !important;
+}
+
+html[data-sidebar="merged"] .app-menu .menu-title,
+html[data-sidebar="merged"] .app-aside.is-collapsed .menu-title {
+  display: inline;
+}
+
+html[data-sidebar="merged"] .app-menu .el-menu-item .el-icon {
+  margin: 0 !important;
+}
+
+html[data-sidebar="merged"] .app-menu .el-menu-item:hover {
+  transform: none;
+}
+
+html[data-sidebar="merged"] .aside-footer {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+}
+
+html[data-sidebar="merged"] .chat-page {
+  gap: 0;
+}
+
+html[data-sidebar="merged"] .session-panel {
+  border: none;
+  border-left: 1px solid var(--border);
+  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+  box-shadow: none;
+}
+
+/* 顶栏布局本来就没有左栏，合并模式退回两条栏的常规间距 */
+html[data-layout="topbar"][data-sidebar="merged"] .chat-page {
+  gap: 16px;
+}
+
+html[data-layout="topbar"][data-sidebar="merged"] .session-panel {
+  border-left: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+/* ==================== Claude / Hermes 的会话面板 ====================
+   两端都是"搜索在最上、分组标签克制、行更密"的侧栏列表。
+   .session-* 在 SessionList 的 scoped 样式里（0,2,0），这里 (0,2,1) 能压过。 */
+html[data-layout="claude"] .session-head,
+html[data-layout="hermes"] .session-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+html[data-layout="claude"] .session-search,
+html[data-layout="hermes"] .session-search {
+  order: -1;
+}
+
+html[data-layout="claude"] .session-group-label,
+html[data-layout="hermes"] .session-group-label {
+  padding: 6px 8px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+}
+
+html[data-layout="claude"] .session-item,
+html[data-layout="hermes"] .session-item {
+  border-radius: 8px;
+}
+
+/* Claude：整块更"纸面"，列表与主区同底色 */
+html[data-layout="claude"] .session-panel {
+  background: var(--bg-panel);
+}
+
+/* ==================== 拖动调宽（ResizeHandle 写入 CSS 变量） ==================== */
+.resize-handle {
+  flex: 0 0 8px;
+  width: 8px;
+  align-self: stretch;
+  cursor: col-resize;
+  position: relative;
+  z-index: 5;
+}
+
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  inset: 0 3px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.resize-handle:hover::after,
+.resize-handle.dragging::after {
+  background: var(--primary-soft);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+body.is-resizing,
+body.is-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+/* 拖动期间关掉宽度过渡，避免面板宽度"追着鼠标跑" */
+body.is-resizing .session-panel,
+body.is-resizing .chat-inspector {
+  transition: none;
+}
+
+/* 各布局的默认宽度 + 可被拖动覆盖（--nav-width / --session-width） */
+/* 注意 :not(.is-collapsed)：折叠态由 el-aside 的行内 width 决定，
+   这里若继续 !important 会把 64px 的图标条撑回 212px（只剩字被隐藏，
+   看着"没折起来"）。合并栏同理，见文件末尾的优先级块。 */
+html[data-layout="standard"] .app-aside:not(.is-collapsed),
+html[data-layout="island"] .app-aside:not(.is-collapsed) {
+  width: var(--nav-width, 212px) !important;
+}
+
+html[data-layout="rail"] .app-aside:not(.is-collapsed) {
+  width: var(--nav-width, 76px) !important;
+}
+
+html[data-layout="claude"] .app-aside:not(.is-collapsed) {
+  width: var(--nav-width, 300px) !important;
+}
+
+html[data-layout="hermes"] .app-aside:not(.is-collapsed) {
+  width: var(--nav-width, 310px) !important;
+}
+
+html[data-layout="topbar"] .app-aside {
+  width: auto !important;
+}
+
+/* 会话列表宽度（Claude/Hermes 单列时被插槽覆盖为 100%）。
+   :not(.collapsed) 必须有：面板自身的折叠态是 56px 图标条，
+   被这条规则压住后会变成"图标还是收起的排版、但宽度 248px"的错位。 */
+html .chat-page .session-panel:not(.collapsed) {
+  width: var(--session-width, 248px);
+}
+
+/* ==================== 单列：导航 + 会话列表同一列（claude / hermes） ==================== */
+html[data-layout="claude"] .app-menu,
+html[data-layout="hermes"] .app-menu {
+  flex: 0 0 auto;
+}
+
+html[data-layout="claude"] .nav-session-slot,
+html[data-layout="hermes"] .nav-session-slot {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+}
+
+html[data-layout="claude"] .nav-session-slot .session-panel,
+html[data-layout="hermes"] .nav-session-slot .session-panel {
+  width: 100% !important;
+  flex: 1;
+  min-height: 0;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: transparent;
+}
+
+html[data-layout="claude"] .nav-session-slot .session-head,
+html[data-layout="hermes"] .nav-session-slot .session-head {
+  padding: 10px 12px 6px;
+}
+
+/* ==================== 整列收起 + 左边缘悬浮展开 ==================== */
+html[data-sidebar-collapsed="1"] .app-aside {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  /* 高于感应条（1201）：滑出后侧栏自身接管点击，否则左侧 14px 会被感应条吃掉，
+     贴近左边缘的图标（设置 / 收起）点了没反应 */
+  z-index: 1202;
+  margin: 0;
+  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+  box-shadow: var(--shadow-modal);
+  transform: translateX(calc(-1 * var(--nav-width, 300px)));
+  transition: transform var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out);
+}
+
+/* 悬浮展开只由 JS 置位（data-sidebar-peek）触发。
+   不用 :hover —— 收起按钮在侧栏内部，按下时仍是 hover，会立刻弹回。 */
+html[data-sidebar-collapsed="1"][data-sidebar-peek="1"] .app-aside {
+  transform: translateX(0);
+}
+
+/* 注意：不要用 :focus-within 展开。收起按钮按下去后仍持有焦点，
+   导致侧栏停在 transform:0（看起来完全没收起）—— 这正是"点了还是显示"的根因。 */
+
+/* 收起后仍留一条 14px 感应带：鼠标移上来就滑出整列 */
+html[data-sidebar-collapsed="1"] .aside-peek {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 14px;
+  z-index: 1201;
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--primary) 10%, transparent),
+    transparent
+  );
+}
+
+html[data-sidebar-collapsed="1"] .resize-handle {
+  display: none;
+}
+
+html[data-sidebar-collapsed="0"] .aside-peek {
+  display: none;
+}
+
+/* 收起时主区占满整宽 */
+html[data-sidebar-collapsed="1"] .app-main {
+  padding-left: 16px;
+}
+
+/* ==================== 宽度优先级（放最后，压过可变宽度） ==================== */
+/* 折叠成图标条 / 合并单栏时，宽度必须锁死 */
+html .app-aside.is-collapsed,
+html[data-sidebar="merged"] .app-aside:not(.is-collapsed) {
+  width: var(--nav-width, 268px) !important;
+}
+
+/* 图标条内：菜单项与底部按钮居中（伸缩宽度后 padding 不再对称） */
+html .app-aside.is-collapsed .el-menu-item,
+html[data-layout="rail"] .app-aside:not(.is-collapsed) .el-menu-item {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  justify-content: center;
+}
+
+html .app-aside.is-collapsed .el-menu-item .el-icon,
+html[data-sidebar="merged"] .app-aside .el-menu-item .el-icon {
+  margin-right: 0 !important;
+}
+
+html .app-aside.is-collapsed .aside-logo,
+html[data-sidebar="merged"] .app-aside .aside-logo,
+html .app-aside.is-collapsed .aside-footer,
+html[data-sidebar="merged"] .app-aside .aside-footer {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* 底部按钮区：压在拖动分隔条之上，且窄条内改为竖排（两个按钮挤在 64px 会溢出被裁） */
+.aside-footer {
+  position: relative;
+  z-index: 6;
+  background: var(--bg-card);
+}
+
+/* 页脚按钮一律横排：设置 + 固定/收起侧栏 并排 */
+html .app-aside.is-collapsed .aside-footer,
+html[data-sidebar="merged"] .app-aside .aside-footer,
+.aside-footer {
+  flex-direction: row;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 8px 10px;
+}
+
+/* 图标按钮统一为正方形居中，避免字被隐藏后按钮变窄导致图标偏左 */
+.collapse-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+/* 单列：会话面板自带的折叠按钮隐藏（整列已有收起按钮，两个折叠控件会打架） */
+html[data-layout="claude"] .nav-session-slot .session-foot,
+html[data-layout="hermes"] .nav-session-slot .session-foot {
+  display: none;
+}
+
+html[data-layout="claude"] .nav-session-slot .session-panel,
+html[data-layout="hermes"] .nav-session-slot .session-panel {
+  padding-bottom: 4px;
+}
+
+/* 顶栏布局是横向条：没有"折成图标条"这回事。
+   navCollapsed 在窄窗口下初始为 true，若不排除会把它压成 64px 的竖条，
+   横向菜单溢出、设置按钮被挤出可点区域。 */
+html[data-layout="topbar"] .app-aside.is-collapsed {
+  width: auto !important;
+}
+
+html[data-layout="topbar"] .app-aside.is-collapsed .el-menu-item {
+  padding-left: 12px !important;
+  justify-content: flex-start;
+}
+
+/* 感应条：收起后可悬停的视觉提示 */
+html[data-sidebar-collapsed="1"] .aside-peek:hover {
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--primary) 26%, transparent),
+    transparent
+  );
+}
+
+/* ==================== 合并单栏（任意布局）：导航 + 会话列表同列 ==================== */
+html[data-sidebar="merged"] .app-menu {
+  flex: 0 0 auto;
+}
+
+html[data-sidebar="merged"] .nav-session-slot {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+}
+
+html[data-sidebar="merged"] .nav-session-slot .session-panel {
+  width: 100% !important;
+  flex: 1;
+  min-height: 0;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: transparent;
+}
+
+html[data-sidebar="merged"] .nav-session-slot .session-foot {
+  display: none;
+}
+
+html[data-sidebar="merged"] .nav-session-slot .session-head {
+  padding: 10px 12px 6px;
+}
+
+/* 合并态导航项保持"图标 + 文字"的左对齐行 */
+html[data-sidebar="merged"] .app-aside:not(.is-collapsed) .el-menu-item {
+  justify-content: flex-start;
+  padding-left: 12px !important;
+}
+
+/* 单列 / 合并：会话面板是"列的一部分"，绝不能继承窄屏下的 fixed 抽屉形态
+   （SessionList 里 max-width 媒体查询把面板改成 position:fixed 浮层，
+   它会盖住导航和设置按钮 —— "图标点不到"就是这么来的）。 */
+html[data-sidebar="merged"] .nav-session-slot .session-panel,
+html[data-layout="claude"] .nav-session-slot .session-panel,
+html[data-layout="hermes"] .nav-session-slot .session-panel {
+  position: static !important;
+  inset: auto !important;
+  width: 100% !important;
+  max-height: none !important;
+  z-index: auto !important;
+}
+
+/* 会话面板折叠态：SessionList 的 scoped 样式只改了 width，
+   而面板本体是 flex 项（basis/min-width 仍按 248）→ 视觉上还是宽栏。
+   这里把三个维度一起锁成 56px。 */
+html .chat-page .session-panel.collapsed,
+html[data-sidebar="merged"] .nav-session-slot .session-panel.collapsed {
+  width: 56px !important;
+  min-width: 56px !important;
+  max-width: 56px !important;
+  flex: 0 0 56px !important;
+}
+
+/* 悬浮（收起）态：侧栏脱离文档流，主区不应再给左侧留白 */
+html[data-sidebar-collapsed="1"] .app-main {
+  padding-left: 16px;
+}
+
+html[data-sidebar-collapsed="0"] .app-main {
+  padding-left: 0;
+}
+
+/* 页脚里的 固定/收起 侧栏 按钮（非对话页） */
+.aside-footer .sidebar-pin.floating {
+  color: var(--primary-text);
+  background: var(--primary-soft);
+}
+
+/* 页脚图标按钮：统一 32px 正方形，两个并排间距一致 */
+.aside-footer .collapse-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+}
+
+/* 未合并时插槽常驻但不可见（Teleport 需要目标存在） */
+.nav-session-slot.is-off {
+  display: none;
+}

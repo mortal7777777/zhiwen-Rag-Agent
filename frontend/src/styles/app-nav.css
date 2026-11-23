@@ -1,0 +1,206 @@
+/* ==================== 全局导航 ==================== */
+.app-container {
+  height: 100%;
+}
+
+/* 侧栏为悬浮圆角卡片（2026-10-10 美化二期步骤1）：
+   与 session panel / chat main 统一"三段式卡片"节奏。
+   上下左边距 16px，右侧间距由 .app-main 的左内边距提供。
+
+   折叠不做 width 过渡：正文（聊天/表格/图表）会随侧栏宽度逐帧重排，
+   250ms 动画期间实测掉 3~6 帧；改为即时切换，只付一次重排。 */
+.app-aside {
+  display: flex;
+  flex-direction: column;
+  margin: 16px 0 16px 16px;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 60px;
+  padding: 0 16px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.logo-mark {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  color: var(--text-on-brand);
+  background: var(--primary-grad);
+  box-shadow: var(--shadow-pop);
+}
+
+.logo-text {
+  font-size: var(--font-lg);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--text-1);
+  white-space: nowrap;
+}
+
+.app-menu {
+  /* 固定内宽 + 侧栏裁切：收起态菜单项不重排、不重建（Element Plus 的
+     collapse 会给每项包 tooltip，切换时整棵菜单重渲染）。
+    纵向 flex:1 把页脚推到底部；宽度不参与 flex 收缩。 */
+  flex: 1;
+  width: 210px;
+  border-right: none;
+  padding: 4px 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.app-menu .el-menu-item {
+  position: relative;
+  height: 44px;
+  margin-bottom: 4px;
+  border-radius: var(--radius-md);
+  color: var(--text-2);
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+
+.app-menu .el-menu-item:hover {
+  background: var(--bg-hover);
+  color: var(--primary-text);
+  transform: translateX(2px);
+}
+
+.app-menu .el-menu-item.is-active {
+  background: var(--bg-active);
+  color: var(--primary-text);   /* 文字域：3.72 → 5.58（--primary 只留给指示条/图标） */
+  font-weight: 600;
+}
+
+/* 选中态：左侧品牌渐变指示条 */
+.app-menu .el-menu-item.is-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 18px;
+  border-radius: var(--radius-pill);
+  background: var(--primary-grad);
+}
+
+/* 收起态：侧栏 64px 裁掉菜单标题，只留居中的图标与 44px 选中块。
+   这里只改尺寸/内边距（4 个菜单项），不重建 DOM。 */
+.app-aside.is-collapsed .app-menu .el-menu-item {
+  width: 44px;
+  justify-content: center;
+  padding: 0 !important;
+}
+
+/* 标题用 CSS 隐藏而不是 v-if：避免切换时菜单项重新渲染 */
+.app-aside.is-collapsed .menu-title {
+  display: none;
+}
+
+.app-aside.is-collapsed .app-menu .el-menu-item .el-icon {
+  margin: 0 !important;
+}
+
+/* 收起态：图标居中，不做位移微动效（避免居中被推移） */
+.app-aside.is-collapsed .app-menu .el-menu-item:hover {
+  transform: none;
+}
+
+.aside-footer {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.collapse-btn {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  border-radius: var(--radius-md);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.collapse-btn:hover {
+  background: var(--bg-hover);
+  color: var(--primary);
+}
+
+.app-main {
+  padding: 16px;
+  background: var(--bg-app);
+  overflow: hidden;
+}
+
+/* 窄屏收紧外边距（与 ChatView ≤768px 的 calc(100vh - 16px) 高度规则配套） */
+@media (max-width: 768px) {
+  .app-aside {
+    margin: 8px 0 8px 8px;
+  }
+
+  /* 收起态再窄一档：给聊天/知识库主区多让 16px（宽度由 el-aside 内联样式
+     设 64px，需 !important 覆盖；图标 18~20px 在 48px 内仍可点） */
+  .app-aside.is-collapsed {
+    width: 48px !important;
+  }
+
+  .app-main {
+    padding: 8px;
+  }
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* 路由切换过渡：短时长 + 仅合成层属性（GPU），避免切换卡顿 */
+.page-enter-active {
+  transition: opacity 0.16s ease, transform 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.page-leave-active {
+  transition: opacity 0.1s ease;
+}
+
+.page-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.page-leave-to {
+  opacity: 0;
+}

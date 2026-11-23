@@ -66,6 +66,8 @@ const props = defineProps({
 const emit = defineEmits(['confirm', 'cancel', 'keydown'])
 
 function onText(value) {
+  // 故意原地写回：与拆分前 v-model="msg.planApproval.text" 使用同一份对象
+  // eslint-disable-next-line vue/no-mutating-props
   props.approval.text = value
 }
 </script>

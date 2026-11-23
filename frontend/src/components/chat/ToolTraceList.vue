@@ -12,21 +12,33 @@
         <div v-if="!t.done" class="think-body live">{{ t.text }}</div>
         <div v-else-if="t._open" class="think-body">{{ t.text }}</div>
       </div>
+      <div v-else-if="t.kind === 'process'" class="think-block">
+        <div class="think-head" @click="t._open = !t._open">
+          <el-icon :size="13"><ChatDotRound /></el-icon>
+          <span>过程说明</span>
+          <el-icon :size="12" class="arrow" :class="{ open: t._open }">
+            <ArrowDown />
+          </el-icon>
+        </div>
+        <div v-if="t._open" class="think-body process-body">{{ t.text }}</div>
+      </div>
       <div v-else class="tool-item">
         <div
-          :class="['tool-chip', { expandable: !!t.detail }]"
-          @click="t.detail && (t._open = !t._open)"
+          class="tool-chip clickable"
+          role="button"
+          tabindex="0"
+          :title="`查看 ${toolName(t.name)} 完整内容`"
+          @click="emit('open-detail', t)"
+          @keydown.enter.prevent="emit('open-detail', t)"
+          @keydown.space.prevent="emit('open-detail', t)"
         >
           <el-icon :size="13"><component :is="toolIcon(t.name)" /></el-icon>
           <span class="tool-name">{{ toolName(t.name) }}</span>
           <span class="tool-summary">
-            {{ t.summary || (t.arguments && t.arguments.query) || '执行中…' }}
+            {{ t.summary || (t.arguments && (t.arguments.query || t.arguments.command)) || '执行中…' }}
           </span>
-          <el-icon v-if="t.detail" :size="12" class="tool-expand-icon">
-            <ArrowDown :class="{ open: t._open }" />
-          </el-icon>
+          <el-icon :size="12" class="tool-open-icon"><ArrowRight /></el-icon>
         </div>
-        <pre v-if="t._open && t.detail" class="tool-detail">{{ t.detail }}</pre>
       </div>
     </template>
   </div>
@@ -37,17 +49,20 @@
  * 工具调用轨迹 + 思考链时间线（从 ChatView 抽出，2026-10-09 物理拆分）。
  *
  * 纯展示：`items` 即 msg.tool_trace，逐项按 `kind === 'thinking'` 分支渲染
- * 思考块 / 工具 chip。展开态 `_open` **原地写回**条目对象（拆分前行为；
+ * 思考块 / 工具 chip。思考块的展开态 `_open` **原地写回**条目对象（拆分前行为；
  * 父组件加载历史时会重置为 `_open: false`，见 ChatView 的消息归一化）。
+ * 工具 chip 不再内联展开：点击 emit `open-detail`，由右侧会话面板渲染完整内容。
  *
  * 契约（勿改）：
  * - `toolIcon` 映射随组件走（原先也只有这里用）；`toolName` 由父组件注入
- *   （与 useAgentStream / PermissionCard 同一函数）；
- * - 类名 `.think-body.live` 被 useAgentStream 的思考链自动滚动
+ *   （与 useStreamHandlers / PermissionCard 同一函数）；
+ * - 类名 `.think-body.live` 被 useStreamHandlers 的思考链自动滚动
  *   （querySelectorAll）按 DOM 查询，跨组件边界复用，重命名会静默失效。
  */
 import {
   ArrowDown,
+  ArrowRight,
+  ChatDotRound,
   Collection,
   Connection,
   MagicStick,
@@ -60,6 +75,7 @@ defineProps({
   items: { type: Array, required: true },
   toolName: { type: Function, required: true },
 })
+const emit = defineEmits(['open-detail'])
 
 function toolIcon(name) {
   if (name === 'web_search') return Position
@@ -114,6 +130,14 @@ function toolIcon(name) {
   overflow-y: auto;
 }
 
+/* 工具轮过渡说明：从正文撤回后归档到这里，默认展开但限高 */
+.process-body {
+  max-height: 160px;
+  overflow-y: auto;
+  border-left-color: var(--border);
+  background: var(--bg-hover);
+}
+
 /* 工具轨迹 */
 .tool-trace {
   display: flex;
@@ -140,38 +164,19 @@ function toolIcon(name) {
   font-size: var(--font-xs);
 }
 
-.tool-chip.expandable {
+.tool-chip.clickable {
   cursor: pointer;
 }
 
-.tool-chip.expandable:hover {
+.tool-chip.clickable:hover,
+.tool-chip.clickable:focus-visible {
   border-color: var(--primary);
+  color: var(--primary-text);
+  outline: none;
 }
 
-.tool-expand-icon {
+.tool-open-icon {
   color: var(--text-3);
-  transition: transform 0.15s;
-}
-
-.tool-expand-icon :deep(.open),
-.tool-expand-icon.open {
-  transform: rotate(180deg);
-}
-
-.tool-detail {
-  margin: 4px 0 0;
-  padding: 8px 10px;
-  max-width: 560px;
-  max-height: 260px;
-  overflow: auto;
-  border-radius: var(--radius-sm);
-  background: var(--bg-card-2);
-  border: 1px dashed var(--border);
-  font-size: var(--font-xs);
-  line-height: 1.55;
-  color: var(--text-3);
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 
 .tool-chip .el-icon {

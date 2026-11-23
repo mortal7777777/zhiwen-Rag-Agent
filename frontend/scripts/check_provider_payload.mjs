@@ -74,6 +74,17 @@ check(
   payload.thinking_enabled === true && payload.thinking_effort === 'max',
 )
 check('temperature=0 不被吞', providerToPayload({ ...card, temperature: 0 }).temperature === 0)
+const visionCaps = providerToPayload({
+  ...card,
+  supports_vision: true,
+  _visionModelsText: 'deepseek-v4.1-flash, *-vl-*',
+})
+check('supports_vision 保留', visionCaps.supports_vision === true)
+check(
+  'vision_models 从输入解析',
+  JSON.stringify(visionCaps.vision_models) ===
+    JSON.stringify(['deepseek-v4.1-flash', '*-vl-*']),
+)
 
 const vision = providerToPayload({ ...card, type: 'vision' })
 check(

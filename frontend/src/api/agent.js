@@ -5,7 +5,8 @@ import { streamRequest } from './sse.js'
 
 /**
  * Agent SSE 流式对话。
- * payload: { question, conversation_id, use_web_search, use_knowledge_base, template_id }
+ * payload: { question, conversation_id, use_web_search, use_knowledge_base,
+ *            template_id, attachment_ids }
  * handlers: { onSession, onToolStart, onToolResult, onStreamDelta, onStreamEnd,
  *             onSuspended, onToken, onDone, onError }
  * options:  { signal } 传入 AbortController.signal 可中止请求（停止生成）
@@ -13,6 +14,24 @@ import { streamRequest } from './sse.js'
 export async function streamAgentChat(payload = {}, handlers = {}, options = {}) {
   return streamRequest('/api/agent/stream', payload, handlers, options)
 }
+
+/**
+ * 上传对话附件（文档/文本/代码），返回 [{id, name, size, chars, truncated}]。
+ * 图片仍走 data URL 视觉链路，不使用此接口。
+ */
+export const uploadAgentAttachments = (files) => {
+  const form = new FormData()
+  files.forEach((file) => form.append('files', file))
+  return client
+    .post('/agent/attachments', form, { timeout: 120000 })
+    .then((res) => res.data)
+}
+
+/** 删除尚未发送的附件（移除 chip 时调用；过期文件由后端自动清理） */
+export const deleteAgentAttachment = (attachmentId) =>
+  client
+    .delete(`/agent/attachments/${encodeURIComponent(attachmentId)}`)
+    .then((res) => res.data)
 
 /**
  * 恢复挂起的运行（敏感操作审批）。
@@ -39,6 +58,18 @@ export async function continueAgentRun(conversationId, handlers = {}, options = 
 /** 丢弃未完成的运行（删除该会话的原生检查点线程），解除新消息闸门 */
 export const abandonRun = (conversationId) =>
   client.post(`/agent/abandon/${conversationId}`).then((res) => res.data)
+
+/** 主动取消正在进行的运行（「停止」按钮先调它再断开本地流——方案 A 断连不再自动中止） */
+export const cancelAgentRun = (runId) =>
+  client.post(`/agent/cancel/${encodeURIComponent(runId)}`).then((res) => res.data)
+
+/** 取消某个并行子代理（6.7）：只置该分支信号，主代理收到 cancelled 结果 */
+export const cancelAgentSubtask = (runId, subtaskId) =>
+  client
+    .post(
+      `/agent/cancel/${encodeURIComponent(runId)}/subagent/${encodeURIComponent(subtaskId)}`,
+    )
+    .then((res) => res.data)
 
 /** 上下文占用统计：消息条数 / token 预算 / 滚动摘要进度 / 缓存命中率 */
 export const getAgentContext = (conversationId) =>

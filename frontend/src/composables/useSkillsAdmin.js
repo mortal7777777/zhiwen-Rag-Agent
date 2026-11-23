@@ -7,7 +7,8 @@
  * 打开设置页时由 App.vue 的 watch(settingsVisible) 调 refreshSkills() 刷新。
  */
 import { computed, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import {
   Brush,
   Calendar,
@@ -54,6 +55,7 @@ export function useSkillsAdmin() {
 
   const sourceFilters = [
     { value: 'all', label: '全部' },
+    { value: 'zhiwen', label: '知问内置' },
     { value: 'agent', label: '自创' },
     { value: 'codex', label: 'Codex' },
     { value: 'hermes', label: 'Hermes' },
@@ -263,6 +265,7 @@ export function useSkillsAdmin() {
     return (
       {
         codex: 'Codex',
+        zhiwen: '知问内置',
         agent: '自创',
         hermes: 'Hermes',
         claude: 'Claude',
@@ -275,6 +278,7 @@ export function useSkillsAdmin() {
     return (
       {
         codex: 'primary',
+        zhiwen: 'success',
         agent: 'warning',
         hermes: 'success',
         claude: 'info',

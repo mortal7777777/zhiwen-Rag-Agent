@@ -11,6 +11,8 @@ export const listDocuments = () =>
 /** 上传多个文件（multipart/form-data）
  *  options: { dryRun, conflictPolicy: 'ask'|'proceed', archiveVersionNo, archiveNote }
  *  冲突时后端返回 409：detail={code:'upload_conflict', files:[{would_replace, suggested_version_no, conflicts}]}
+ *  默认 asyncIngest=true：落盘即返回，解析+嵌入转后台线程（indexAsync=true 标记），
+ *  进度轮询 getIndexHealth() 的 ingest 字段。
  */
 export const uploadDocuments = (files, options = {}) => {
   const form = new FormData()
@@ -19,7 +21,17 @@ export const uploadDocuments = (files, options = {}) => {
   if (options.conflictPolicy) form.append('conflict_policy', options.conflictPolicy)
   if (options.archiveVersionNo) form.append('archive_version_no', options.archiveVersionNo)
   if (options.archiveNote) form.append('archive_note', options.archiveNote)
-  return client.post('/documents/upload', form).then((res) => res.data)
+  form.append(
+    'async_ingest',
+    options.asyncIngest === false ? 'false' : 'true',
+  )
+  return client.post('/documents/upload', form).then((res) => ({
+    documents: res.data,
+    // 解析器升级待重建：文件已保存但本次未进入索引（后端响应头标记）
+    indexPending: res.headers?.['x-zhiwen-index-pending'] === '1',
+    // 增量索引已转后台：调 getIndexHealth() 轮询 ingest 状态
+    indexAsync: res.headers?.['x-zhiwen-index-async'] === '1',
+  }))
 }
 
 /** 删除知识库文件；purgeVersions=true 时同时删除其全部历史版本 */
@@ -54,13 +66,23 @@ export const restoreDocumentVersion = (versionId, payload) =>
 export const deleteDocumentVersion = (versionId) =>
   client.delete(`/documents/versions/${versionId}`).then((res) => res.data)
 
-/** 强制重建索引 */
+/** 强制重建索引（X-Zhiwen-Rebuild 为显式确认，防止脚本/误触） */
 export const rebuildIndex = () =>
-  client.post('/index/rebuild').then((res) => res.data)
+  client
+    .post('/index/rebuild', {}, { headers: { 'X-Zhiwen-Rebuild': 'confirm' } })
+    .then((res) => res.data)
 
 /** 获取索引状态 */
 export const getIndexStatus = () =>
   client.get('/index/status').then((res) => res.data)
+
+/** 索引健康：账本指纹 vs 当前目录（待增量/已删除/最近构建） */
+export const getIndexHealth = () =>
+  client.get('/index/health').then((res) => res.data)
+
+/** 应用增量索引（按指纹 diff 重嵌新增/变化文件并清理删除项） */
+export const refreshIndex = () =>
+  client.post('/index/refresh').then((res) => res.data)
 
 /** 预览知识库文档（md 按原文，pdf/docx/epub 等提取文本） */
 export const previewDocument = (relativePath) =>
@@ -94,8 +116,9 @@ export const getRunStats = (days = 7, period = '') =>
     .get('/runs/stats', { params: period ? { period } : { days } })
     .then((res) => res.data)
 
-
-    .then((res) => res.data)
+/** 单次运行记录（回放面板：用量/分阶段耗时/逐调用遥测） */
+export const getRun = (runId) =>
+  client.get(`/runs/${runId}`).then((res) => res.data)
 
 /** 每日建议（知识库 / 热点 / 通用） */
 export const getSuggestions = () =>

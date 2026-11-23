@@ -1,0 +1,308 @@
+/* ============================================================================
+   页面级布局变体（knowledge / runs / prompts）+ 布局切换器
+   变体只改排布与密度，不碰数据与交互；切换器由 components/ViewLayoutSwitch.vue 渲染。
+   ========================================================================= */
+
+/* ---------------- 切换器本体 ---------------- */
+.view-switch {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-md);
+  background: var(--bg-hover);
+}
+
+.view-switch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: calc(var(--radius-md) - 2px);
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--font-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.view-switch-btn:hover {
+  background: var(--bg-card-2);
+  color: var(--primary-text);
+}
+
+.view-switch-btn.active {
+  background: var(--bg-card);
+  color: var(--primary-text);
+  box-shadow: var(--shadow-soft);
+}
+
+.header-end {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ---------------- 知识库 ---------------- */
+/* 双栏：左列 = 上传 + 状态（上下叠放），右列 = 文档列表整列到底 */
+html .knowledge-page.view-split {
+  display: grid !important;
+  grid-template-columns: 340px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "upload docs"
+    "status docs";
+  gap: 14px;
+  align-items: start;
+}
+
+html .knowledge-page.view-split > .upload-card {
+  grid-area: upload;
+}
+
+html .knowledge-page.view-split > .status-card {
+  grid-area: status;
+}
+
+/* 文档卡（第三个 el-card）占满右列，内部表格自己滚动 */
+html .knowledge-page.view-split > .el-card:last-of-type {
+  grid-area: docs;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  min-height: 480px;
+  margin: 0;
+}
+
+html .knowledge-page.view-split > .el-card:last-of-type > .el-card__body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 窄左列里状态指标改成两列小格 */
+html .knowledge-page.view-split .status-card .status-grid,
+html .knowledge-page.view-split .status-card .stat-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+html .knowledge-page.view-split .el-card {
+  max-width: none;
+}
+
+@media (max-width: 1180px) {
+  html .knowledge-page.view-split {
+    grid-template-columns: 1fr;
+  }
+
+  html .knowledge-page.view-split .status-card {
+    grid-row: auto;
+  }
+}
+
+/* 紧凑：压缩卡片内边距与标签高度，一屏能看到更多文档 */
+html .knowledge-page.view-dense {
+  gap: 10px;
+}
+
+html .knowledge-page.view-dense .el-card__header {
+  padding: 9px 14px;
+}
+
+html .knowledge-page.view-dense .el-card__body {
+  padding: 10px 14px;
+}
+
+html .knowledge-page.view-dense .status-row,
+html .knowledge-page.view-dense .health-row {
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+html .knowledge-page.view-dense .el-tag {
+  height: 20px;
+  font-size: 11px;
+}
+
+html .knowledge-page.view-dense .upload-card .el-upload-dragger {
+  padding: 16px 12px;
+}
+
+/* ---------------- 运行记录 ---------------- */
+/* 紧凑：6 个指标压成一行，双图并排，表格行更矮 */
+html .runs-page.view-dense .stats-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+html .runs-page.view-dense .stat-cell {
+  padding: 8px 10px;
+  gap: 2px;
+}
+
+html .runs-page.view-dense .stat-value {
+  font-size: var(--font-lg);
+}
+
+html .runs-page.view-dense .stat-detail {
+  font-size: 11px;
+}
+
+html .runs-page.view-dense .charts-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+html .runs-page.view-dense .chart-box {
+  height: 170px;
+}
+
+html .runs-page.view-dense .stat-detail {
+  display: none;
+}
+
+html .runs-page.view-dense .el-table .cell {
+  font-size: 12px;
+}
+
+html .runs-page.view-dense .el-table th.el-table__cell,
+html .runs-page.view-dense .el-table td.el-table__cell {
+  padding: 3px 0;
+}
+
+/* 图表优先：指标收到 2 行，图表区加高（切换后会派发 resize，图表跟着重绘） */
+html .runs-page.view-focus .stats-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+html .runs-page.view-focus .stat-cell {
+  padding: 9px 12px;
+}
+
+html .runs-page.view-focus .chart-box {
+  height: 320px;
+}
+
+/* 图表优先：两张图改上下排，宽度翻倍 */
+html .runs-page.view-focus .charts-row {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+/* ---------------- 提示词工作台 ---------------- */
+/* 编辑优先：预览整块收起，编辑区吃掉整宽 */
+html .pw-page.view-editor .pw-grid {
+  grid-template-columns: 208px minmax(0, 1fr);
+}
+
+html .pw-page.view-editor .pw-side {
+  display: none;
+}
+
+/* 预览优先：模板列表收起，预览占右半 */
+html .pw-page.view-preview .pw-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(380px, 1.1fr);
+}
+
+html .pw-page.view-preview .pw-list {
+  display: none;
+}
+
+html .pw-page.view-editor .pw-list,
+html .pw-page.view-preview .pw-list {
+  font-size: var(--font-sm);
+}
+
+@media (max-width: 1280px) {
+  html .pw-page.view-preview .pw-grid {
+    grid-template-columns: 200px minmax(0, 1fr) 340px;
+  }
+}
+
+
+/* ============================================================================
+   运行页 · 时间筛选：EP 的 el-radio-button 默认是灰底蓝字的分段器，跟十套风格
+   都不搭。这里改成与页面其它分段控件（.view-switch）同一套语言：
+   容器吃 --bg-hover，选中项吃 --bg-card + --primary-text，边框只留发丝。
+   ========================================================================= */
+.runs-page .header-actions .el-radio-group {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-md);
+  background: var(--bg-hover);
+}
+
+.runs-page .header-actions .el-radio-button {
+  display: inline-flex;
+}
+
+.runs-page .header-actions .el-radio-button__inner {
+  border: none !important;
+  border-radius: calc(var(--radius-md) - 2px) !important;
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--font-sm);
+  padding: 5px 10px;
+  box-shadow: none !important;
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.runs-page .header-actions .el-radio-button__inner:hover {
+  background: var(--bg-card-2);
+  color: var(--primary-text);
+}
+
+.runs-page .header-actions .el-radio-button.is-active .el-radio-button__inner,
+.runs-page .header-actions .el-radio-button__original-radio:checked + .el-radio-button__inner {
+  background: var(--bg-card) !important;
+  color: var(--primary-text) !important;
+  font-weight: 600;
+  box-shadow: var(--shadow-soft) !important;
+}
+
+/* 风格差异：书斋/炭火用直角一点的段，素墨/赛博干脆无圆角 */
+html[data-style="salon"] .runs-page .header-actions .el-radio-group {
+  border-radius: var(--radius-sm);
+}
+
+html[data-style="salon"] .runs-page .header-actions .el-radio-button__inner {
+  border-radius: var(--radius-xs) !important;
+}
+
+html[data-style="mono"] .runs-page .header-actions .el-radio-group,
+html[data-style="cyber"] .runs-page .header-actions .el-radio-group {
+  border-radius: var(--radius-xs);
+}
+
+html[data-style="mono"] .runs-page .header-actions .el-radio-button__inner,
+html[data-style="cyber"] .runs-page .header-actions .el-radio-button__inner {
+  border-radius: var(--radius-xs) !important;
+  letter-spacing: 0.02em;
+}
+
+html[data-style="cyber"] .runs-page .header-actions .el-radio-button.is-active .el-radio-button__inner {
+  box-shadow: none !important;
+  text-shadow: 0 0 8px color-mix(in srgb, var(--primary) 45%, transparent);
+}
+
+/* 窄屏（<1180）：提示词三种变体统一退回单列，被隐藏的面板恢复，避免只看到半截 */
+@media (max-width: 1180px) {
+  html .pw-page.view-three .pw-grid,
+  html .pw-page.view-editor .pw-grid,
+  html .pw-page.view-preview .pw-grid {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+
+  html .pw-page.view-editor .pw-side,
+  html .pw-page.view-preview .pw-list {
+    display: block;
+  }
+}

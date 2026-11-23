@@ -25,6 +25,14 @@ export function providerToPayload(p) {
           .map((m) => m.trim())
           .filter(Boolean)
       : [p.model].filter(Boolean)
+  out.vision_models =
+    p._visionModelsText != null
+      ? String(p._visionModelsText)
+          .split(/[,，]/)
+          .map((m) => m.trim())
+          .filter(Boolean)
+      : (p.vision_models || [])
+  if (p.supports_vision != null) out.supports_vision = p.supports_vision === true
   out.note = p.note || ''
   if (p.type === 'chat') {
     out.thinking_enabled = p.thinking_enabled !== false

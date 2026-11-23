@@ -1,53 +1,91 @@
 <template>
-  <el-container class="app-container">
+  <!-- locale 从全局 app.use(ElementPlus) 迁来（按需引入后组件级配置） -->
+  <el-config-provider :locale="zhCn">
+    <el-container class="app-container">
     <!-- 左侧全局导航（可折叠） -->
-    <el-aside :width="navCollapsed ? '64px' : '212px'" class="app-aside">
-      <div class="logo" @click="$router.push('/')">
+    <!-- 收起态的左边缘感应条：鼠标移上来把整列悬浮出来 -->
+    <div class="aside-peek" aria-hidden="true" @mouseenter="onPeekEnter"></div>
+    <el-aside
+      width="212px"
+      class="app-aside"
+      @mouseleave="onAsideLeave"
+    >
+      <button type="button" class="logo" aria-label="回到知问首页" @click="$router.push('/')">
         <div class="logo-mark">
-          <el-icon :size="20"><MagicStick /></el-icon>
+          <el-icon :size="20"><component :is="logoIcon" /></el-icon>
         </div>
         <transition name="fade">
           <span v-if="!navCollapsed" class="logo-text">AI 知识助手</span>
         </transition>
-      </div>
+      </button>
 
-      <el-menu
-        :default-active="$route.path"
-        router
-        :collapse="navCollapsed"
-        :collapse-transition="false"
-        class="app-menu"
-      >
-        <el-menu-item index="/">
-          <el-icon :size="18"><ChatDotRound /></el-icon>
-          <template #title>知问 ZhiWen</template>
-        </el-menu-item>
-        <el-menu-item index="/knowledge">
-          <el-icon :size="18"><FolderOpened /></el-icon>
-          <template #title>知识库</template>
-        </el-menu-item>
-        <el-menu-item index="/runs">
-          <el-icon :size="18"><DataAnalysis /></el-icon>
-          <template #title>运行记录</template>
+      <!-- 不用 el-menu 的 collapse：折叠只改侧栏宽度（即时），菜单 DOM/内宽保持
+           不变并由侧栏裁切——避免每次展开/收起整棵菜单重渲染（约 100ms 长任务）。
+           收起态靠 title 提供原生悬浮提示。 -->
+      <!-- 图标随布局切换（见 NAV_ICONS）：导轨偏线性、浮岛偏方块、顶栏偏实心 -->
+      <el-menu :default-active="$route.path" router class="app-menu">
+        <el-menu-item
+          v-for="(item, i) in navRoutes"
+          :key="item.path"
+          :index="item.path"
+          :title="navCollapsed || layoutMode === 'rail' ? item.title : undefined"
+        >
+          <el-icon :size="18"><component :is="navIcons[i]" /></el-icon>
+          <template #title><span class="menu-title">{{ item.label }}</span></template>
         </el-menu-item>
       </el-menu>
 
+      <!-- 单列布局（Claude/Hermes）：会话列表由 ChatView 传送进来，与导航同列 -->
+      <!-- 插槽常驻：打开"合并"时 Teleport 的目标必须已经在 DOM 里，
+           否则同一次更新里创建目标 + 传送会失败，会话列表要手动刷新才出现 -->
+      <div
+        id="nav-session-slot"
+        class="nav-session-slot"
+        :class="{ 'is-off': !singleColumn }"
+      ></div>
+
       <div class="aside-footer">
-        <el-tooltip content="设置" placement="right">
-          <div class="collapse-btn" @click="settingsVisible = true">
+        <el-tooltip :show-after="1000" content="设置" placement="right" :hide-after="800">
+          <button
+            type="button"
+            class="collapse-btn"
+            aria-label="打开设置"
+            @click="settingsVisible = true"
+          >
             <el-icon :size="18"><Setting /></el-icon>
-          </div>
+          </button>
         </el-tooltip>
-        <el-tooltip :content="navCollapsed ? '展开导航' : '收起导航'" placement="right">
-          <div class="collapse-btn" @click="navCollapsed = !navCollapsed">
+        <!-- 非对话页没有 chat-header，把 固定/收起 侧栏 放到设置旁边 -->
+        <el-tooltip :show-after="1000"
+          v-if="!isChatRoute"
+          :content="sidebarCollapsed ? '固定侧栏' : '收起侧栏'"
+          placement="right"
+          :hide-after="800"
+        >
+          <button
+            type="button"
+            class="collapse-btn sidebar-pin"
+            :class="{ floating: sidebarCollapsed }"
+            :aria-label="sidebarCollapsed ? '固定侧栏' : '收起侧栏'"
+            @click="toggleSidebarCollapsed"
+          >
             <el-icon :size="18">
-              <Expand v-if="navCollapsed" />
+              <Expand v-if="sidebarCollapsed" />
               <Fold v-else />
             </el-icon>
-          </div>
+          </button>
         </el-tooltip>
       </div>
     </el-aside>
+
+    <!-- 拖动调宽：写 --nav-width，各布局用各自 min/max 限幅 -->
+    <ResizeHandle
+      var-name="--nav-width"
+      :min="navWidthMin"
+      :max="navWidthMax"
+      store-key="rag_nav_width"
+      label="拖动调整侧栏宽度"
+    />
 
     <el-main class="app-main">
       <router-view v-slot="{ Component }">
@@ -79,19 +117,21 @@
             <span class="brand-title">设置</span>
           </div>
           <nav class="settings-tabs">
-            <div
+            <button
               v-for="item in navItems"
               :key="item.key"
+              type="button"
               :class="['settings-tab', { active: activeTab === item.key }]"
+              :aria-current="activeTab === item.key ? 'true' : null"
               @click="activeTab = item.key"
             >
-              <el-tooltip :content="item.desc" placement="bottom" :offset="6">
+              <el-tooltip :show-after="1000" :content="item.desc" placement="bottom" :offset="6" :hide-after="800">
                 <span class="settings-tab-inner">
                   <el-icon :size="15"><component :is="item.icon" /></el-icon>
                   <span>{{ item.label }}</span>
                 </span>
               </el-tooltip>
-            </div>
+            </button>
           </nav>
           <el-button circle text class="settings-close" @click="settingsVisible = false">
             <el-icon :size="16"><Close /></el-icon>
@@ -124,27 +164,56 @@
       </div>
     </el-dialog>
 
-  </el-container>
+    </el-container>
+  </el-config-provider>
 </template>
 
 <script setup>
 import { computed, onMounted, provide, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import {
+  Aim,
   Brush,
   ChatDotRound,
+  ChatDotSquare,
+  ChatLineRound,
+  ChatRound,
   Close,
+  Collection,
+  Comment,
+  Compass,
   Connection,
   Cpu,
   DataAnalysis,
+  DataBoard,
+  DataLine,
+  Document,
+  Edit,
+  EditPen,
   Expand,
+  Files,
   Fold,
+  Folder,
+  FolderAdd,
   FolderOpened,
+  Grid,
+  Histogram,
   Lock,
   MagicStick,
+  Management,
   Memo,
+  MessageBox,
+  Notebook,
+  Operation,
+  PieChart,
   Search,
   Setting,
+  Star,
+  Sunny,
+  Tickets,
+  TrendCharts,
 } from '@element-plus/icons-vue'
 import { getSettings } from './api'
 import AppearancePane from './components/settings/AppearancePane.vue'
@@ -154,12 +223,16 @@ import ToolsPane from './components/settings/ToolsPane.vue'
 import ModelSettingsPane from './components/settings/ModelSettingsPane.vue'
 import SearchPane from './components/settings/SearchPane.vue'
 import SkillsPane from './components/settings/SkillsPane.vue'
+import ResizeHandle from './components/ResizeHandle.vue'
+import { useRoute } from 'vue-router'
 import { useAppearance } from './composables/useAppearance'
 import { useSettingsForm } from './composables/useSettingsForm'
 import { useMcpServers } from './composables/useMcpServers'
 import { useModelSettings } from './composables/useModelSettings'
 import { useSkillsAdmin } from './composables/useSkillsAdmin'
 
+// 导航恒为"图标 + 文字"：窄屏/悬浮态都靠整列收起（sidebarCollapsed）处理，
+// 不再有"只留图标"的中间态（它和整列收起两个图标挨在一起，视觉重复且容易误判）
 const navCollapsed = ref(false)
 const settingsVisible = ref(false)
 const activeTab = ref('appearance')
@@ -180,6 +253,117 @@ const navItems = [
 // （设置页外观面板经 provide/inject 共用同一实例）。
 const appearance = useAppearance()
 provide('settingsAppearance', appearance)
+// 模板里要用布局值：顶层解构 ref，模板自动解包（对象内的 ref 不会）
+const layoutMode = appearance.layoutMode
+
+// 导航项：图标按布局取不同一套，视觉上能区分"我是哪种布局"
+const navRoutes = [
+  { path: '/', label: '知问 ZhiWen', title: '知问 ZhiWen' },
+  { path: '/knowledge', label: '知识库', title: '知识库' },
+  { path: '/runs', label: '运行记录', title: '运行记录' },
+  { path: '/prompts', label: '提示词', title: '提示词' },
+]
+const NAV_ICONS = {
+  standard: [ChatDotRound, FolderOpened, DataAnalysis, Operation],
+  rail: [ChatLineRound, Files, TrendCharts, Notebook],
+  island: [ChatDotSquare, Collection, Histogram, EditPen],
+  topbar: [Comment, Folder, DataLine, Tickets],
+  claude: [ChatRound, Document, PieChart, Edit],
+  hermes: [MessageBox, FolderAdd, DataBoard, Management],
+}
+const navIcons = computed(() => NAV_ICONS[appearance.layoutMode.value] || NAV_ICONS.standard)
+const LOGO_ICONS = {
+  standard: MagicStick,
+  rail: Grid,
+  island: Aim,
+  topbar: Compass,
+  claude: Star,
+  hermes: Sunny,
+}
+const logoIcon = computed(() => LOGO_ICONS[appearance.layoutMode.value] || MagicStick)
+// 这几个布局宽度固定：导轨是常驻图标条，Claude/Hermes 是整幅侧栏——不再渲染收起按钮
+const FIXED_WIDTH_LAYOUTS = ['rail', 'claude', 'hermes']
+const canCollapse = computed(() => !FIXED_WIDTH_LAYOUTS.includes(layoutMode.value))
+// Claude / Hermes：导航与会话列表同列（ChatView 把会话列表 teleport 进插槽）
+const SINGLE_COLUMN_LAYOUTS = ['claude', 'hermes']
+// 合并开关打开时，任何布局都走"导航 + 会话列表同列"（这才是"合并"的含义；
+// 之前只对 claude/hermes 生效，其它布局下合并开关会把侧栏压成 64px 图标条而
+// 会话列表仍在另一列 —— 于是"合并不了、图标点不到"）。
+const singleColumn = computed(
+  () => SINGLE_COLUMN_LAYOUTS.includes(layoutMode.value) || !!mergedSidebar.value,
+)
+const { sidebarCollapsed, mergedSidebar } = appearance
+
+// 对话页的侧栏开关在 chat-header 里；其余页面放在设置图标旁
+const appRoute = useRoute()
+const isChatRoute = computed(() => appRoute.path === '/' || appRoute.name === 'chat')
+
+/* 收起后的"悬浮展开"改由 JS 控制：
+   CSS :hover 版本下，收起按钮就在侧栏内部，按下瞬间仍是 hover 态，
+   侧栏立刻弹回来 —— 表现就是"点了没反应，图标/侧栏还在"。
+   现在只有指针进入左侧感应条才展开，指针离开侧栏即关闭。 */
+const peekOpen = ref(false)
+let peekSuppressed = false
+
+function syncPeek() {
+  document.documentElement.dataset.sidebarPeek = peekOpen.value ? '1' : '0'
+}
+
+function onPeekEnter() {
+  if (!sidebarCollapsed.value || peekSuppressed) return
+  peekOpen.value = true
+  syncPeek()
+}
+
+function onAsideLeave() {
+  peekOpen.value = false
+  peekSuppressed = false
+  syncPeek()
+}
+
+function toggleSidebarCollapsed(event) {
+  // 收起后按钮仍持有焦点会让侧栏停在原位，点完主动失焦
+  if (event?.currentTarget instanceof HTMLElement) event.currentTarget.blur()
+  if (!sidebarCollapsed.value) {
+    peekOpen.value = false
+    peekSuppressed = true
+    syncPeek()
+  }
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  if (!sidebarCollapsed.value) {
+    peekOpen.value = false
+    peekSuppressed = false
+    syncPeek()
+  }
+}
+
+// 收起后：指针离开侧栏区域就解除压制；悬浮态下指针移出侧栏则收回
+// （el-aside 的 mouseleave 在某些位移/过渡时不可靠，统一用文档级指针位置判断）
+function onDocPointerMove(event) {
+  const aside = document.querySelector('.app-aside')
+  if (!aside) return
+  const inside = aside.contains(event.target)
+  if (peekSuppressed && !inside) peekSuppressed = false
+  if (peekOpen.value && sidebarCollapsed.value) {
+    const rect = aside.getBoundingClientRect()
+    const inPeek = event.clientX <= 14
+    if (!inside && !inPeek && event.clientX > rect.right) {
+      peekOpen.value = false
+      syncPeek()
+    }
+  }
+}
+// 拖动范围按布局给：导轨收得最窄，Hermes 最宽
+const NAV_WIDTH_RANGE = {
+  standard: [176, 340],
+  rail: [56, 132],
+  island: [176, 340],
+  topbar: [56, 132],
+  claude: [232, 400],
+  hermes: [248, 420],
+}
+const navWidthMin = computed(() => (NAV_WIDTH_RANGE[layoutMode.value] || [176, 340])[0])
+const navWidthMax = computed(() => (NAV_WIDTH_RANGE[layoutMode.value] || [176, 340])[1])
 
 // 路由视图缓存：切回来不重新加载（数据由各视图 onActivated 静默刷新）
 const keepAliveViews = ['ChatView', 'RunsView', 'KnowledgeView']
@@ -227,14 +411,7 @@ watch(settingsVisible, (visible) => {
   }
 })
 
-// 记住导航折叠状态
-try {
-  navCollapsed.value = localStorage.getItem('rag_nav_collapsed') === '1'
-} catch {
-  // ignore
-}
-appearance.init()
-
+// 折叠状态持久化：仅记录用户显式切换（初始窄屏强制值不落盘，见 navCollapsed 声明）
 watch(navCollapsed, (value) => {
   try {
     localStorage.setItem('rag_nav_collapsed', value ? '1' : '0')
@@ -243,1047 +420,19 @@ watch(navCollapsed, (value) => {
   }
 })
 
+appearance.init()
+
 onMounted(() => {
+  document.addEventListener('pointermove', onDocPointerMove)
   appearance.mount()
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', appearance.applyTheme)
 })
 </script>
 
-<style>
-/* ==================== 全局导航 ==================== */
-.app-container {
-  height: 100%;
-}
-
-/* 侧栏为悬浮圆角卡片（2026-10-10 美化二期步骤1）：
-   与 session panel / chat main 统一"三段式卡片"节奏。
-   上下左边距 16px，右侧间距由 .app-main 的左内边距提供。 */
-.app-aside {
-  display: flex;
-  flex-direction: column;
-  margin: 16px 0 16px 16px;
-  background: var(--bg-sidebar);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-soft);
-  transition: width 0.25s ease;
-  overflow: hidden;
-}
-
-.logo {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 60px;
-  padding: 0 16px;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.logo-mark {
-  width: 34px;
-  height: 34px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-md);
-  color: var(--text-on-brand);
-  background: var(--primary-grad);
-  box-shadow: var(--shadow-pop);
-}
-
-.logo-text {
-  font-size: var(--font-lg);
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  color: var(--text-1);
-  white-space: nowrap;
-}
-
-.app-menu {
-  flex: 1;
-  border-right: none;
-  padding: 4px 10px;
-  overflow-y: auto;
-}
-
-.app-menu:not(.el-menu--collapse) {
-  width: 100%;
-}
-
-.app-menu .el-menu-item {
-  position: relative;
-  height: 44px;
-  margin-bottom: 4px;
-  border-radius: var(--radius-md);
-  color: var(--text-2);
-  transition: background var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
-}
-
-.app-menu .el-menu-item:hover {
-  background: var(--bg-hover);
-  color: var(--primary);
-  transform: translateX(2px);
-}
-
-.app-menu .el-menu-item.is-active {
-  background: var(--bg-active);
-  color: var(--primary);
-  font-weight: 600;
-}
-
-/* 选中态：左侧品牌渐变指示条 */
-.app-menu .el-menu-item.is-active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 18px;
-  border-radius: var(--radius-pill);
-  background: var(--primary-grad);
-}
-
-.app-menu.el-menu--collapse {
-  width: 64px;
-}
-
-.app-menu.el-menu--collapse .el-menu-item {
-  justify-content: center;
-  padding: 0 !important;
-}
-
-.app-menu.el-menu--collapse .el-menu-item .el-tooltip__trigger {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-}
-
-.app-menu.el-menu--collapse .el-menu-item .el-icon {
-  margin: 0 !important;
-}
-
-/* 折叠态：图标居中，不做位移微动效（避免居中被推移） */
-.app-menu.el-menu--collapse .el-menu-item:hover {
-  transform: none;
-}
-
-.aside-footer {
-  display: flex;
-  justify-content: center;
-  gap: 6px;
-  padding: 10px 0;
-  border-top: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.collapse-btn {
-  width: 36px;
-  height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-md);
-  color: var(--text-3);
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
-}
-
-.collapse-btn:hover {
-  background: var(--bg-hover);
-  color: var(--primary);
-}
-
-.app-main {
-  padding: 16px;
-  background: var(--bg-app);
-  overflow: hidden;
-}
-
-/* 窄屏收紧外边距（与 ChatView ≤768px 的 calc(100vh - 16px) 高度规则配套） */
-@media (max-width: 768px) {
-  .app-aside {
-    margin: 8px 0 8px 8px;
-  }
-
-  .app-main {
-    padding: 8px;
-  }
-}
-
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.2s;
-}
-
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
-
-/* 路由切换过渡：短时长 + 仅合成层属性（GPU），避免切换卡顿 */
-.page-enter-active {
-  transition: opacity 0.16s ease, transform 0.16s cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.page-leave-active {
-  transition: opacity 0.1s ease;
-}
-
-.page-enter-from {
-  opacity: 0;
-  transform: translateY(6px);
-}
-
-.page-leave-to {
-  opacity: 0;
-}
-
-/* ==================== 设置：居中圆角卡片 ==================== */
-.settings-modal {
-  backdrop-filter: blur(6px) saturate(1.1);
-  -webkit-backdrop-filter: blur(6px) saturate(1.1);
-  background: rgba(12, 14, 18, 0.42) !important;
-}
-
-.settings-dialog {
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  padding: 0;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.22);
-}
-
-.settings-dialog .el-dialog__header {
-  display: none;
-}
-
-.settings-dialog .el-dialog__body {
-  padding: 0;
-}
-
-.settings-card {
-  display: flex;
-  flex-direction: column;
-  height: 640px;
-}
-
-/* ---- 顶部横向导航 ---- */
-.settings-topbar {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 12px 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-card-2);
-}
-
-.settings-brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.brand-mark {
-  width: 30px;
-  height: 30px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  color: var(--text-on-brand);
-  background: var(--primary-grad);
-}
-
-.brand-title {
-  font-size: var(--font-lg);
-  font-weight: 700;
-  color: var(--text-1);
-}
-
-.settings-tabs {
-  flex: 1;
-  display: flex;
-  gap: 6px;
-  justify-content: center;
-}
-
-.settings-tab {
-  padding: 0;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  border-radius: var(--radius-md);
-}
-
-.settings-tab-inner {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 16px;
-  border-radius: var(--radius-md);
-  font-size: var(--font-base);
-  color: var(--text-2);
-  transition: all 0.2s;
-  user-select: none;
-  white-space: nowrap;
-}
-
-.settings-tab:hover .settings-tab-inner {
-  background: var(--bg-hover);
-  color: var(--primary);
-}
-
-.settings-tab.active .settings-tab-inner {
-  background: var(--primary-grad);
-  color: var(--text-on-brand);
-  font-weight: 600;
-  box-shadow: var(--shadow-pop);
-}
-
-.settings-close {
-  flex-shrink: 0;
-  color: var(--text-3);
-}
-
-/* ---- 右侧内容 ---- */
-.settings-content {
-  flex: 1;
-  min-width: 0;
-  overflow-y: auto;
-  padding: 24px 28px 28px;
-}
-
-.pane-head {
-  margin-bottom: 18px;
-}
-
-.pane-title {
-  font-size: var(--font-xl);
-  font-weight: 700;
-  color: var(--text-1);
-}
-
-.pane-sub {
-  margin-top: 3px;
-  font-size: var(--font-sm);
-  color: var(--text-3);
-}
-
-.settings-section {
-  margin-bottom: 22px;
-}
-
-.settings-label {
-  font-size: var(--font-sm);
-  font-weight: 600;
-  color: var(--text-2);
-  margin-bottom: 10px;
-}
-
-.section-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-}
-
-.section-head .settings-label {
-  margin-bottom: 0;
-}
-
-.section-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.settings-tip {
-  margin-top: 10px;
-  font-size: var(--font-xs);
-  color: var(--text-3);
-  line-height: 1.7;
-}
-
-.settings-save-row {
-  padding-top: 4px;
-}
-
-.tools-test-row {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.memory-path {
-  font-size: var(--font-xs);
-  color: var(--text-3);
-  margin-bottom: 10px;
-  word-break: break-all;
-}
-
-.memory-textarea :deep(.el-textarea__inner) {
-  font-family: Consolas, Monaco, monospace;
-  font-size: var(--font-sm);
-  line-height: 1.6;
-}
-
-/* ---- 外观 ---- */
-.theme-options {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-}
-
-.theme-card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 10px;
-  cursor: pointer;
-  background: var(--bg-card-2);
-  transition: all 0.2s;
-}
-
-.theme-card:hover {
-  border-color: var(--primary-2);
-}
-
-.theme-card.active {
-  border-color: var(--primary);
-  background: var(--bg-active);
-  box-shadow: 0 0 0 2px var(--primary-soft);
-}
-
-.theme-preview {
-  height: 52px;
-  border-radius: var(--radius-sm);
-  display: flex;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  margin-bottom: 8px;
-}
-
-.theme-preview.light {
-  background: #f3f4f8;
-}
-
-.theme-preview.dark {
-  background: #0e1014;
-}
-
-.theme-preview.system {
-  background: linear-gradient(135deg, #f3f4f8 50%, #0e1014 50%);
-}
-
-.preview-side {
-  width: 26%;
-  background: rgba(127, 127, 127, 0.14);
-  border-right: 1px solid rgba(127, 127, 127, 0.2);
-}
-
-.preview-main {
-  flex: 1;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.preview-line {
-  height: 4px;
-  border-radius: var(--radius-xs);
-  background: var(--primary);
-  opacity: 0.75;
-  width: 70%;
-}
-
-.preview-line.short {
-  width: 45%;
-  opacity: 0.35;
-}
-
-.preview-bubble {
-  align-self: flex-end;
-  width: 38%;
-  height: 12px;
-  border-radius: var(--radius-sm) var(--radius-sm) var(--radius-xs) var(--radius-sm);
-  background: var(--accent);
-  opacity: 0.7;
-}
-
-.theme-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.theme-name {
-  font-size: var(--font-sm);
-  color: var(--text-1);
-}
-
-.theme-check {
-  color: var(--primary);
-  font-size: var(--font-lg);
-}
-
-.width-segmented {
-  width: 100%;
-}
-
-.width-segmented :deep(.el-segmented__item) {
-  flex: 1;
-}
-
-.width-feedback {
-  margin-top: 12px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.width-preview-track {
-  flex: 1;
-  height: 8px;
-  border-radius: var(--radius-pill);
-  background: var(--bg-hover);
-  border: 1px solid var(--border);
-  overflow: hidden;
-}
-
-.width-preview-bar {
-  height: 100%;
-  border-radius: var(--radius-pill);
-  background: var(--primary-grad);
-  transition: width 0.25s ease;
-}
-
-.width-value {
-  flex-shrink: 0;
-  font-size: var(--font-xs);
-  color: var(--text-3);
-  min-width: 56px;
-  text-align: right;
-}
-
-/* ---- 模型供应商 ---- */
-.provider-empty {
-  padding: 18px 12px;
-  text-align: center;
-  font-size: var(--font-sm);
-  color: var(--text-3);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-md);
-  background: var(--bg-card-2);
-}
-
-.provider-card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 12px;
-  margin-bottom: 10px;
-  background: var(--bg-card-2);
-  transition: all 0.2s;
-}
-
-.provider-card:hover {
-  border-color: var(--border-strong);
-}
-
-.provider-card.inactive {
-  opacity: 0.72;
-}
-
-.provider-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.provider-radio :deep(.el-radio__label) {
-  font-size: var(--font-xs);
-  color: var(--text-3);
-  padding-left: 4px;
-}
-
-.provider-name {
-  font-size: var(--font-base);
-  font-weight: 600;
-  color: var(--text-1);
-}
-
-.provider-flex {
-  flex: 1;
-}
-
-.provider-del {
-  margin-left: 2px;
-}
-
-/* 供应商测试/测速徽标（成功绿 / 失败红，颜色全走令牌） */
-.probe-badge {
-  font-size: var(--font-xs);
-  padding: 1px 8px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  white-space: nowrap;
-}
-
-.probe-badge.ok {
-  color: var(--success);
-  border-color: var(--success);
-  background: color-mix(in srgb, var(--success) 12%, transparent);
-}
-
-.probe-badge.fail {
-  color: var(--danger);
-  border-color: var(--danger);
-  background: var(--danger-bg);
-}
-
-.provider-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-
-.provider-grid .field {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.provider-grid .field.wide {
-  grid-column: 1 / -1;
-}
-
-.provider-grid .field label {
-  font-size: var(--font-xs);
-  color: var(--text-3);
-}
-
-.provider-grid :deep(.el-input__wrapper),
-.provider-grid :deep(.el-select__wrapper) {
-  background: var(--bg-chat);
-  box-shadow: 0 0 0 1px var(--border) inset;
-}
-
-.provider-grid :deep(.el-input__inner) {
-  color: var(--text-1);
-}
-
-.generic-form {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 6px 12px;
-  background: var(--bg-card-2);
-}
-
-.generic-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 9px 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.generic-row:last-child {
-  border-bottom: none;
-}
-
-.generic-sub {
-  margin: 12px 0 2px;
-  padding-bottom: 4px;
-  border-bottom: 1px dashed var(--border);
-  font-size: var(--font-xs);
-  font-weight: 600;
-  color: var(--text-2);
-}
-
-.generic-label {
-  font-size: var(--font-sm);
-  color: var(--text-2);
-  flex-shrink: 0;
-}
-
-.generic-select {
-  width: 210px;
-}
-
-.generic-hint {
-  font-size: var(--font-xs);
-  color: var(--text-3);
-  line-height: 1.4;
-}
-
-/* ---- 技能 ---- */
-.skill-master {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-card-2);
-  margin-bottom: 14px;
-}
-
-.skill-master-title {
-  font-size: var(--font-base);
-  font-weight: 600;
-  color: var(--text-1);
-}
-
-.skill-master-desc {
-  margin-top: 3px;
-  font-size: var(--font-xs);
-  color: var(--text-3);
-}
-
-.skill-filter-row {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.skill-search {
-  flex: 1;
-}
-
-.skill-group-select {
-  width: 140px;
-  flex-shrink: 0;
-}
-
-.skill-source-filter {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 12px;
-}
-
-.source-chip {
-  padding: 4px 12px;
-  border-radius: var(--radius-pill);
-  font-size: var(--font-xs);
-  color: var(--text-2);
-  background: var(--bg-card-2);
-  border: 1px solid var(--border);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.source-chip:hover {
-  color: var(--primary);
-  border-color: var(--primary-2);
-}
-
-.source-chip.active {
-  color: var(--primary);
-  background: var(--bg-active);
-  border-color: var(--primary);
-  font-weight: 600;
-}
-
-.skill-summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.skill-summary-text {
-  font-size: var(--font-xs);
-  color: var(--text-3);
-}
-
-.skills-loading,
-.agent-banner {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0 0 12px;
-  padding: 8px 12px;
-  border: 1px solid var(--el-color-warning-light-5);
-  border-radius: 8px;
-  background: var(--el-color-warning-light-9);
-  color: var(--el-color-warning-dark-2);
-  font-size: 13px;
-  cursor: pointer;
-}
-.agent-banner:hover {
-  border-color: var(--el-color-warning-light-3);
-}
-.skill-date {
-  font-size: 11px;
-  color: var(--text-3);
-}
-.agent-preview {
-  margin: 0;
-  max-height: 60vh;
-  overflow: auto;
-  padding: 12px 14px;
-  border-radius: 8px;
-  background: var(--el-fill-color-light);
-  color: var(--el-text-color-primary);
-  font-size: 12.5px;
-  line-height: 1.7;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.skills-empty {
-  padding: 26px 0;
-  text-align: center;
-  color: var(--text-3);
-  font-size: var(--font-sm);
-}
-
-.skill-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.skill-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-card-2);
-  transition: border-color 0.2s;
-}
-
-.skill-item:hover {
-  border-color: var(--border-strong);
-}
-
-.skill-item.muted {
-  opacity: 0.66;
-}
-
-.skill-icon {
-  width: 34px;
-  height: 34px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-md);
-  color: var(--primary);
-  background: var(--bg-active);
-}
-
-.skill-main {
-  flex: 1;
-  min-width: 0;
-}
-
-.skill-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.skill-name {
-  font-weight: 600;
-  font-size: var(--font-base);
-  color: var(--text-1);
-}
-
-.skill-desc {
-  margin-top: 4px;
-  font-size: var(--font-xs);
-  color: var(--text-3);
-  line-height: 1.5;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-.skill-ops {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.skill-remove {
-  color: var(--text-3);
-}
-
-.skill-remove:hover {
-  color: var(--danger);
-}
-
-.hidden-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin: 18px 0 10px;
-}
-
-.hidden-head .settings-label {
-  margin-bottom: 0;
-}
-
-.hidden-hint {
-  font-size: var(--font-xs);
-  color: var(--text-3);
-}
-
-.skill-footer {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 12px;
-}
-/* ---- 界面风格卡 ---- */
-.style-swatch {
-  height: 52px;
-  border-radius: var(--radius-sm);
-  display: flex;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  margin-bottom: 8px;
-}
-
-.style-swatch .sw-side {
-  width: 26%;
-  border-right: 1px solid rgba(127, 127, 127, 0.16);
-}
-
-.style-swatch .sw-body {
-  flex: 1;
-  padding: 9px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.style-swatch .sw-line {
-  height: 4px;
-  border-radius: var(--radius-xs);
-  width: 62%;
-  opacity: 0.85;
-}
-
-.style-swatch .sw-line.short {
-  width: 38%;
-  opacity: 0.45;
-}
-
-.style-swatch.default {
-  background: #f3f4f8;
-}
-
-.style-swatch.default .sw-side {
-  background: #ffffff;
-}
-
-.style-swatch.default .sw-line {
-  background: #1677ff;
-}
-
-.style-swatch.quiet {
-  background: #f7f6f3;
-}
-
-.style-swatch.quiet .sw-side {
-  background: #fbfaf8;
-}
-
-.style-swatch.quiet .sw-line {
-  background: #1f2126;
-}
-
-.style-swatch.salon {
-  background: #ece5d8;
-}
-
-.style-swatch.salon .sw-side {
-  background: #f2ecdf;
-}
-
-.style-swatch.salon .sw-line {
-  background: #96691f;
-}
-
-/* 标题字体随风格（默认无衬线；书斋为宋体系） */
-.pane-title {
-  font-family: var(--font-display);
-}
-
-/* ---- MCP 面板增强 ---- */
-.mcp-badge {
-  flex-shrink: 0;
-  font-size: var(--font-2xs);
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--bg-hover);
-  color: var(--text-3);
-  white-space: nowrap;
-}
-
-.mcp-badge.ok {
-  color: var(--success-text, var(--success));
-  background: color-mix(in srgb, var(--success) 12%, transparent);
-}
-
-.mcp-badge.warn {
-  color: var(--warning-text, var(--warning));
-  background: color-mix(in srgb, var(--warning) 14%, transparent);
-}
-
-.mcp-badge.bad {
-  color: var(--danger-text, var(--danger));
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
-}
-
-.mcp-cmd {
-  margin-top: 6px;
-  font-family: Consolas, Monaco, monospace;
-  font-size: var(--font-xs);
-  color: var(--text-3);
-  word-break: break-all;
-}
-
-.mcp-env {
-  margin-top: 2px;
-  font-size: var(--font-2xs);
-  color: var(--text-3);
-}
-
-.mcp-tools {
-  margin-top: 8px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.mcp-tool-chip {
-  font-family: Consolas, Monaco, monospace;
-  font-size: var(--font-2xs);
-  color: var(--text-2);
-  background: var(--bg-hover);
-  border-radius: var(--radius-xs);
-  padding: 1px 6px;
-}
-
-</style>
+<!-- 全局（非 scoped）样式：拆到 styles/（P3·⑤），载入顺序即书写顺序 -->
+<style src="./styles/app-nav.css"></style>
+<style src="./styles/layout.css"></style>
+<style src="./styles/view-variants.css"></style>
+<style src="./styles/settings.css"></style>
+<style src="./styles/inspector.css"></style>
+<style src="./styles/style-signatures.css"></style>

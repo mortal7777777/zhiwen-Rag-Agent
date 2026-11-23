@@ -24,7 +24,7 @@ const props = defineProps({
   srcUrl: { type: String, required: true },
 })
 
-const emit = defineEmits(['ready', 'error', 'position', 'active-change'])
+const emit = defineEmits(['ready', 'error', 'position', 'active-change', 'selection'])
 
 const loading = ref(false)
 const error = ref('')
@@ -68,6 +68,28 @@ async function load() {
       if (loc?.start?.cfi) emit('position', { cfi: loc.start.cfi })
       const href = loc?.start?.href
       if (href) emit('active-change', { href })
+    })
+    // EPUB 正文在 iframe 内，父页面拿不到选区；epub.js 提供 selected 事件
+    rendition.on('selected', (cfiRange, contents) => {
+      try {
+        const win = contents?.window
+        const sel = win?.getSelection?.()
+        const text = String(sel?.toString() || '').trim()
+        if (text.length < 2) return
+        let node = sel?.anchorNode
+        const el = node?.nodeType === 3 ? node.parentElement : node
+        const block = el?.closest?.(
+          'p, li, blockquote, pre, h1, h2, h3, h4, h5, h6, div',
+        )
+        const context = String(block?.innerText || text).trim().slice(0, 1500)
+        emit('selection', {
+          text: text.slice(0, 4000),
+          context,
+          cfi: cfiRange,
+        })
+      } catch {
+        /* iframe 跨域/销毁竞态：忽略本次选区 */
+      }
     })
     await rendition.display()
     tocFlat = await flattenNavigation()

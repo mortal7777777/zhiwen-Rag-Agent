@@ -1,11 +1,12 @@
 <template>
-  <div class="runs-page">
+  <div :class="['runs-page', viewClass]">
     <!-- 用量统计卡：时间筛选 + 指标卡 + 图表（类 DeepSeek platform 用量页） -->
     <el-card v-if="stats" shadow="never" class="stats-card">
       <template #header>
         <div class="header-row">
           <span class="card-title">用量统计{{ periodLabel }}</span>
           <div class="header-actions">
+            <ViewLayoutSwitch v-model="runsView" :options="runsViewOptions" />
             <el-radio-group v-model="period" size="small" @change="loadStats">
               <el-radio-button value="today">今天</el-radio-button>
               <el-radio-button value="3d">近 3 天</el-radio-button>
@@ -94,116 +95,23 @@
         <el-table-column prop="created_at" label="时间" width="170" />
         <el-table-column label="操作" width="90" align="center">
           <template #default="{ row }">
-            <el-button size="small" link type="primary" @click="showDetail(row)">详情</el-button>
+            <el-button size="small" link type="primary" @click="openReplay(row)">回放</el-button>
           </template>
         </el-table-column>
       </el-table>
     </el-card>
 
-    <el-dialog v-model="detailVisible" title="运行详情" width="760px" append-to-body>
-      <div v-if="detail" class="detail-body">
-        <div class="detail-label">问题</div>
-        <div class="detail-text">{{ detail.question }}</div>
-
-        <div v-if="detail.plan && detail.plan.length" class="detail-label">执行计划</div>
-        <ol v-if="detail.plan && detail.plan.length" class="detail-steps">
-          <li v-for="(s, i) in detail.plan" :key="i">{{ s }}</li>
-        </ol>
-
-        <div v-if="detail.error" class="detail-label">错误</div>
-        <div v-if="detail.error" class="detail-error">{{ detail.error }}</div>
-
-        <!-- 分阶段耗时：prepare/子代理/模型/工具/TTFT（token_usage.timings） -->
-        <template v-if="detailTimings">
-          <div class="detail-label">分阶段耗时（总 {{ formatMs(detail.latency_ms) }}）</div>
-          <div class="detail-timings">
-            <div
-              v-for="item in detailTimingItems"
-              :key="item.key"
-              class="timing-row"
-            >
-              <span class="timing-name">{{ item.label }}</span>
-              <div class="timing-bar">
-                <i :style="{ width: item.pct }" />
-              </div>
-              <span class="timing-value">{{ formatMs(item.value) }}</span>
-              <span class="timing-pct">{{ item.pct }}</span>
-            </div>
-          </div>
-        </template>
-
-        <!-- Token 用量 + 缓存命中（token_usage：主循环 + 辅助调用分开统计） -->
-        <template v-if="detailUsage">
-          <div class="detail-label">Token 用量</div>
-          <div class="usage-grid">
-            <div class="usage-cell">
-              <div class="usage-value">{{ detailUsage.llm_calls ?? '-' }}</div>
-              <div class="usage-label">主循环 LLM 调用</div>
-            </div>
-            <div class="usage-cell">
-              <div class="usage-value">{{ fmtTokens(detailUsage.prompt_tokens) }}</div>
-              <div class="usage-label">输入 tokens</div>
-            </div>
-            <div class="usage-cell">
-              <div class="usage-value">{{ fmtTokens(detailUsage.completion_tokens) }}</div>
-              <div class="usage-label">输出 tokens</div>
-            </div>
-            <div class="usage-cell">
-              <div class="usage-value">
-                {{
-                  detailUsage.cache_hit_rate != null
-                    ? (detailUsage.cache_hit_rate * 100).toFixed(0) + '%'
-                    : '-'
-                }}
-              </div>
-              <div class="usage-label">主循环缓存命中率</div>
-            </div>
-          </div>
-          <div class="usage-sub">
-            <template v-if="detailUsage.aux_llm_calls">
-              辅助调用（标题/计划/摘要/记忆等）：{{ detailUsage.aux_llm_calls }} 次 ·
-              {{ fmtTokens(detailUsage.aux_prompt_tokens) }} 入 /
-              {{ fmtTokens(detailUsage.aux_completion_tokens) }} 出
-            </template>
-            <template v-else>无辅助调用</template>
-          </div>
-          <div v-if="detailUsage.cache_hit_tokens != null" class="usage-sub">
-            缓存明细：命中 {{ fmtTokens(detailUsage.cache_hit_tokens) }} ·
-            未命中 {{ fmtTokens(detailUsage.cache_miss_tokens) }}
-          </div>
-          <div v-if="lastCallCache" class="usage-sub">
-            末次调用缓存：{{ fmtTokens(lastCallCache.read) }} 读 /
-            {{ fmtTokens(lastCallCache.total) }} 总
-          </div>
-        </template>
-
-        <div class="detail-label">工具轨迹</div>
-        <div v-if="!detail.tool_trace || !detail.tool_trace.length" class="detail-empty">
-          无工具调用
-        </div>
-        <div v-for="(t, i) in detail.tool_trace" :key="i" class="detail-tool">
-          <span class="dt-step">{{ t.step }}</span>
-          <span class="dt-name">{{ t.name }}</span>
-          <span class="dt-summary">{{ t.summary || JSON.stringify(t.arguments || {}) }}</span>
-          <span class="dt-dur">{{ t.duration_ms != null ? t.duration_ms + 'ms' : '' }}</span>
-        </div>
-
-        <div class="detail-label">Trace（JSONL）</div>
-        <el-input
-          :model-value="traceJson"
-          type="textarea"
-          :rows="8"
-          readonly
-          class="trace-textarea"
-        />
-      </div>
-    </el-dialog>
+    <RunReplayDrawer
+      v-model="detailVisible"
+      :run-id="detailId"
+      :conversation-title="detailConvTitle"
+    />
   </div>
 </template>
 
 <script setup>
-import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus/es/components/message/index'
 // echarts 按需引入（只用到 bar/line + 坐标轴/图例/提示框/Canvas 渲染器）：
 // 全量引入会把 RunsView 的 chunk 推到 1.1MB+，按需后约 300KB
 import * as echarts from 'echarts/core'
@@ -223,7 +131,11 @@ echarts.use([
   TooltipComponent,
   CanvasRenderer,
 ])
-import { getRunTrace, getRunStats, listConversations, listRuns } from '../api'
+import { getRunStats, listConversations, listRuns } from '../api'
+import RunReplayDrawer from '../components/runs/RunReplayDrawer.vue'
+import { Grid, List, TrendCharts } from '@element-plus/icons-vue'
+import ViewLayoutSwitch from '../components/ViewLayoutSwitch.vue'
+import { usePageLayout } from '../composables/usePageLayout'
 
 defineOptions({ name: 'RunsView' })
 
@@ -233,16 +145,31 @@ let lastLoadedAt = Date.now()
 
 const loading = ref(false)
 const stats = ref(null)
+
+// 页面布局变体（卡片 / 紧凑 / 图表优先），差异见 styles/view-variants.css
+const runsViewOptions = [
+  { value: 'cards', label: '卡片', icon: Grid, hint: '卡片：指标块 + 图表 + 明细表' },
+  { value: 'dense', label: '紧凑', icon: List, hint: '紧凑：6 个指标压成一行，双图并排，表格行高更小' },
+  { value: 'focus', label: '图表优先', icon: TrendCharts, hint: '图表优先：图表加高到 320px，指标区收紧' },
+]
+const { variant: runsView, viewClass } = usePageLayout('rag_runs_view', runsViewOptions, 'cards')
+
+// 变体改了栅格 → 图表容器尺寸变了，派发一次 resize 让 ECharts 重新量
+watch(runsView, () => {
+  nextTick(() => window.dispatchEvent(new Event('resize')))
+})
 const period = ref('7d')
+// 快速切换时间筛选时的请求序号：只有最后一次请求的响应能落到 stats/图表上
+let statsSeq = 0
 const detailVisible = ref(false)
-const detail = ref(null)
-const traceJson = ref('')
+const detailId = ref(null)
 const convTitles = ref({})
 const tokensChartEl = ref(null)
 const costChartEl = ref(null)
 let tokensChart = null
 let costChart = null
 let themeObserver = null
+let chartObserver = null
 
 const PERIOD_LABELS = { today: '（今日）', '3d': '（近 3 天）', '7d': '（近 7 天）', all: '（全部）' }
 const periodLabel = computed(() => PERIOD_LABELS[period.value] || '')
@@ -264,14 +191,70 @@ function chartPalette() {
     success: css('--success') || '#2eb872',
     warning: css('--warning') || '#e8912d',
     danger: css('--danger') || '#f56c6c',
-    muted: css('--text-3') || '#6b7280',
+    muted: css('--text-3') || '#646b78',
+    // 图表 chrome（2026-11-19 V4）：ECharts 默认是浅色皮（轴标签 #54555a
+    // 压深底仅 2.27:1、网格线 #dbdee4 在暗底上反而刺眼），这里全部改取令牌。
+    text: css('--text-2') || '#4c515b',
+    axis: css('--border-strong') || '#dde1ea',
+    grid: css('--border') || '#e8ebf1',
+    tooltipBg: css('--bg-panel') || '#ffffff',
+    tooltipBorder: css('--border-strong') || '#dde1ea',
+    tooltipText: css('--text-1') || '#23262d',
+    font: css('--font-display') || 'inherit',
   }
 }
 
-function renderCharts() {
-  if (!stats.value?.daily?.length) return
-  const daily = stats.value.daily
-  const dates = daily.map((d) => d.date)
+/** 容器尺寸变化（侧栏折叠/窗口缩放）时重绘，避免画布保持旧宽度。 */
+function ensureChartObserver() {
+  if (chartObserver || !tokensChartEl.value || !costChartEl.value) return
+  chartObserver = new ResizeObserver(() => {
+    tokensChart?.resize()
+    costChart?.resize()
+  })
+  chartObserver.observe(tokensChartEl.value)
+  chartObserver.observe(costChartEl.value)
+}
+
+/**
+ * 容器存在性 + 实例与容器一致性检查。
+ * 卡片重渲染（v-if / keep-alive）后 el 会换人，但缓存的实例还绑在旧节点上，
+ * 表现就是"图表突然不见了"。这里发现不一致就 dispose 重建。
+ */
+function ensureChartInstances() {
+  if (!tokensChartEl.value || !costChartEl.value) return false
+  if (tokensChart && tokensChart.getDom() !== tokensChartEl.value) {
+    tokensChart.dispose()
+    tokensChart = null
+  }
+  if (costChart && costChart.getDom() !== costChartEl.value) {
+    costChart.dispose()
+    costChart = null
+  }
+  return true
+}
+
+function renderCharts(retry = 0) {
+  // 容器还没挂上（刚切回 keep-alive / 统计卡刚渲染）：等一拍再试，最多 5 次
+  if (!ensureChartInstances()) {
+    if (retry < 5) nextTick(() => renderCharts(retry + 1))
+    return
+  }
+  ensureChartObserver()
+  // 空区间也要画出坐标轴（以前直接 return，快速切换后会留下上一区间的旧图）
+  const daily = stats.value?.daily || []
+  if (!daily.length) {
+    const empty = { title: { text: '该区间暂无数据', left: 'center', top: 'middle',
+      textStyle: { color: chartPalette().muted, fontSize: 12, fontWeight: 400 } } }
+    tokensChart = tokensChart || echarts.init(tokensChartEl.value)
+    costChart = costChart || echarts.init(costChartEl.value)
+    tokensChart.clear()
+    costChart.clear()
+    tokensChart.setOption(empty, true)
+    costChart.setOption(empty, true)
+    return
+  }
+  // daily 已在函数开头解析（含空区间兜底）
+  const dates = daily.map((d) => d.label || d.date)
   const input = daily.map((d) => d.input_tokens)
   const output = daily.map((d) => d.output_tokens)
   const totalTok = daily.map((d) => d.input_tokens + d.output_tokens)
@@ -281,9 +264,29 @@ function renderCharts() {
     return all > 0 ? Number(((d.cache_hit / all) * 100).toFixed(1)) : null
   })
   const runsPerDay = daily.map((d) => d.runs)
-  const axis = { type: 'category', data: dates, axisLabel: { fontSize: 11 } }
-  const tooltip = { trigger: 'axis' }
   const C = chartPalette()
+  const axisStyle = {
+    axisLabel: { fontSize: 11, color: C.muted },
+    axisLine: { lineStyle: { color: C.axis } },
+    axisTick: { lineStyle: { color: C.axis } },
+  }
+  const valueAxis = {
+    type: 'value',
+    axisLabel: { fontSize: 11, color: C.muted },
+    splitLine: { lineStyle: { color: C.grid } },
+  }
+  const axis = { type: 'category', data: dates, ...axisStyle }
+  const tooltip = {
+    trigger: 'axis',
+    backgroundColor: C.tooltipBg,
+    borderColor: C.tooltipBorder,
+    borderWidth: 1,
+    padding: [6, 10],
+    textStyle: { color: C.tooltipText, fontSize: 12, fontFamily: C.font },
+    extraCssText: 'box-shadow: var(--shadow-pop); border-radius: var(--radius-sm);',
+  }
+  const legend = { top: 0, textStyle: { fontSize: 12, color: C.text, fontFamily: C.font } }
+  const base = { textStyle: { color: C.text, fontFamily: C.font } }
 
   if (tokensChartEl.value) {
     tokensChart = tokensChart || echarts.init(tokensChartEl.value)
@@ -293,10 +296,11 @@ function renderCharts() {
           ...tooltip,
           valueFormatter: (v) => (v == null ? '-' : `${fmtTokens(v)} tokens`),
         },
-        legend: { top: 0, textStyle: { fontSize: 12 } },
+        ...base,
+        legend,
         grid: { left: 8, right: 8, top: 32, bottom: 4, containLabel: true },
         xAxis: axis,
-        yAxis: { type: 'value', axisLabel: { formatter: (v) => fmtTokens(v) } },
+        yAxis: { ...valueAxis, axisLabel: { ...valueAxis.axisLabel, formatter: (v) => fmtTokens(v) } },
         series: [
           {
             name: '输入 tokens',
@@ -329,17 +333,18 @@ function renderCharts() {
     costChart = costChart || echarts.init(costChartEl.value)
     costChart.setOption(
       {
-        tooltip: { trigger: 'axis' },
-        legend: { top: 0, textStyle: { fontSize: 12 } },
+        ...base,
+        tooltip,
+        legend,
         grid: { left: 8, right: 8, top: 32, bottom: 4, containLabel: true },
         xAxis: axis,
         yAxis: [
-          { type: 'value', name: '成本 ¥', nameTextStyle: { fontSize: 11 } },
+          { ...valueAxis, name: '成本 ¥', nameTextStyle: { fontSize: 11, color: C.muted } },
           {
-            type: 'value',
+            ...valueAxis,
             name: '命中率 %',
             max: 100,
-            nameTextStyle: { fontSize: 11 },
+            nameTextStyle: { fontSize: 11, color: C.muted },
           },
           { type: 'value', show: false },
         ],
@@ -383,73 +388,12 @@ function onResize() {
   costChart?.resize()
 }
 
-// 分阶段耗时的展示顺序与中文名（token_usage.timings，旧数据无此字段则不显示）
-const TIMING_LABELS = [
-  ['first_token_ms', '首 Token（TTFT）'],
-  ['prepare_ms', '准备（记忆/规划）'],
-  ['dispatch_ms', '子任务分派'],
-  ['subagent_ms', '子代理执行'],
-  ['merge_ms', '结果合并'],
-  ['agent_ms', '模型生成'],
-  ['tools_ms', '工具执行'],
-  ['finalize_ms', '收尾落库'],
-]
+// 布局变体/字体切换后容器可能已变尺寸：setOption 完成再量一次
+watch(
+  () => [runsView.value, document.documentElement.dataset.font],
+  () => nextTick(() => onResize()),
+)
 
-const detailTimings = computed(() => detail.value?.token_usage?.timings || null)
-
-// Token 用量 + 主循环缓存命中率（token_usage 顶层字段）
-const detailUsage = computed(() => {
-  const usage = detail.value?.token_usage
-  if (!usage || typeof usage !== 'object') return null
-  const hit = usage.cache_hit_tokens ?? 0
-  const miss = usage.cache_miss_tokens ?? 0
-  return {
-    llm_calls: usage.llm_calls,
-    prompt_tokens: usage.prompt_tokens,
-    completion_tokens: usage.completion_tokens,
-    cache_hit_tokens: usage.cache_hit_tokens,
-    cache_miss_tokens: usage.cache_miss_tokens,
-    aux_llm_calls: usage.aux_llm_calls,
-    aux_prompt_tokens: usage.aux_prompt_tokens,
-    aux_completion_tokens: usage.aux_completion_tokens,
-    // 缓存命中率 = 命中/(命中+未命中)，无缓存数据时 null
-    cache_hit_rate: hit + miss > 0 ? hit / (hit + miss) : null,
-  }
-})
-
-// 末次 LLM 调用的缓存详情（last_call.input_token_details.cache_read）
-const lastCallCache = computed(() => {
-  const last = detail.value?.token_usage?.last_call
-  if (!last || typeof last !== 'object') return null
-  const details = last.input_token_details
-  const read =
-    details?.cache_read ??
-    last.prompt_cache_hit_tokens ??
-    last.prompt_tokens_details?.cached_tokens
-  if (read == null) return null
-  return {
-    read,
-    total: last.input_tokens ?? last.prompt_tokens ?? 0,
-  }
-})
-
-const detailTimingItems = computed(() => {
-  const timings = detailTimings.value
-  if (!timings || !detail.value) return []
-  const total = Math.max(1, detail.value.latency_ms || 0)
-  const items = []
-  for (const [key, label] of TIMING_LABELS) {
-    const value = timings[key]
-    if (value == null) continue
-    items.push({
-      key,
-      label,
-      value,
-      pct: `${Math.min(100, Math.round((value / total) * 100))}%`,
-    })
-  }
-  return items
-})
 
 function formatMs(ms) {
   if (ms == null) return '-'
@@ -458,14 +402,20 @@ function formatMs(ms) {
 }
 
 async function loadStats() {
-  if (!stats.value) return // 首次加载由 load() 统一拉取（含运行列表）
+  // 不因 stats 为空而跳过：首次拉取失败后统计卡不渲染，再也不能从
+  // 时间筛选里重试（只有整页刷新才能恢复）。
+  const seq = ++statsSeq
   try {
     const runStats = await getRunStats(7, period.value)
+    // 连点筛选时先发的请求可能后到：晚到的旧响应既不能覆盖 stats，
+    // 也不能再触发一次 setOption（那会用旧区间把新图表盖掉）
+    if (seq !== statsSeq) return
     stats.value = runStats
     lastLoadedAt = Date.now()
     await nextTick()
     renderCharts()
   } catch (error) {
+    if (seq !== statsSeq) return
     ElMessage.error(error.response?.data?.detail || '统计加载失败')
   }
 }
@@ -479,7 +429,8 @@ async function fetchAll({ silent = false } = {}) {
       getRunStats(7, period.value).catch(() => null),
     ])
     runs.value = runList
-    stats.value = runStats
+    // 统计拉取失败（runStats=null）保留上次数据，别把统计卡整块撤掉
+    if (runStats) stats.value = runStats
     const map = {}
     for (const c of convList || []) {
       map[c.id] = c.title || `会话 ${c.id}`
@@ -510,16 +461,14 @@ function convLabel(row) {
   return convTitles.value[id] || `会话 ${id}`
 }
 
-async function showDetail(row) {
-  detail.value = row
+const detailConvTitle = computed(() => {
+  const row = runs.value.find((r) => r.id === detailId.value)
+  return row ? convLabel(row) : ''
+})
+
+function openReplay(row) {
+  detailId.value = row.id
   detailVisible.value = true
-  traceJson.value = ''
-  try {
-    const trace = await getRunTrace(row.id)
-    traceJson.value = JSON.stringify(trace, null, 2)
-  } catch {
-    traceJson.value = '（trace 不可用）'
-  }
 }
 
 onMounted(() => {
@@ -543,6 +492,8 @@ onActivated(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
   themeObserver?.disconnect()
+  chartObserver?.disconnect()
+  chartObserver = null
   tokensChart?.dispose()
   costChart?.dispose()
   tokensChart = null
@@ -591,10 +542,11 @@ onBeforeUnmount(() => {
 }
 
 .stat-main {
+  /* 跟主色走：以前写死品牌蓝 rgba(64,158,255)，换风格后这块高亮会留在蓝调上 */
   background: linear-gradient(
     135deg,
-    rgba(64, 158, 255, 0.12),
-    rgba(64, 158, 255, 0.03)
+    color-mix(in srgb, var(--primary) 12%, transparent),
+    color-mix(in srgb, var(--primary) 3%, transparent)
   );
 }
 
@@ -651,181 +603,6 @@ onBeforeUnmount(() => {
   color: var(--text-1);
 }
 
-.detail-body {
-  max-height: 60vh;
-  overflow-y: auto;
-}
 
-/* 分阶段耗时：名称 + 占比条 + 数值 */
-.detail-timings {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  margin-bottom: 12px;
-}
-
-/* Token 用量卡片网格 */
-.usage-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 10px;
-  margin-bottom: 8px;
-}
-
-.usage-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  background: var(--bg-hover);
-  border-radius: var(--radius-md);
-  padding: 8px 12px;
-}
-
-.usage-value {
-  font-size: var(--font-lg);
-  font-weight: 600;
-  color: var(--text-1);
-  font-variant-numeric: tabular-nums;
-}
-
-.usage-label {
-  font-size: var(--font-xs);
-  color: var(--text-3);
-}
-
-.usage-sub {
-  font-size: var(--font-xs);
-  color: var(--text-3);
-  margin-top: 4px;
-}
-
-.timing-row {
-  display: grid;
-  grid-template-columns: 130px 1fr 64px 40px;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--font-xs);
-}
-
-.timing-name {
-  color: var(--text-3);
-}
-
-.timing-bar {
-  height: 6px;
-  border-radius: var(--radius-xs);
-  background: rgba(128, 128, 128, 0.12);
-  overflow: hidden;
-}
-
-.timing-bar i {
-  display: block;
-  height: 100%;
-  border-radius: var(--radius-xs);
-  background: linear-gradient(90deg, var(--primary), var(--success));
-}
-
-.timing-value {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-2);
-}
-
-.timing-pct {
-  text-align: right;
-  color: var(--text-3);
-  font-size: var(--font-2xs);
-}
-
-.detail-label {
-  font-size: var(--font-sm);
-  font-weight: 600;
-  color: var(--text-3);
-  margin: 12px 0 6px;
-}
-
-.detail-text {
-  font-size: var(--font-base);
-  color: var(--text-1);
-  line-height: 1.7;
-}
-
-.detail-steps {
-  margin: 0;
-  padding-left: 20px;
-}
-
-.detail-steps li {
-  font-size: var(--font-sm);
-  color: var(--text-2);
-  line-height: 1.8;
-}
-
-.detail-error {
-  font-size: var(--font-sm);
-  color: var(--danger);
-  background: var(--danger-bg);
-  border: 1px solid var(--danger-border);
-  border-radius: var(--radius-sm);
-  padding: 8px 12px;
-}
-
-.detail-empty {
-  font-size: var(--font-sm);
-  color: var(--text-3);
-  padding: 6px 0;
-}
-
-.detail-tool {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  margin-bottom: 6px;
-  font-size: var(--font-sm);
-}
-
-.dt-step {
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  background: var(--bg-active);
-  color: var(--primary);
-  font-weight: 600;
-  font-size: var(--font-2xs);
-}
-
-.dt-name {
-  font-weight: 600;
-  color: var(--text-1);
-  flex-shrink: 0;
-}
-
-.dt-summary {
-  flex: 1;
-  min-width: 0;
-  color: var(--text-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.dt-dur {
-  flex-shrink: 0;
-  color: var(--text-3);
-  font-size: var(--font-xs);
-}
-
-.trace-textarea :deep(.el-textarea__inner) {
-  font-family: Consolas, Monaco, monospace;
-  font-size: var(--font-xs);
-  line-height: 1.6;
-}
 /* 入场动效由路由过渡统一提供（App.vue 的 page 过渡），避免双重动画 */
 </style>

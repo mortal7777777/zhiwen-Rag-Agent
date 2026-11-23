@@ -30,7 +30,12 @@
           </div>
         </div>
       </aside>
-      <div class="dv-main" :class="{ 'no-toc': !toc.length || tocCollapsed }">
+      <div
+        class="dv-main"
+        :class="{ 'no-toc': !toc.length || tocCollapsed }"
+        @mouseup="captureSelection"
+        @keyup="captureSelection"
+      >
         <el-icon
           v-if="toc.length && tocCollapsed"
           class="dv-toc-expand"
@@ -49,7 +54,20 @@
           @error="onError"
           @position="onPosition"
           @active-change="onActiveChange"
+          @selection="onEpubSelection"
         />
+        <!-- 划选操作条：解释 / 翻译 / 总结（直接带原文进对话） -->
+        <div v-if="selection.text" class="dv-selection-bar">
+          <span class="dv-selection-preview">{{ selectionPreview }}</span>
+          <el-button size="small" type="primary" @click="askSelection('explain')">
+            解释
+          </el-button>
+          <el-button size="small" @click="askSelection('translate')">翻译</el-button>
+          <el-button size="small" @click="askSelection('summarize')">总结</el-button>
+          <el-icon class="dv-selection-close" title="取消" @click="clearSelection">
+            <Close />
+          </el-icon>
+        </div>
       </div>
     </div>
   </el-drawer>
@@ -62,7 +80,7 @@
 // - 定位优先级：引用定位（page/anchorText）→ 上次记住的位置；
 // - 位置记忆按相对路径存 localStorage，文档 mtime 变化即失效。
 import { computed, defineAsyncComponent, nextTick, ref } from 'vue'
-import { DArrowLeft, List } from '@element-plus/icons-vue'
+import { Close, DArrowLeft, List } from '@element-plus/icons-vue'
 import { getDocumentFileUrl, listDocuments } from '../api'
 import TextViewer from './viewer/TextViewer.vue'
 import { createPositionSaver, loadPosition } from './viewer/positionMemory'
@@ -71,6 +89,8 @@ import { createPositionSaver, loadPosition } from './viewer/positionMemory'
 const DocxViewer = defineAsyncComponent(() => import('./viewer/DocxViewer.vue'))
 const EpubViewer = defineAsyncComponent(() => import('./viewer/EpubViewer.vue'))
 const PdfViewer = defineAsyncComponent(() => import('./viewer/PdfViewer.vue'))
+
+const emit = defineEmits(['ask-selection'])
 
 const visible = ref(false)
 const relativePath = ref('')
@@ -81,6 +101,62 @@ const tocCollapsed = ref(false)
 const viewerRef = ref(null)
 const activeId = ref('')
 const activeInfo = ref(null)
+const selection = ref({ text: '', context: '', page: null })
+const selectionPreview = computed(() => {
+  const text = String(selection.value.text || '').replace(/\s+/g, ' ').trim()
+  return text.length > 90 ? `${text.slice(0, 90)}…` : text
+})
+
+/** DOM 查看器（文本/DOCX/PDF 文本层）的选区：取原文 + 所在段落 + 页码 */
+function captureSelection(event) {
+  if (event?.target?.closest?.('.dv-selection-bar')) return
+  const sel = window.getSelection()
+  const text = sel?.toString().trim() || ''
+  if (text.length < 2) return
+  const anchor = sel.anchorNode
+  const el = anchor?.nodeType === 3 ? anchor.parentElement : anchor
+  if (!el?.closest) return
+  const pageEl = el.closest('.pv-page')
+  const page = pageEl ? Number(pageEl.dataset.page) : null
+  let context = text
+  if (!pageEl) {
+    // 文本/DOCX：取最近块级容器的完整段落，帮助模型解决指代
+    const block = el.closest(
+      'p, li, blockquote, pre, h1, h2, h3, h4, h5, h6, .doc-section',
+    )
+    context = String(block?.innerText || text).trim().slice(0, 1500)
+  }
+  selection.value = { text: text.slice(0, 4000), context, page }
+}
+
+/** EPUB 在 iframe 内渲染，父页面拿不到选区，由 EpubViewer 转发 */
+function onEpubSelection(payload) {
+  if (!payload?.text) return
+  selection.value = {
+    text: String(payload.text).slice(0, 4000),
+    context: String(payload.context || payload.text).slice(0, 1500),
+    page: null,
+  }
+}
+
+function askSelection(intent) {
+  if (!selection.value.text) return
+  emit('ask-selection', {
+    ...selection.value,
+    source: relativePath.value,
+    intent,
+  })
+  clearSelection()
+}
+
+function clearSelection() {
+  selection.value = { text: '', context: '', page: null }
+  try {
+    window.getSelection()?.removeAllRanges()
+  } catch {
+    /* ignore */
+  }
+}
 
 let saver = null
 let mtimeWaiter = null
@@ -127,6 +203,7 @@ async function fetchMtime(path) {
 function open(path, loc = null) {
   relativePath.value = path
   locator.value = loc || null
+  clearSelection()
   toc.value = []
   activeId.value = ''
   activeInfo.value = null
@@ -195,9 +272,14 @@ function jumpTo(entry) {
 
 function onClosed() {
   saver?.flush()
+  clearSelection()
 }
 
-defineExpose({ open })
+function close() {
+  visible.value = false
+}
+
+defineExpose({ open, close })
 </script>
 
 <style scoped>
@@ -292,6 +374,41 @@ html.dark .dv-main {
   background: var(--bg-card);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-soft, 0 2px 10px rgba(31, 35, 41, 0.05));
+}
+
+.dv-selection-bar {
+  position: absolute;
+  right: 16px;
+  top: 12px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(680px, calc(100% - 32px));
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-soft, 0 2px 10px rgba(31, 35, 41, 0.05));
+}
+
+.dv-selection-preview {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-xs);
+  color: var(--text-3);
+}
+
+.dv-selection-close {
+  flex-shrink: 0;
+  cursor: pointer;
+  color: var(--text-3);
+}
+
+.dv-selection-close:hover {
+  color: var(--danger-text);
 }
 </style>
 

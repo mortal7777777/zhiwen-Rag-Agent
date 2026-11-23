@@ -1,5 +1,5 @@
 /**
- * useAgentStream 的事件序列断言（无浏览器、无后端，Node 直接跑）。
+ * useStreamHandlers 的事件序列断言（无浏览器、无后端，Node 直接跑）。
  *
  * 用法：npm run check:stream   （CI 的 frontend job 与 pre-commit 都会跑）
  *
@@ -9,7 +9,7 @@
  *      这正是拆分前埋在 4000 行视图里、无法单测的那部分逻辑。
  */
 import { ref } from 'vue'
-import { createStreamHandlers } from '../src/composables/useAgentStream.js'
+import { createStreamHandlers } from '../src/composables/useStreamHandlers.js'
 
 // onReasoningDelta 内部走 nextTick + querySelectorAll 做思考链自动滚动；Node 下给个空实现
 globalThis.document = { querySelectorAll: () => [] }
@@ -34,7 +34,6 @@ function makeHarness() {
   const state = {
     activeId: ref(null),
     currentTitle: ref(''),
-    currentTool: ref(''),
     pendingText: ref(''),
     streamMsg: {
       tool_trace: [],
@@ -49,15 +48,19 @@ function makeHarness() {
   }
   const actions = {}
   for (const name of [
+    'clearActivity',
+    'setActivity',
     'closeThinkingSegment',
     'dropStreamedRound',
     'flushTypewriter',
     'focusPermissionCard',
     'focusPlanCard',
+    'focusQuestionCard',
     'pushSuspendedCards',
     'scrollToBottom',
     'startTypewriter',
     'upsertSession',
+    'onAnswerComplete',
   ]) {
     actions[name] = (...args) => calls.push([name, ...args])
   }
@@ -84,7 +87,7 @@ function makeHarness() {
   return { handlers, state, live, calls, called }
 }
 
-console.log('useAgentStream 事件序列检查')
+console.log('useStreamHandlers 事件序列检查')
 
 // 1) session
 {
@@ -93,6 +96,50 @@ console.log('useAgentStream 事件序列检查')
   check('onSession 设置 activeId', h.state.activeId.value === 42)
   check('onSession 设置标题', h.state.currentTitle.value === '新标题')
   check('onSession 通知会话列表', h.called('upsertSession'))
+}
+
+// 1b) title：按事件里的会话号更新；旧流不能给当前会话改名
+{
+  const h = makeHarness()
+  h.state.activeId.value = 8
+  h.state.currentTitle.value = '当前会话'
+  h.handlers.onTitle({ conversation_id: 7, title: '旧会话标题' })
+  check('title 按会话号更新侧栏', h.calls.some((c) => c[0] === 'upsertSession' && c[1].conversation_id === 7))
+  check('title 不覆盖当前会话标题', h.state.currentTitle.value === '当前会话')
+  h.handlers.onTitle({ conversation_id: 8, title: '当前会话新标题' })
+  check('title 命中当前会话才更新头部', h.state.currentTitle.value === '当前会话新标题')
+}
+
+// 1c) 运行状态相位：后端 status / tool_start / 完成时清理
+{
+  const h = makeHarness()
+  h.handlers.onStatus({ phase: 'thinking', text: '正在思考并生成回答…' })
+  check(
+    'status 设置 thinking 相位',
+    h.calls.some((c) => c[0] === 'setActivity' && c[1] === 'thinking'),
+  )
+  h.handlers.onToolStart({ name: 'knowledge_base_search', arguments: {} })
+  check(
+    'tool_start 切到 tool 相位并带工具名',
+    h.calls.some(
+      (c) =>
+        c[0] === 'setActivity' &&
+        c[1] === 'tool' &&
+        String(c[2]).includes('knowledge_base_search'),
+    ),
+  )
+  h.handlers.onPlanProgress({ done: 2, total: 5, current: '核对引用' })
+  check(
+    'plan_progress 显示当前步骤',
+    h.calls.some(
+      (c) =>
+        c[0] === 'setActivity' &&
+        c[1] === 'plan' &&
+        String(c[2]).includes('第 2/5 步'),
+    ),
+  )
+  h.handlers.onDone({ sources: [] })
+  check('done 清理状态条', h.called('clearActivity'))
 }
 
 // 2) 正文增量：pendingText/streamedLen 累加 + 启动打字机
@@ -125,12 +172,41 @@ console.log('useAgentStream 事件序列检查')
   check('keep=false 触发挥手', h.called('dropStreamedRound'))
 }
 
+// 4b) 工具轮过渡说明：正文撤回，但归档到「过程说明」
+{
+  const h = makeHarness()
+  h.handlers.onStreamDelta('我先查一下资料')
+  h.handlers.onStreamEnd({ keep: false, reason: 'tool_round' })
+  const seg = h.state.streamMsg.tool_trace.find((t) => t.kind === 'process')
+  check('工具轮过渡说明归档', !!seg && seg.text === '我先查一下资料')
+  check('工具轮仍撤回正文', h.called('dropStreamedRound'))
+}
+
+// 4c) 停止/报错：直接撤回，不归档
+{
+  const h = makeHarness()
+  h.handlers.onStreamDelta('半截回答')
+  h.handlers.onStreamEnd({ keep: false, reason: 'stopped' })
+  check(
+    '停止生成不归档过程说明',
+    !h.state.streamMsg.tool_trace.some((t) => t.kind === 'process'),
+  )
+}
+
 // 5) 工具轨迹：tool_start 建条目、tool_result 回填摘要与来源
 {
   const h = makeHarness()
   h.handlers.onToolStart({ name: 'knowledge_base_search', arguments: { query: 'x' } })
   check('tool_start 写入轨迹', h.state.streamMsg.tool_trace.length === 1)
-  check('tool_start 更新状态条', h.state.currentTool.value === '工具:knowledge_base_search…')
+  check(
+    'tool_start 更新状态条',
+    h.calls.some(
+      (c) =>
+        c[0] === 'setActivity' &&
+        c[1] === 'tool' &&
+        c[2] === '工具:knowledge_base_search…',
+    ),
+  )
   h.handlers.onToolResult({
     name: 'knowledge_base_search',
     summary: '检索到 2 条',
@@ -141,11 +217,60 @@ console.log('useAgentStream 事件序列检查')
   check('tool_result 回填摘要', entry.summary === '检索到 2 条')
   check('tool_result 回填详情', entry.detail === '详情')
   check('tool_result 追加来源', h.state.streamMsg.sources.length === 1)
-  check('tool_result 后状态条连续', h.state.currentTool.value === '继续思考…')
+  check(
+    'tool_result 后状态条连续',
+    h.calls.some(
+      (c) => c[0] === 'setActivity' && c[1] === 'thinking' && c[2] === '继续思考…',
+    ),
+  )
 
   // 旧版子代理事件会把编号数组塞进 sources：必须过滤，不能渲染成空卡片
   h.handlers.onToolResult({ name: 'subagent', summary: 'x', sources: [2, 3] })
   check('tool_result 过滤非来源对象', h.state.streamMsg.sources.length === 1)
+}
+
+// 5b) 子代理观测：start/progress/result 落到 tool_start 建好的同一张卡片
+{
+  const h = makeHarness()
+  h.handlers.onToolStart({
+    id: 'subtask_c1_0',
+    name: 'subagent',
+    arguments: { task: '调研 A', mode: 'explore', subtask_id: 'subtask_c1_0' },
+  })
+  h.handlers.onSubagentStart({
+    subtask_id: 'subtask_c1_0',
+    mode: 'explore',
+    max_rounds: 3,
+    model: 'fast',
+  })
+  const entry = h.state.streamMsg.tool_trace[0]
+  check(
+    'subagent_start 复用 tool_start 卡片',
+    h.state.streamMsg.tool_trace.length === 1 && entry.maxRounds === 3 && entry.model === 'fast',
+  )
+  h.handlers.onSubagentProgress({ subtask_id: 'subtask_c1_0', phase: 'round', round: 2 })
+  h.handlers.onSubagentProgress({
+    subtask_id: 'subtask_c1_0',
+    phase: 'tool',
+    tool: 'grep_search',
+    hint: 'grep_search(pattern="x")',
+  })
+  check(
+    'subagent_progress 更新轮次与当前工具',
+    entry.rounds === 2 && entry.currentTool === 'grep_search' && entry.currentHint.includes('grep_search'),
+  )
+  h.handlers.onSubagentResult({
+    subtask_id: 'subtask_c1_0',
+    status: 'cancelled',
+    tokens: { total_tokens: 12 },
+    duration_ms: 50,
+  })
+  check(
+    'subagent_result 写取消终态与 tokens',
+    entry.status === 'cancelled' && entry.cancelled === true && entry.tokens.total_tokens === 12,
+  )
+  h.handlers.onToolResult({ id: 'subtask_c1_0', name: 'subagent', summary: '已取消' })
+  check('tool_result 不覆盖取消终态', entry.status === 'cancelled')
 }
 
 // 6) 思考链增量按段聚合
@@ -189,6 +314,25 @@ console.log('useAgentStream 事件序列检查')
   check('聚焦计划卡', h.called('focusPlanCard'))
 }
 
+// 9b) 挂起（带提问）：生成问答卡，答案由父组件经 /agent/resume 提交
+{
+  const h = makeHarness()
+  h.handlers.onSuspended({
+    conversation_id: 7,
+    ops: [],
+    questions: [
+      {
+        call_id: 'q1',
+        questions: [{ question: '选哪个方案？', options: [ { label: 'A' }, { label: 'B' } ] }],
+      },
+    ],
+  })
+  check('问答卡写入提问', h.state.streamMsg.questionRequest?.requests?.length === 1)
+  check('问答卡标记等待回答', h.live.suspended.questionPending === true)
+  check('用问答卡时聚焦提问卡', h.called('focusQuestionCard'))
+  check('用问答卡时不抢审批卡焦点', !h.called('focusPermissionCard'))
+}
+
 // 10) done：收尾（切完整渲染 + 空回答兜底）
 {
   const h = makeHarness()
@@ -196,6 +340,7 @@ console.log('useAgentStream 事件序列检查')
   check('done 结束流式态', h.state.streamMsg._streaming === false)
   check('done 冲刷打字机', h.called('flushTypewriter'))
   check('done 空回答兜底', h.state.streamMsg.content === '（未生成回答内容）')
+  check('done 触发下一步建议加载', h.called('onAnswerComplete'))
 }
 
 // 10b) done 带 sources：用后端去重结果覆盖增量拼接

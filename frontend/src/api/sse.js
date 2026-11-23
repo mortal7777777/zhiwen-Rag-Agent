@@ -1,5 +1,7 @@
 /** Agent SSE 传输层：帧解析 + 统一的流式请求封装（三个流式入口共用）。 */
 
+import { apiTokenHeaders, ensureApiToken } from './client.js'
+import { desktopShell } from '../utils/desktopShell.js'
 
 /** 消费一条 Agent SSE 响应体（/agent/stream 与 /agent/resume 事件协议一致）。
  *
@@ -47,6 +49,15 @@ export async function consumeAgentStream(response, handlers = {}) {
         handlers.onToolStart(data)
       } else if (event === 'tool_result' && handlers.onToolResult) {
         handlers.onToolResult(data)
+      } else if (event === 'subagent_start' && handlers.onSubagentStart) {
+        // 并行子代理分支真正开始执行（tool_start 只建占位卡）
+        handlers.onSubagentStart(data)
+      } else if (event === 'subagent_progress' && handlers.onSubagentProgress) {
+        // 分支进度：当前轮次 / 正在调用的工具（卡片实时更新）
+        handlers.onSubagentProgress(data)
+      } else if (event === 'subagent_result' && handlers.onSubagentResult) {
+        // 分支收尾：状态（done/error/cancelled）/轮数/耗时/tokens
+        handlers.onSubagentResult(data)
       } else if (event === 'run_suspended' && handlers.onSuspended) {
         // 敏感操作挂起：本条流到此结束（后端等待决定），前端收齐决定后走 resume
         handlers.onSuspended(data)
@@ -66,7 +77,10 @@ export async function consumeAgentStream(response, handlers = {}) {
       } else if (event === 'done' && handlers.onDone) {
         handlers.onDone(data)
       } else if (event === 'error') {
-        throw new Error(data?.message || data)
+        const err = new Error(data?.message || '请求失败')
+        // 结构化错误码（会话闸门类，如 conversation_busy）：调用方按码恢复 UI
+        if (data?.code) err.code = data.code
+        throw err
       }
     }
   }
@@ -79,15 +93,42 @@ export async function consumeAgentStream(response, handlers = {}) {
  * fetch + 错误解析（此前是三份近似重复的代码，改错误提示要改三处）。
  */
 export async function streamRequest(url, payload = {}, handlers = {}, options = {}) {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload ?? {}),
-    signal: options.signal,
-  })
+  const doFetch = () =>
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...apiTokenHeaders() },
+      body: JSON.stringify(payload ?? {}),
+      signal: options.signal,
+    })
+  let response = await doFetch()
+  // 全局 API Token 401（后端启用 ZHIWEN_API_TOKEN）：弹窗索取后重试一次
+  if (
+    response.status === 401 &&
+    response.headers?.get?.('x-zhiwen-unauthorized') === 'api-token' &&
+    !options._tokenRetried
+  ) {
+    try {
+      await ensureApiToken()
+    } catch {
+      // 用户取消：按 401 报错走统一错误分支
+    }
+    options._tokenRetried = true
+    response = await doFetch()
+  }
   if (!response.ok || !response.body) {
     const detail = await response.json().catch(() => null)
-    throw new Error(detail?.detail || `HTTP ${response.status}，请确认后端已启动`)
+    const err = new Error(detail?.detail || `HTTP ${response.status}，请确认后端已启动`)
+    // 后端会话闸门（409）带 X-Zhiwen-Code（pending_approval / run_interrupted /
+    // conversation_busy…）：调用方按码恢复挂起卡/中断条，不再匹配中文文案
+    const code = response.headers?.get?.('x-zhiwen-code')
+    if (code) err.code = code
+    throw err
   }
-  return consumeAgentStream(response, handlers)
+  // 桌面端运行态：任务栏进度 + 阻止显示器休眠（浏览器/Node 环境自动 no-op）
+  desktopShell.setBusy(true)
+  try {
+    return await consumeAgentStream(response, handlers)
+  } finally {
+    desktopShell.setBusy(false)
+  }
 }

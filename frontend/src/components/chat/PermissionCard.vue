@@ -13,6 +13,13 @@
         </div>
         <div class="permission-body">
           <div class="permission-summary">{{ p.summary }}</div>
+          <div v-if="p.risk === 'high'" class="perm-risk">
+            <el-icon :size="13"><WarningFilled /></el-icon>
+            <span class="perm-risk-text">
+              高危命令：{{ p.risk_reason || '可能造成不可逆破坏' }}
+            </span>
+            <span class="perm-risk-note">每次执行都需确认，不能记住</span>
+          </div>
           <div
             v-if="p.tool === 'edit_file' && p.args?.diff_lines?.length"
             class="perm-diff"
@@ -49,10 +56,9 @@
         <div class="permission-actions">
           <el-input
             v-model="p.reason"
-            placeholder="备注（可选）"
+            placeholder="备注（可选；回车不会提交）"
             size="small"
             class="permission-reason"
-            @keyup.enter="emit('decide', p, p._focusIndex ?? 0)"
           />
           <div class="permission-opts" tabindex="0">
             <button
@@ -84,7 +90,7 @@
               <span class="perm-num">3</span>批准并记住
             </button>
           </div>
-          <span class="perm-key-hint">↑↓ 切换 · Enter 确认 · Esc 返回输入</span>
+          <span class="perm-key-hint">数字键 / Enter 确认 · ↑↓ 切换 · Esc 返回输入</span>
         </div>
       </div>
       <!-- 处理后折叠为一行状态条，不占空间 -->
@@ -124,12 +130,12 @@
  * - `p.reason` / `p._focusIndex` **原地写回**：父组件的键盘处理与提交逻辑读同一份对象；
  * - `data-perm-id` 保留在每张卡的外层包装 div 上、`.permission-opts` 保持可聚焦：
  *   父组件的全局键盘（数字键 / ↑↓ / Enter / Esc）靠这两个选择器定位卡片；
- * - `toolName` 由父组件注入（与 useAgentStream 的 actions 同一函数）。
+ * - `toolName` 由父组件注入（与 useStreamHandlers 的 actions 同一函数）。
  *
  * 样式 `.permission-*` / `.perm-*` / `.prc-*` 及挂起条随组件走（scoped）；
  * 父组件的「中断未跑完」条保留一份 `.suspension-bar` 基样式复用。
  */
-import { CircleCheck, Close, Lock } from '@element-plus/icons-vue'
+import { CircleCheck, Close, Lock, WarningFilled } from '@element-plus/icons-vue'
 
 defineProps({
   permissions: { type: Array, required: true },
@@ -233,13 +239,37 @@ const emit = defineEmits(['decide', 'stop'])
   line-height: 1.5;
 }
 
+/* 高危命令：独立于权限模式的强制确认提示 */
+.perm-risk {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--danger-border);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--danger-text);
+  font-size: var(--font-xs);
+  line-height: 1.5;
+}
+
+.perm-risk-text {
+  font-weight: 600;
+}
+
+.perm-risk-note {
+  color: var(--text-3);
+}
+
 .permission-args {
   margin: 8px 0 0;
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: var(--bg-card-3, rgba(128, 128, 128, 0.07));
   border: 1px solid var(--border);
-  font-family: 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: var(--font-xs);
   line-height: 1.5;
   color: var(--text-2);
@@ -271,7 +301,7 @@ const emit = defineEmits(['decide', 'stop'])
   display: flex;
   gap: 8px;
   padding: 6px 10px;
-  font-family: 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: var(--font-xs);
   line-height: 1.5;
   white-space: pre-wrap;

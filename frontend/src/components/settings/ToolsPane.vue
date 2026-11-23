@@ -5,7 +5,14 @@
       <div class="pane-sub">受控执行 · 子代理与派发 · 计划模式 · 写后验证 · MCP</div>
     </div>
 
-    <div class="settings-section">
+    <SettingsSubnav
+      v-model="activeToolTab"
+      :tabs="toolTabs"
+      storage-key="rag_tool_settings_tab"
+      label="工具设置分组"
+    />
+
+    <div class="settings-section" v-show="activeToolTab === 'execution'">
       <div class="section-head">
         <span class="settings-label">受控执行工具</span>
         <el-switch v-model="toolsForm.advanced_tools_enabled" size="small" />
@@ -84,7 +91,7 @@
       </div>
     </div>
 
-    <div class="settings-section">
+    <div class="settings-section" v-show="activeToolTab === 'budget'">
       <div class="section-head">
         <span class="settings-label">预算与稳定性</span>
       </div>
@@ -128,7 +135,7 @@
       </div>
     </div>
 
-    <div class="settings-section">
+    <div class="settings-section" v-show="activeToolTab === 'mcp'">
       <div class="section-head">
         <span class="settings-label">MCP 服务器</span>
         <el-switch v-model="toolsForm.mcp_enabled" size="small" />
@@ -136,14 +143,18 @@
           <el-icon :size="13"><Plus /></el-icon>
           添加服务器
         </el-button>
-        <el-button size="small" text @click="loadMcp()">
-          <el-icon :size="14"><Refresh /></el-icon>
-          刷新
-        </el-button>
-        <el-button size="small" text @click="connectMcp(null)">
-          <el-icon :size="14"><VideoPlay /></el-icon>
-          全部启动
-        </el-button>
+        <el-dropdown trigger="click" @command="onMcpMenu">
+          <el-button size="small" text>
+            更多
+            <el-icon class="el-icon--right" :size="12"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="refresh">刷新列表</el-dropdown-item>
+              <el-dropdown-item command="connect-all">全部启动</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </div>
       <div class="provider-hint">
         MCP 工具会自动注册为 Agent 可用工具（stdio 本地进程 / HTTP 远程）。
@@ -157,7 +168,7 @@
           <el-tag size="small" effect="plain" :type="s.type === 'http' ? 'success' : 'primary'">
             {{ s.type === 'http' ? 'HTTP' : 'stdio' }}
           </el-tag>
-          <el-tooltip :content="mcpBadge(s).title || ' '" placement="top">
+          <el-tooltip :show-after="1000" :content="mcpBadge(s).title || ' '" placement="top" :hide-after="800">
             <span :class="['mcp-badge', mcpBadge(s).tone]">{{ mcpBadge(s).text }}</span>
           </el-tooltip>
           <span class="provider-flex"></span>
@@ -192,7 +203,7 @@
       </div>
     </div>
 
-    <div class="settings-section">
+    <div class="settings-section" v-show="activeToolTab === 'execution'">
       <div class="section-head">
         <span class="settings-label">技能沙箱</span>
         <el-switch v-model="toolsForm.skill_sandbox_enabled" size="small" />
@@ -268,9 +279,16 @@
  * 表单域与保存来自 useSettingsForm；MCP 全部状态与操作来自 useMcpServers
  * （App.vue provide，两域经 inject 共用）；MCP 增改对话框随本面板走。
  */
-import { inject } from 'vue'
-import { Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { computed, inject, ref } from 'vue'
+import {
+  ArrowDown,
+  Connection,
+  Odometer,
+  Plus,
+  Tools,
+} from '@element-plus/icons-vue'
 import DirPicker from '../DirPicker.vue'
+import SettingsSubnav from './SettingsSubnav.vue'
 
 const { toolsForm, toolsSaving, saveToolsSettings, testTool } = inject('settingsForm')
 const {
@@ -292,4 +310,23 @@ const {
   connectMcp,
   removeMcp,
 } = inject('settingsMcp')
+
+/** 当前工具设置分组（记忆上次选择由 SettingsSubnav 负责） */
+const activeToolTab = ref('execution')
+
+const toolTabs = computed(() => [
+  { key: 'execution', label: '执行与验证', icon: Tools, badge: '' },
+  { key: 'budget', label: '预算与稳定性', icon: Odometer, badge: '' },
+  {
+    key: 'mcp',
+    label: 'MCP 服务器',
+    icon: Connection,
+    badge: mcpServers.value.length || '',
+  },
+])
+
+function onMcpMenu(command) {
+  if (command === 'refresh') loadMcp()
+  else if (command === 'connect-all') connectMcp(null)
+}
 </script>

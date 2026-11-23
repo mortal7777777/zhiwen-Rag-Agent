@@ -1,8 +1,8 @@
 // 审批卡回归（原生挂起版）：
 // 1) 敏感操作触发 interrupt，本条流收尾并渲染待决定卡片（挂起横幅在）；
-// 2) 焦点不在卡内时数字键也能批准（全局键盘）；
+// 2) 焦点不在卡内时 Enter 也能批准（全局键盘）；
 // 3) 唯一卡片决定后自动经 /agent/resume 开第二条流，续跑写回同一条回答。
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 
@@ -30,7 +30,7 @@ await page.waitForTimeout(2500)
 
 // 触发一次写文件（会挂起并弹审批卡）
 await page.locator('textarea').first().fill(
-  '新建文件 kb_perm_key_test.txt，内容一行：审批卡键盘测试。不要问我确认细节，直接调用工具。',
+  '新建文件 scratch/check_outputs/kb_perm_key_test.txt，内容一行：审批卡键盘测试。不要问我确认细节，直接调用工具。',
 )
 await page.keyboard.press('Enter')
 
@@ -48,13 +48,13 @@ await page.evaluate(() => document.activeElement?.blur?.())
 const activeTag = await page.evaluate(() => document.activeElement?.tagName || 'BODY')
 console.log('当前焦点:', activeTag)
 
-// 数字键 1 = 批准（全局生效，不需要先点卡片）→ 决定收齐后自动提交并续跑
-await page.keyboard.press('1')
+// Enter = 批准（全局生效，不需要先点卡片）→ 决定收齐后自动提交并续跑
+await page.keyboard.press('Enter')
 await page
   .waitForFunction(() => document.querySelectorAll('.permission-card.pending').length === 0, null, {
     timeout: 30000,
   })
-  .then(() => console.log('✅ 数字键批准生效，卡片已收起'))
+  .then(() => console.log('✅ Enter 批准生效，卡片已收起'))
   .catch(() => console.log('✘ 卡片未收起（批准失败或出现新一批审批）'))
 
 // 恢复流续跑：同一条气泡里出现正文（模型汇报执行结果）
@@ -76,4 +76,11 @@ const shot = fileURLToPath(new URL('../scratch/check_outputs/ui_perm_check.png',
 mkdirSync(new URL('../scratch/check_outputs/', import.meta.url), { recursive: true })
 await page.screenshot({ path: shot, fullPage: false })
 await b.close()
+// 清理测试写入的文件（写在工作目录的 scratch/ 下，失败不影响测试结论）
+try {
+  const probe = fileURLToPath(
+    new URL('../scratch/check_outputs/kb_perm_key_test.txt', import.meta.url),
+  )
+  if (existsSync(probe)) unlinkSync(probe)
+} catch {}
 console.log('DONE')

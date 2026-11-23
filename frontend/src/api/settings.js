@@ -47,6 +47,14 @@ export const importProviders = (payload) =>
 export const switchChatProvider = (providerId) =>
   client.post('/settings/switch-chat-provider', { provider_id: providerId }).then((res) => res.data)
 
+/** 聊天页快捷切换敏感操作确认模式（ask / acceptedits / allow） */
+export const switchToolPermissionMode = (mode) =>
+  client.post('/settings/tool-permission-mode', { mode }).then((res) => res.data)
+
+/** 聊天页快捷切换当前对话供应商的思考开关/强度（low/medium/high/max） */
+export const switchChatThinking = (payload) =>
+  client.post('/settings/chat-provider-thinking', payload).then((res) => res.data)
+
 /** 列出本机某个路径下的子目录（设置页目录选择器用；仅本机可访问） */
 export const browseDirs = (path = '') =>
   client.get('/fs/browse', { params: { path }, timeout: 15000 }).then((res) => res.data)

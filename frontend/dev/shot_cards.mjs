@@ -42,6 +42,8 @@ let lightBorder = null
 let darkBorder = null
 let lightPermBg = null
 let darkPermBg = null
+let lightQuestionBg = null
+let darkQuestionBg = null
 let lightThinkBg = null
 let darkThinkBg = null
 let lightSourcesBg = null
@@ -90,6 +92,8 @@ for (const theme of ['light', 'dark']) {
   await page.goto(`${BASE}/dev/preview.html?theme=${theme}`, { waitUntil: 'networkidle' })
   await page.waitForSelector('.plan-approval-box', { timeout: 15000 })
   await page.waitForSelector('.permission-card.pending', { timeout: 15000 })
+  await page.waitForSelector('.question-card', { timeout: 15000 })
+  await page.waitForSelector('.shot-markdown-table table', { timeout: 15000 })
   await page.waitForSelector('.tool-trace', { timeout: 15000 })
   await page.waitForSelector('.sources', { timeout: 15000 })
   await page.waitForSelector('.plan-box', { timeout: 15000 })
@@ -100,12 +104,14 @@ for (const theme of ['light', 'dark']) {
   const steps = await page.locator('.plan-step').count()
   const buttons = await page.locator('.plan-approval-actions button').count()
   const permCards = await page.locator('.permission-card.pending').count()
+  const questionCards = await page.locator('.question-card').count()
+  const questionOpts = await page.locator('.q-opt').count()
   const chips = await page.locator('.permission-resolved-chip').count()
   const thinkBlocks = await page.locator('.think-block').count()
   const toolChips = await page.locator('.tool-chip').count()
   const sourceItems = await page.locator('.source-item').count()
   console.log(
-    `${theme}: 卡片 ${cards} / 步骤 ${steps} / 按钮 ${buttons} / 审批卡 ${permCards} / chip ${chips} / 思考段 ${thinkBlocks} / 工具chip ${toolChips} / 来源 ${sourceItems} / 计划盒 ${planBoxes} / 会话项 ${sessionItems}`,
+    `${theme}: 卡片 ${cards} / 步骤 ${steps} / 按钮 ${buttons} / 审批卡 ${permCards} / 问答卡 ${questionCards}（选项 ${questionOpts}） / chip ${chips} / 思考段 ${thinkBlocks} / 工具chip ${toolChips} / 来源 ${sourceItems} / 计划盒 ${planBoxes} / 会话项 ${sessionItems}`,
   )
 
   // ---- 计算样式断言（组件自有样式 + 父组件 :deep 穿透）----
@@ -139,6 +145,23 @@ for (const theme of ['light', 'dark']) {
       permAdd: pick('.perm-diff-line.add', ['background-color']),
       permChip: pick('.permission-resolved-chip', ['display', 'gap']),
       permBar: pick('.suspension-bar', ['display', 'justify-content', 'border-top-style']),
+      // QuestionCard（ask_user_question 挂起）：样式必须随组件走
+      questionCard: pick('.question-card', ['margin-top', 'border-radius', 'background-color']),
+      questionHead: pick('.question-head', ['display', 'font-weight']),
+      questionBlock: pick('.q-block', ['padding', 'border-radius']),
+      questionOpt: pick('.q-opt', ['display', 'cursor']),
+      questionOptKey: pick('.q-opt-key', ['width', 'height']),
+      questionSkip: pick('.q-skip', ['cursor']),
+      questionActions: pick('.question-actions', ['display', 'gap']),
+      // Markdown 表格：列宽自适应（序号窄、说明宽）+ 长文本换行
+      mdTable: pick('.shot-markdown-table table', ['display', 'table-layout', 'width']),
+      mdTh: pick('.shot-markdown-table th', ['white-space', 'overflow-wrap', 'padding']),
+      mdColWidths: [...document.querySelectorAll('.shot-markdown-table th')].map(
+        (th) => Math.round(th.getBoundingClientRect().width),
+      ),
+      mdCellClipped: [...document.querySelectorAll('.shot-markdown-table td')].some(
+        (td) => td.scrollWidth > td.clientWidth + 1,
+      ),
       // ToolTraceList（从 ChatView 抽出）：思考链 + 工具 chip 自有样式
       trace: pick('.tool-trace', ['display', 'flex-wrap', 'gap', 'margin-top']),
       thinkHead: pick('.think-head', ['display', 'cursor', 'user-select']),
@@ -212,6 +235,20 @@ for (const theme of ['light', 'dark']) {
   check(`${tag} 审批卡：diff 红删 / 绿增底色可区分且非透明`, !!styles.permDel?.['background-color'] && styles.permDel['background-color'] !== 'rgba(0, 0, 0, 0)' && styles.permDel['background-color'] !== styles.permAdd?.['background-color'], `${styles.permDel?.['background-color']} vs ${styles.permAdd?.['background-color']}`)
   check(`${tag} 审批卡：已决 chip flex + gap 6`, styles.permChip?.display === 'flex' && styles.permChip?.gap === '6px', JSON.stringify(styles.permChip))
   check(`${tag} 审批卡：挂起条 flex + 两端对齐 + 虚线`, styles.permBar?.display === 'flex' && styles.permBar?.['justify-content'] === 'space-between' && styles.permBar?.['border-top-style'] === 'dashed', JSON.stringify(styles.permBar))
+  // ---- QuestionCard：问答卡（组件自有样式）----
+  check(`${tag} 问答卡：圆角 12 + 顶距 8`, styles.questionCard?.['border-radius'] === '12px' && styles.questionCard?.['margin-top'] === '8px', JSON.stringify(styles.questionCard))
+  check(`${tag} 问答卡：卡头 flex + 600`, styles.questionHead?.display === 'flex' && styles.questionHead?.['font-weight'] === '600', JSON.stringify(styles.questionHead))
+  check(`${tag} 问答卡：题块 padding 8/10 + 圆角 8`, styles.questionBlock?.padding === '8px 10px' && styles.questionBlock?.['border-radius'] === '8px', JSON.stringify(styles.questionBlock))
+  check(`${tag} 问答卡：选项 flex + 手型`, styles.questionOpt?.display === 'flex' && styles.questionOpt?.cursor === 'pointer', JSON.stringify(styles.questionOpt))
+  check(`${tag} 问答卡：序号圆标 16px`, styles.questionOptKey?.width === '16px' && styles.questionOptKey?.height === '16px', JSON.stringify(styles.questionOptKey))
+  check(`${tag} 问答卡：跳过按钮手型`, styles.questionSkip?.cursor === 'pointer', JSON.stringify(styles.questionSkip))
+  check(`${tag} 问答卡：底部操作行 flex + gap 10`, styles.questionActions?.display === 'flex' && styles.questionActions?.gap === '10px', JSON.stringify(styles.questionActions))
+  // ---- Markdown 表格：table 布局 + 自适应列宽 + 换行 ----
+  check(`${tag} 表格保持 table 布局`, styles.mdTable?.display === 'table', JSON.stringify(styles.mdTable))
+  check(`${tag} 表格列宽自适应`, styles.mdTable?.['table-layout'] === 'auto', styles.mdTable?.['table-layout'])
+  check(`${tag} 序号列窄于说明列`, (styles.mdColWidths?.[0] || 0) < (styles.mdColWidths?.[1] || 0), JSON.stringify(styles.mdColWidths))
+  check(`${tag} 表格单元格不裁切`, styles.mdCellClipped === false)
+  check(`${tag} 表头不折行（序号/备注不竖排）`, styles.mdTh?.['white-space'] === 'nowrap' && styles.mdTh?.['overflow-wrap'] === 'anywhere', JSON.stringify(styles.mdTh))
   // ---- ToolTraceList：思考链与工具轨迹（组件自有样式）----
   check(`${tag} 轨迹：flex + wrap + gap 6 + 顶距 8`, styles.trace?.display === 'flex' && styles.trace?.['flex-wrap'] === 'wrap' && styles.trace?.gap === '6px' && styles.trace?.['margin-top'] === '8px', JSON.stringify(styles.trace))
   check(`${tag} 轨迹：思考头 flex + 可点击 + 禁选中`, styles.thinkHead?.display === 'flex' && styles.thinkHead?.cursor === 'pointer' && styles.thinkHead?.['user-select'] === 'none', JSON.stringify(styles.thinkHead))
@@ -260,6 +297,8 @@ for (const theme of ['light', 'dark']) {
     check('[dark] 主题令牌生效（卡片底色变化）', darkBoxBg !== null && darkBoxBg !== lightBoxBg, `${lightBoxBg} vs ${darkBoxBg}`)
     darkPermBg = styles.permCard?.['background-color']
     check('[dark] 审批卡底色随主题变化', darkPermBg !== null && darkPermBg !== lightPermBg, `${lightPermBg} vs ${darkPermBg}`)
+    darkQuestionBg = styles.questionCard?.['background-color']
+    check('[dark] 问答卡底色随主题变化', darkQuestionBg !== null && darkQuestionBg !== lightQuestionBg, `${lightQuestionBg} vs ${darkQuestionBg}`)
     darkThinkBg = styles.thinkBody?.['background-color']
     check('[dark] 轨迹：思考正文底色随主题变化', darkThinkBg !== null && darkThinkBg !== lightThinkBg, `${lightThinkBg} vs ${darkThinkBg}`)
     darkSourcesBg = styles.sourcesBox?.['background-color']
@@ -272,6 +311,7 @@ for (const theme of ['light', 'dark']) {
     lightBoxBg = styles.box?.['background-color']
     lightBorder = styles.box?.['border-top-color']
     lightPermBg = styles.permCard?.['background-color']
+    lightQuestionBg = styles.questionCard?.['background-color']
     lightThinkBg = styles.thinkBody?.['background-color']
     lightSourcesBg = styles.sourcesBox?.['background-color']
     lightPlanBg = styles.planBox?.['background-color']
@@ -283,6 +323,12 @@ for (const theme of ['light', 'dark']) {
   })
   await page.locator('.permission-box').first().screenshot({
     path: resolve(OUT, `perm_card_${theme}.png`),
+  })
+  await page.locator('.shot-question-card').first().screenshot({
+    path: resolve(OUT, `question_card_${theme}.png`),
+  })
+  await page.locator('.shot-markdown-table').first().screenshot({
+    path: resolve(OUT, `markdown_table_${theme}.png`),
   })
   await page.locator('.tool-trace').first().screenshot({
     path: resolve(OUT, `tool_trace_${theme}.png`),

@@ -33,11 +33,23 @@
             <span class="source-tag">知识库</span>
             <span v-if="src.score" class="source-score">相关度 {{ src.score }}</span>
             <span v-if="src.source" class="source-name">{{ src.source }}</span>
-            <span v-if="src.page != null">｜第 {{ src.page }} 页</span>
+            <span v-if="src.pages?.length > 1">｜第 {{ src.pages[0] }}–{{ src.pages[src.pages.length - 1] }} 页</span>
+            <span v-else-if="src.page != null">｜第 {{ src.page }} 页</span>
+          </div>
+          <div v-if="src.images?.length" class="source-images">
+            <img
+              v-for="img in src.images"
+              :key="img.id || img.path"
+              :src="imageUrl(img)"
+              class="source-image"
+              loading="lazy"
+              alt="OCR 图片块"
+              @click.stop="emit('open-doc', src)"
+            />
           </div>
           <div class="source-content">{{ src.content }}</div>
           <a class="source-link" @click.prevent="emit('open-doc', src)">
-            查看原文 {{ src.page != null ? `· 第 ${src.page} 页` : '' }} ↗
+            查看原文 {{ src.pages?.length > 1 ? `· 第 ${src.pages[0]}–${src.pages[src.pages.length - 1]} 页` : (src.page != null ? `· 第 ${src.page} 页` : '') }} ↗
           </a>
         </template>
       </div>
@@ -68,6 +80,10 @@ defineProps({
   open: { type: Boolean, default: false },
 })
 const emit = defineEmits(['update:open', 'open-doc'])
+
+function imageUrl(img) {
+  return img?.path ? `/api/images?path=${encodeURIComponent(img.path)}` : ''
+}
 </script>
 
 <style scoped>
@@ -104,6 +120,21 @@ const emit = defineEmits(['update:open', 'open-doc'])
   transform: rotate(180deg);
 }
 
+.source-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+.source-image {
+  max-width: 160px;
+  max-height: 120px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  cursor: zoom-in;
+  object-fit: contain;
+  background: var(--el-fill-color-lighter);
+}
 .sources-body {
   padding: 0 14px 10px;
 }

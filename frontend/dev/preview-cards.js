@@ -17,6 +17,8 @@ import '../src/styles/theme.css'
 import PlanApprovalCard from '../src/components/chat/PlanApprovalCard.vue'
 import PlanSteps from '../src/components/chat/PlanSteps.vue'
 import PermissionCard from '../src/components/chat/PermissionCard.vue'
+import QuestionCard from '../src/components/chat/QuestionCard.vue'
+import MarkdownContent from '../src/components/MarkdownContent.vue'
 import ToolTraceList from '../src/components/chat/ToolTraceList.vue'
 import SourceList from '../src/components/chat/SourceList.vue'
 import TodoPanel from '../src/components/chat/TodoPanel.vue'
@@ -137,6 +139,48 @@ const permFixture = reactive([
   },
 ])
 
+// 问答卡夹具：单选 + 多选各一题（覆盖选项/自定义输入/跳过三块 UI）
+const questionFixture = reactive({
+  state: 'pending',
+  _suspended: true,
+  requests: [
+    {
+      call_id: 'q-preview',
+      questions: [
+        {
+          question: '这次改动先做哪一层？',
+          header: '范围',
+          multi_select: false,
+          options: [
+            { label: '后端 + Web', description: '先跑通主流程，CLI 下轮补' },
+            { label: '全量三端', description: '一次做完，改动面更大' },
+            { label: '只做接口', description: '前端自己接' },
+          ],
+        },
+        {
+          question: '需要保留哪些交互？',
+          header: '交互',
+          multi_select: true,
+          options: [
+            { label: '自由输入', description: '允许「其他」文本' },
+            { label: '跳过', description: '可以不作答' },
+            { label: '数字键', description: '键盘直接选择' },
+          ],
+        },
+      ],
+    },
+  ],
+})
+
+// Markdown 表格夹具：序号列短、说明列长，用于验证列宽自适应与换行
+const markdownTableFixture = [
+  '| 序号 | 说明 | 备注 |',
+  '| --- | --- | --- |',
+  '| 1 | 这是一段较长的说明文字，用来验证表格列宽会按内容自适应，而不是和序号列平均分配宽度。 | 正常 |',
+  '| 2 | 短文本 | — |',
+  '| 3 | 包含一个非常长的不可分割标识符 ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 用于验证换行。 | 长串 |',
+].join('\n')
+
 // 工具轨迹夹具：两种思考链形态（已完成展开 / 进行中）+ 多种工具 chip
 //（含展开的 detail、「执行中…」回退、mcp_ 图标分支）；reactive 便于点击折叠/展开
 const traceFixture = reactive([
@@ -225,6 +269,7 @@ const App = {
   setup() {
     const confirmed = ref(null)
     const permEvent = ref(null)
+    const questionEvent = ref(null)
     const sourceOpen = ref(true)
     const sourceEvent = ref(null)
     const sessionActive = ref(352)
@@ -349,6 +394,59 @@ const App = {
             'div',
             { style: { fontSize: '11px', color: 'var(--text-3)', marginTop: '6px' } },
             `事件：${permEvent.value || '（未触发）'}`,
+          ),
+        ]),
+
+        // 问答卡（ask_user_question 挂起）：单选 + 多选两题
+        h('section', { class: 'shot-question-card', style: { maxWidth: '720px', marginTop: '24px' } }, [
+          h(
+            'div',
+            { style: { fontSize: '12px', color: 'var(--text-3)', marginBottom: '6px' } },
+            'QuestionCard：单选 + 多选（待作答）',
+          ),
+          h(
+            'div',
+            {
+              style: {
+                background: 'var(--bg-chat)',
+                borderRadius: 'var(--radius-lg)',
+                padding: '14px 16px',
+              },
+            },
+            [
+              h(QuestionCard, {
+                request: questionFixture,
+                loading: false,
+                onSubmit: (answers) => {
+                  questionEvent.value = JSON.stringify(answers[0].items)
+                },
+              }),
+            ],
+          ),
+          h(
+            'div',
+            { style: { fontSize: '11px', color: 'var(--text-3)', marginTop: '6px' } },
+            `事件：${questionEvent.value || '（未触发）'}`,
+          ),
+        ]),
+
+        // Markdown 表格：列宽自适应 + 长文本换行
+        h('section', { class: 'shot-markdown-table', style: { maxWidth: '720px', marginTop: '24px' } }, [
+          h(
+            'div',
+            { style: { fontSize: '12px', color: 'var(--text-3)', marginBottom: '6px' } },
+            'MarkdownContent：表格列宽自适应（序号窄 / 说明宽）',
+          ),
+          h(
+            'div',
+            {
+              style: {
+                background: 'var(--bg-chat)',
+                borderRadius: 'var(--radius-lg)',
+                padding: '14px 16px',
+              },
+            },
+            [h(MarkdownContent, { content: markdownTableFixture })],
           ),
         ]),
 

@@ -1,15 +1,25 @@
 <template>
   <div class="plan-box">
-    <div class="plan-head">
+    <div
+      class="plan-head"
+      :class="{ clickable }"
+      :role="clickable ? 'button' : null"
+      :tabindex="clickable ? 0 : null"
+      :title="clickable ? '在会话面板中查看完整计划' : null"
+      @click="clickable && emit('open-panel')"
+      @keydown.enter.prevent="clickable && emit('open-panel')"
+      @keydown.space.prevent="clickable && emit('open-panel')"
+    >
       <el-icon :size="14"><List /></el-icon>
       {{ plan && plan.length ? '执行计划' : '任务清单' }}
       <span v-if="planDone != null" class="plan-progress">
         {{ planDone }}/{{ planTotal != null ? planTotal : plan.length }}
       </span>
+      <el-icon v-if="clickable" class="plan-open-icon" :size="12"><ArrowRight /></el-icon>
     </div>
     <div v-if="todos && todos.length" class="plan-todos">
       <div
-        v-for="(t, i) in todos"
+        v-for="t in todos"
         :key="t.id"
         :class="['plan-todo', { done: todoDone(t) }]"
       >
@@ -40,7 +50,7 @@
  * 本盒头部与计划审批卡头部，审批卡拆分时样式随组件走了、本盒这份被误删，
  * 导致头部失去 flex/主色/间距（2026-10-09 接手窗口用 HEAD 对比发现并恢复）。
  */
-import { CircleCheck, List } from '@element-plus/icons-vue'
+import { ArrowRight, CircleCheck, List } from '@element-plus/icons-vue'
 import PlanSteps from './PlanSteps.vue'
 
 defineProps({
@@ -49,7 +59,10 @@ defineProps({
   planDone: { type: Number, default: null },
   planTotal: { type: Number, default: null },
   showRunning: { type: Boolean, default: false },
+  /** 聊天里的计划盒可点击 → 打开右侧面板的计划分区 */
+  clickable: { type: Boolean, default: false },
 })
+const emit = defineEmits(['open-panel'])
 
 /** 任务项是否已完成：仅以模型/系统按进度标记的 done 为准，用户不可手改 */
 function todoDone(t) {
@@ -75,6 +88,21 @@ function todoDone(t) {
   font-weight: 600;
   color: var(--primary);
   margin-bottom: 6px;
+}
+
+.plan-head.clickable {
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+}
+
+.plan-head.clickable:hover,
+.plan-head.clickable:focus-visible {
+  color: var(--primary-text);
+  outline: none;
+}
+
+.plan-open-icon {
+  color: var(--text-3);
 }
 
 .plan-progress {
