@@ -1,0 +1,67 @@
+{
+  "name": "zhiwen-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "知问 ZhiWen 桌面客户端（Electron 薄壳原型）",
+  "author": "ZhiWen",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win nsis --publish never",
+    "release": "electron-builder --win nsis --publish always"
+  },
+  "devDependencies": {
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.zhiwen.desktop",
+    "productName": "ZhiWen",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "preload-main.cjs",
+      "lib/**/*",
+      "boot/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../frontend/dist",
+        "to": "frontend-dist"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "知问",
+      "artifactName": "zhiwen-setup-${version}.exe"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "mortal7777777",
+      "repo": "zhiwen-Rag-Agent"
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  }
+}

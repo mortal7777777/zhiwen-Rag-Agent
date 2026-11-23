@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self' file:; script-src 'self' file:; style-src 'self' file:; img-src 'self' file: data:;"
+  />
+  <title>知问 ZhiWen</title>
+  <link rel="stylesheet" href="boot.css" />
+</head>
+<body>
+  <main class="card">
+    <header class="head">
+      <div class="logo">知</div>
+      <div>
+        <h1>知问 ZhiWen</h1>
+        <p class="sub">个人知识库智能助手 · 桌面客户端</p>
+      </div>
+    </header>
+
+    <section class="modes" role="radiogroup" aria-label="运行模式">
+      <button type="button" class="mode" data-mode="local" role="radio" aria-checked="true">
+        <strong>本地后端</strong>
+        <span>由桌面端启动本机 Python 后端（uvicorn :8000）</span>
+      </button>
+      <button type="button" class="mode" data-mode="remote" role="radio" aria-checked="false">
+        <strong>远程服务器</strong>
+        <span>连接已运行的知问服务（本机端口或远程地址）</span>
+      </button>
+    </section>
+
+    <section class="fields">
+      <label class="field" data-for="remote" hidden>
+        <span>服务器地址</span>
+        <input id="remoteBaseUrl" type="url" placeholder="http://127.0.0.1:5173" spellcheck="false" />
+        <em class="hint">非本机地址必须使用 https</em>
+      </label>
+      <details class="advanced" data-for="local">
+        <summary>高级选项（可选）</summary>
+        <label class="field">
+          <span>Python 解释器</span>
+          <input id="pythonPath" type="text" placeholder="留空自动探测" spellcheck="false" />
+          <em class="hint" id="pythonHint"></em>
+        </label>
+        <label class="field">
+          <span>项目根目录（打包版本机模式必填）</span>
+          <input
+            id="projectRoot"
+            type="text"
+            placeholder="例如 D:\...\langchain01\rag_knowledge_base"
+            spellcheck="false"
+          />
+          <em class="hint" id="projectRootHint"></em>
+        </label>
+        <label class="field">
+          <span>访问令牌（后端启用 ZHIWEN_API_TOKEN 时填写）</span>
+          <input id="apiToken" type="password" placeholder="留空表示后端未启用鉴权" spellcheck="false" />
+          <em class="hint" id="tokenHint"></em>
+        </label>
+      </details>
+    </section>
+
+    <details class="advanced desktop-options" id="desktopOptions">
+      <summary>桌面选项</summary>
+      <label class="check">
+        <input id="launchAtLogin" type="checkbox" />
+        <span>开机自动启动</span>
+      </label>
+      <label class="check">
+        <input id="notifications" type="checkbox" />
+        <span>系统通知（回答完成 / 待确认）</span>
+      </label>
+      <label class="field">
+        <span>全局快捷键（唤出/隐藏窗口）</span>
+        <input id="globalHotkey" type="text" placeholder="Control+Alt+Z" spellcheck="false" />
+        <em class="hint">留空表示不注册</em>
+      </label>
+    </details>
+
+    <section class="env" id="envBadges"></section>
+
+    <section class="steps" id="steps" hidden>
+      <div class="step" data-step="0"><i></i><span>检查环境</span></div>
+      <div class="step" data-step="1"><i></i><span class="label">启动后端</span></div>
+      <div class="step" data-step="2"><i></i><span>等待就绪</span></div>
+      <div class="step" data-step="3"><i></i><span>打开界面</span></div>
+      <p class="status-line" id="statusLine"></p>
+    </section>
+
+    <section class="error" id="errorBox" hidden>
+      <h2 id="errorTitle"></h2>
+      <p id="errorDetail"></p>
+      <pre id="errorLog" hidden></pre>
+    </section>
+
+    <p class="settings-note" id="settingsNote" hidden>修改连接模式或桌面选项后，主界面会重新加载。</p>
+
+    <footer class="actions">
+      <button type="button" id="btnStart" class="primary">启动知问</button>
+      <button type="button" id="btnLogs" class="ghost">打开日志</button>
+      <button type="button" id="btnQuit" class="ghost">退出</button>
+    </footer>
+  </main>
+  <script src="boot.js"></script>
+</body>
+</html>
