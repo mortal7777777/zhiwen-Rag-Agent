@@ -36,8 +36,8 @@ class _RecordingTool:
         return {"summary": "已执行", "path": args.get("path", "")}
 
 
-def _settings():
-    return SimpleNamespace(
+def _settings(**overrides):
+    base = dict(
         reasoning_summary_enabled=False,
         verify_auto_detect=False,
         verify_command="",
@@ -50,9 +50,11 @@ def _settings():
         agent_task_max_failures=6,
         agent_task_max_iterations=50,
     )
+    base.update(overrides)
+    return SimpleNamespace(**base)
 
 
-def _make_env(tool_names_and_calls):
+def _make_env(tool_names_and_calls, settings=None):
     by_name: dict[str, _RecordingTool] = {}
     calls = []
     for name, call_id, args in tool_names_and_calls:
@@ -78,7 +80,7 @@ def _make_env(tool_names_and_calls):
         "plan_push_count": 0,
     }
     deps = SimpleNamespace(
-        service=SimpleNamespace(settings=_settings()),
+        service=SimpleNamespace(settings=settings or _settings()),
         bus=bus,
         db=None,
         stop_event=None,
@@ -249,6 +251,75 @@ def test_plan_suspension_carries_plan_and_approval_continues(monkeypatch):
     assert "plan_approval" not in names, "interrupt 路径不再走旧的 plan_approval 收尾"
 
 
+def test_high_risk_command_forced_to_confirm_even_in_allow_mode(monkeypatch):
+    """allow 模式下普通敏感操作自动批准，但高危命令必须挂起确认。"""
+    state, runtime, tools, bus = _make_env(
+        [("bash", "call_1", {"command": "rm -rf /"})]
+    )
+    state["runtime"]["conv_id"] = 991
+    runtime.context.service.settings.tool_permission_mode = "allow"
+    seen = _install_fake_interrupt(
+        monkeypatch, {"call_1": {"approve": True, "remember_forever": True}}
+    )
+
+    with pytest.raises(_FakeInterrupt):
+        _tools_node(state, runtime)
+    assert tools[0].calls == [], "高危命令挂起段不得执行"
+    op = seen[0]["ops"][0]
+    assert op["risk"] == "high"
+    assert op["risk_reason"]
+    assert op["rememberable"] is False
+
+    out = _tools_node(state, runtime)
+    assert len(tools[0].calls) == 1, "批准后只执行一次"
+
+    # 伪造的 remember 字段被忽略：高危命令不进会话白名单
+    from app.permissions import get_permission_manager
+
+    assert (
+        get_permission_manager().is_session_allowed(991, "rm -rf /") is False
+    )
+    resolved = [e for e in _events(bus) if e["event"] == "permission_resolved"]
+    assert resolved and resolved[0]["data"]["risk"] == "high"
+
+
+def test_allow_mode_benign_write_still_auto_approved():
+    """allow 模式未被高危底线误伤：普通写文件不弹确认。"""
+    state, runtime, tools, bus = _make_env(
+        [("write_file", "call_1", {"path": "a.txt", "content": "hi"})]
+    )
+    runtime.context.service.settings.tool_permission_mode = "allow"
+
+    out = _tools_node(state, runtime)
+
+    assert len(tools[0].calls) == 1
+    assert not [
+        e for e in _events(bus) if e["event"] == "permission_resolved"
+    ]
+    assert out["tool_calls_used"] == 1
+
+
+def test_allow_mode_high_risk_file_write_forced_to_confirm(monkeypatch):
+    """allow 模式下写 user_tools 或 .env 等高危路径仍必须挂起确认。"""
+    state, runtime, tools, bus = _make_env(
+        [
+            (
+                "write_file",
+                "call_1",
+                {"path": "backend/app/user_tools/backdoor.py", "content": "x"},
+            )
+        ]
+    )
+    runtime.context.service.settings.tool_permission_mode = "allow"
+    seen = _install_fake_interrupt(monkeypatch, {"call_1": {"approve": False}})
+
+    with pytest.raises(_FakeInterrupt):
+        _tools_node(state, runtime)
+    assert tools[0].calls == [], "高危文件写入在 allow 模式下也必须先挂起确认"
+    assert seen[0]["ops"][0]["risk"] == "high"
+
+
+
 def test_plan_suspension_rejection_stays_in_plan_mode(monkeypatch):
     state, runtime, tools, bus = _make_env(
         [("exit_plan_mode", "p1", {"steps": ["只有一步"], "summary": ""})]
@@ -277,3 +348,164 @@ def test_plan_suspension_rejection_stays_in_plan_mode(monkeypatch):
     assert "用户未确认该计划" in joined and "太笼统" in joined
 
 
+
+
+def test_verify_env_error_not_counted_as_file_failure(monkeypatch):
+    """解释器缺失是环境问题：不增加 verify_fail、不诱导模型重写文件。"""
+    settings = _settings()
+    settings.tool_permission_mode = "allow"
+    state, runtime, tools, bus = _make_env(
+        [("write_file", "w1", {"path": "a.txt", "content": "x"})],
+        settings=settings,
+    )
+    monkeypatch.setattr(
+        tools_mod,
+        "_run_verify",
+        lambda *a, **k: [
+            {
+                "path": "a.txt",
+                "command": "py -m py_compile a.txt",
+                "exit_code": -1,
+                "error": "验证环境不可用：No such file or directory",
+                "output": "missing",
+                "environment_error": True,
+            }
+        ],
+    )
+    out = _tools_node(state, runtime)
+    assert out.get("verify_env_warned") is True
+    assert int(out.get("verify_fail_count") or 0) == 0
+    joined = "".join(str(m.content) for m in out["messages"])
+    assert "写后验证不可用" in joined
+
+
+def test_mutation_clears_per_run_query_cache():
+    """同轮 write 之后 read 必须重新执行：旧缓存不能冒充写后状态。"""
+    settings = _settings()
+    settings.tool_permission_mode = "allow"
+    state, runtime, tools, bus = _make_env(
+        [
+            ("read_file", "r1", {"path": "a.txt"}),
+            ("write_file", "w0", {"path": "a.txt", "content": "old"}),
+        ],
+        settings=settings,
+    )
+    by_name = {t.name: t for t in tools}
+
+    def run(name, call_id, args):
+        state["pending_tool_calls"] = [{"name": name, "id": call_id, "args": args}]
+        state["messages"] = []
+        return _tools_node(state, runtime)
+
+    run("read_file", "r1", {"path": "a.txt"})
+    assert len(by_name["read_file"].calls) == 1
+    run("read_file", "r2", {"path": "a.txt"})
+    assert len(by_name["read_file"].calls) == 1, "同参重复查询应命中缓存"
+
+    run("write_file", "w1", {"path": "a.txt", "content": "new"})
+    assert len(by_name["write_file"].calls) == 1
+
+    run("read_file", "r3", {"path": "a.txt"})
+    assert len(by_name["read_file"].calls) == 2, "写操作后缓存必须失效"
+
+
+# ---------------- acceptEdits 中间档 ----------------
+
+
+def test_acceptedits_auto_approves_workspace_file_edits():
+    """acceptEdits：工作区内的写/改/删自动批准，不挂起。"""
+    state, runtime, tools, bus = _make_env(
+        [
+            ("write_file", "call_1", {"path": "a.txt", "content": "x"}),
+            (
+                "edit_file",
+                "call_2",
+                {"path": "a.txt", "old_string": "x", "new_string": "y"},
+            ),
+            ("delete_file", "call_3", {"path": "a.txt"}),
+        ],
+        settings=_settings(tool_permission_mode="acceptedits"),
+    )
+    out = _tools_node(state, runtime)
+
+    assert [len(t.calls) for t in tools] == [1, 1, 1], "文件写/改/删不应弹审批"
+    assert len([m for m in out["messages"] if isinstance(m, ToolMessage)]) == 3
+
+
+def test_acceptedits_still_asks_for_commands(monkeypatch):
+    """命令工具不在 acceptEdits 覆盖范围，仍需人工确认。"""
+    state, runtime, tools, bus = _make_env(
+        [("bash", "call_1", {"command": "mkdir out"})],
+        settings=_settings(tool_permission_mode="acceptedits"),
+    )
+    seen = _install_fake_interrupt(monkeypatch, {"call_1": {"approve": True}})
+
+    with pytest.raises(_FakeInterrupt):
+        _tools_node(state, runtime)
+
+    assert [op["call_id"] for op in seen[0]["ops"]] == ["call_1"]
+
+
+def test_acceptedits_high_risk_file_still_asks(monkeypatch):
+    """高危文件路径（.env 等）不受 acceptEdits 影响，强制确认。"""
+    state, runtime, tools, bus = _make_env(
+        [("write_file", "call_1", {"path": ".env", "content": "A=1"})],
+        settings=_settings(tool_permission_mode="acceptedits"),
+    )
+    seen = _install_fake_interrupt(monkeypatch, {"call_1": {"approve": True}})
+
+    with pytest.raises(_FakeInterrupt):
+        _tools_node(state, runtime)
+
+    op = seen[0]["ops"][0]
+    assert op["risk"] == "high"
+    assert "密钥" in op["risk_reason"]
+
+
+# ---------------- Docker 沙箱内命令免确认 ----------------
+
+
+def test_docker_sandbox_auto_allows_commands(monkeypatch):
+    """command_sandbox=docker + sandbox_auto_allow：普通命令免确认。"""
+    state, runtime, tools, bus = _make_env(
+        [("bash", "call_1", {"command": "mkdir out"})],
+        settings=_settings(sandbox_auto_allow=True),
+    )
+    state["runtime"]["command_sandbox"] = "docker"
+    seen = _install_fake_interrupt(monkeypatch, {})
+
+    out = _tools_node(state, runtime)
+
+    assert seen == [], "Docker 沙箱内普通命令不应挂起"
+    assert len(tools[0].calls) == 1
+    assert len([m for m in out["messages"] if isinstance(m, ToolMessage)]) == 1
+
+
+def test_sandbox_auto_allow_requires_docker(monkeypatch):
+    """非 Docker 执行环境即使开了免确认，命令仍要人工确认。"""
+    state, runtime, tools, bus = _make_env(
+        [("bash", "call_1", {"command": "mkdir out"})],
+        settings=_settings(sandbox_auto_allow=True),
+    )
+    state["runtime"]["command_sandbox"] = "subprocess"
+    seen = _install_fake_interrupt(monkeypatch, {"call_1": {"approve": True}})
+
+    with pytest.raises(_FakeInterrupt):
+        _tools_node(state, runtime)
+
+    assert [op["call_id"] for op in seen[0]["ops"]] == ["call_1"]
+
+
+def test_sandbox_auto_allow_keeps_high_risk_asking(monkeypatch):
+    """沙箱免确认不放行高危命令：高危底线始终优先。"""
+    state, runtime, tools, bus = _make_env(
+        [("bash", "call_1", {"command": "rm -rf /"})],
+        settings=_settings(sandbox_auto_allow=True),
+    )
+    state["runtime"]["command_sandbox"] = "docker"
+    seen = _install_fake_interrupt(monkeypatch, {"call_1": {"approve": True}})
+
+    with pytest.raises(_FakeInterrupt):
+        _tools_node(state, runtime)
+
+    assert seen[0]["ops"][0]["risk"] == "high"

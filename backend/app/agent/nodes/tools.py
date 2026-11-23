@@ -15,6 +15,7 @@ from ...runtime_config import effective, effective_or
 logger = logging.getLogger(__name__)
 from ..state import AgentState, EventBus
 from ..tools import (
+    ASK_QUESTION_TOOL_NAME,
     PLAN_ENTER_TOOL_NAME,
     PLAN_EXIT_TOOL_NAME,
     PLAN_MODE_SYSTEM_HINT,
@@ -28,6 +29,7 @@ from .prompts import (
     plan_confirmed_notice,
     plan_progress_notice,
     tool_failure_notice,
+    verify_env_notice,
     verify_fail_notice,
     verify_pass_notice,
 )
@@ -38,6 +40,7 @@ from ..utils import (
     _tool_cache_key,
     _tool_detail,
     _tool_has_required_args,
+    tool_content_limit,
 )
 
 from langchain_core.messages import SystemMessage, ToolMessage
@@ -46,6 +49,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..langgraph_agent import LangGraphAgentService  # 仅类型注解
 from ..tools import extract_sources
+from ..tool_preflight import validate_call
+from ..tool_verification import augment_mutation
 
 # ==== 函数体（原文）====
 def _should_force_final(
@@ -66,6 +71,11 @@ def _should_force_final(
 def _remember_command_forever(db: Session | None, command: str, settings: Settings) -> None:
     """「永久记住」：把命令原文写入自动放行前缀（命令白名单，设置页可见）。"""
     if db is None or not command:
+        return
+    from ...command_risk import high_risk_command
+
+    if high_risk_command(command):
+        logger.warning("拒绝把高危命令写入白名单：%s", command[:120])
         return
     try:
         from ...runtime_config import load_overrides, save_overrides
@@ -91,6 +101,8 @@ def _tools_node(state: AgentState, runtime) -> dict:
     db: Session | None = deps.db
     stop_event = deps.stop_event
     from ...permissions import (
+        COMMAND_TOOLS,
+        FILE_EDIT_TOOLS,
         SENSITIVE_TOOLS,
         describe_tool_call,
         display_args,
@@ -106,6 +118,7 @@ def _tools_node(state: AgentState, runtime) -> dict:
     tool_calls = state.get("pending_tool_calls") or []
     if not tool_calls:
         return {}
+    verify_env_warned = bool(state.get("verify_env_warned"))
 
     # ---- 计划模式（只读）：敏感操作直接拦截，不弹审批（纯计算）----
     blocked: dict[str, str] = {}
@@ -124,38 +137,70 @@ def _tools_node(state: AgentState, runtime) -> dict:
     # 挂起恢复会整段重跑本节点：直到 interrupt() 之前不得有任何副作用
     # （发事件/写库/开线程）；白名单与会话记忆查询都是只读的。
     # 写/编辑/删除/命令默认 ask；命令命中自动放行白名单或本会话已记住则无需确认；
-    # permission_mode=allow 时全部自动批准（类 Claude Code --dangerously-skip-permissions）。
+    # permission_mode=allow 时普通敏感操作自动批准，但高危命令是独立底线：
+    # 无论 allow 还是白名单，都必须人工确认（见 command_risk）。
+    from ...command_risk import high_risk_command, high_risk_file_operation
+
     ops: list[dict] = []
     permission_mode = effective_or(settings, "tool_permission_mode", "ask")
-    if permission_mode == "ask":
-        ops_by_command: dict[str, dict] = {}  # 同轮同命令去重：一次决定覆盖全部调用
-        for tc in tool_calls:
-            name = tc.get("name", "")
-            args = tc.get("args") or {}
-            if tc.get("id") in blocked:
-                continue
+    # 请求级 --sandbox 覆盖优先；沙箱免确认只对 Docker 执行环境生效
+    sandbox_mode = str(
+        rt.get("command_sandbox")
+        or effective(settings, "command_sandbox")
+        or "subprocess"
+    ).strip().lower()
+    sandbox_auto_allow = sandbox_mode == "docker" and bool(
+        effective_or(settings, "sandbox_auto_allow", False)
+    )
+    ops_by_command: dict[str, dict] = {}  # 同轮同命令去重：一次决定覆盖全部调用
+    for tc in tool_calls:
+        name = tc.get("name", "")
+        args = tc.get("args") or {}
+        if tc.get("id") in blocked:
+            continue
+        command = str(args.get("command") or "")
+        risk_reason = (
+            high_risk_command(command)
+            if name in ("bash", "command_tool", "bash_background") and command
+            else high_risk_file_operation(name, args)
+        )
+        if risk_reason:
+            # 高危命令/高危文件路径：任何模式都必须人工确认
+            needs = True
+        elif permission_mode == "allow":
+            needs = False
+        elif sandbox_auto_allow and name in COMMAND_TOOLS and command:
+            # Docker 沙箱（无网络、根文件系统只读）内运行，普通命令免确认
+            needs = False
+        elif permission_mode == "acceptedits" and name in FILE_EDIT_TOOLS:
+            # 工作区内的文件写/改/删自动批准；命令、技能、知识库写入照常确认
+            needs = False
+        else:
             needs = is_sensitive_tool(name, args)
-            command = str(args.get("command") or "")
-            if name in ("bash", "command_tool") and (
+            if name in ("bash", "command_tool", "bash_background") and (
                 command_allowed(settings, command)[0]
                 or permission_manager.is_session_allowed(rt.get("conv_id"), command)
             ):
                 needs = False
-            if not needs:
-                continue
-            if command and command in ops_by_command:
-                ops_by_command[command]["also_covers"].append(tc.get("id"))
-                continue
-            op = {
-                "call_id": tc.get("id"),
-                "also_covers": [],
-                "name": name,
-                "arguments": display_args(name, args),
-                "summary": describe_tool_call(name, args),
-            }
-            ops.append(op)
-            if command:
-                ops_by_command[command] = op
+        if not needs:
+            continue
+        if command and command in ops_by_command:
+            ops_by_command[command]["also_covers"].append(tc.get("id"))
+            continue
+        op = {
+            "call_id": tc.get("id"),
+            "also_covers": [],
+            "name": name,
+            "arguments": display_args(name, args),
+            "summary": describe_tool_call(name, args),
+            "risk": "high" if risk_reason else "",
+            "risk_reason": risk_reason or "",
+            # 只有命令类支持「记住」；高危命令永不提供，服务端也会忽略伪造的 remember
+            "rememberable": name in ("bash", "command_tool", "bash_background") and not risk_reason,
+        }
+        ops.append(op)
+        if command:
+            ops_by_command[command] = op
 
     # ---- 计划提交（exit_plan_mode）：并入同一次挂起（纯计算）----
     # 仅 plan_only 时认 exit_plan_mode；该工具本身不执行，结果在恢复段合成。
@@ -176,11 +221,76 @@ def _tools_node(state: AgentState, runtime) -> dict:
                 }
                 break
 
-    # ---- 决定收集：原生 interrupt 一次收齐（敏感操作 + 计划提交）----
+    # ---- 向用户提问（ask_user_question）：并入同一次挂起（纯计算）----
+    # 与 exit_plan_mode 同模式：工具本身不执行，问题进 interrupt 载荷，
+    # 恢复段按用户答案合成 ToolMessage；格式不合法则当场返回错误让模型修正。
+    question_requests: list[dict] = []
+    ask_result: dict[str, dict] = {}  # ask_user_question 的合成结果（_execute 直接取用）
+    for tc in tool_calls:
+        if tc.get("name") != ASK_QUESTION_TOOL_NAME:
+            continue
+        args = tc.get("args") or {}
+        raw_questions = args.get("questions")
+        cleaned: list[dict] = []
+        for q in raw_questions if isinstance(raw_questions, list) else []:
+            if not isinstance(q, dict):
+                continue
+            text = str(q.get("question") or "").strip()
+            options: list[dict] = []
+            for opt in q.get("options") or []:
+                if not isinstance(opt, dict):
+                    continue
+                label = str(opt.get("label") or "").strip()[:24]
+                if not label:
+                    continue
+                options.append(
+                    {
+                        "label": label,
+                        "description": str(opt.get("description") or "").strip()[:120],
+                    }
+                )
+                if len(options) >= 4:
+                    break
+            if not text or len(options) < 2:
+                continue
+            cleaned.append(
+                {
+                    "question": text[:300],
+                    "header": str(q.get("header") or "").strip()[:12],
+                    "options": options,
+                    "multi_select": bool(q.get("multi_select")),
+                }
+            )
+            if len(cleaned) >= 4:
+                break
+        if not cleaned:
+            ask_result[tc.get("id")] = {
+                "summary": "提问格式不合法，未发起提问",
+                "error": (
+                    "问题不能为空，且每题需要 2~4 个非空 label 的选项。"
+                    "请修正后重新调用 ask_user_question。"
+                ),
+                "_duration_ms": None,
+            }
+            continue
+        used = sum(len(r["questions"]) for r in question_requests)
+        room = max(0, 4 - used)
+        if not room:
+            ask_result[tc.get("id")] = {
+                "summary": "单轮最多向用户提 4 个问题",
+                "error": "单轮最多 4 个问题，其余请合并或下一轮再问。",
+                "_duration_ms": None,
+            }
+            continue
+        question_requests.append(
+            {"call_id": tc.get("id"), "questions": cleaned[:room]}
+        )
+
+    # ---- 决定收集：原生 interrupt 一次收齐（敏感操作 + 计划提交 + 提问）----
     approval: dict[str, dict] = {}
     plan_result: dict[str, dict] = {}  # exit_plan_mode 的合成结果（_execute 直接取用）
     plan_confirm_text: str | None = None
-    if ops or plan_request:
+    if ops or plan_request or question_requests:
         payload: dict = {
             "kind": "approval",
             "conversation_id": rt.get("conv_id"),
@@ -190,6 +300,8 @@ def _tools_node(state: AgentState, runtime) -> dict:
         }
         if plan_request:
             payload["plan"] = plan_request
+        if question_requests:
+            payload["questions"] = question_requests
         resume_value = interrupt(payload)
         # 恢复段（本节点从头重跑后才会执行到这里）：副作用沿链路只发生一次
         decisions = (resume_value or {}).get("decisions") or {}
@@ -198,21 +310,36 @@ def _tools_node(state: AgentState, runtime) -> dict:
             approved = bool(d.get("approve"))
             reason = str(d.get("reason") or "").strip()
             command = str((op.get("arguments") or {}).get("command") or "")
+            high_risk = op.get("risk") == "high"
             if approved:
-                if d.get("remember_session") and command:
-                    permission_manager.mark_session_allowed(rt.get("conv_id"), command)
-                if d.get("remember_forever") and command:
-                    _remember_command_forever(db, command, settings)
+                # 高危命令每次都必须重新确认：忽略客户端伪造的 remember 字段
+                if not high_risk:
+                    if d.get("remember_session") and command:
+                        permission_manager.mark_session_allowed(
+                            rt.get("conv_id"), command
+                        )
+                    if d.get("remember_forever") and command:
+                        _remember_command_forever(db, command, settings)
+                elif d.get("remember_session") or d.get("remember_forever"):
+                    logger.info("忽略高危命令的记忆请求：%s", command[:120])
                 entry = {
                     "ok": True,
                     "reason": "",
                     "remember": bool(
-                        d.get("remember_session") or d.get("remember_forever")
+                        not high_risk
+                        and (
+                            d.get("remember_session") or d.get("remember_forever")
+                        )
                     ),
                 }
                 bus.emit(
                     "permission_resolved",
-                    {"id": op.get("call_id"), "approved": True, "reason": ""},
+                    {
+                        "id": op.get("call_id"),
+                        "approved": True,
+                        "reason": "",
+                        "risk": op.get("risk") or "",
+                    },
                 )
             else:
                 entry = {
@@ -225,6 +352,7 @@ def _tools_node(state: AgentState, runtime) -> dict:
                         "id": op.get("call_id"),
                         "approved": False,
                         "reason": entry["reason"],
+                        "risk": op.get("risk") or "",
                     },
                 )
             for cid in [op.get("call_id"), *(op.get("also_covers") or [])]:
@@ -272,6 +400,43 @@ def _tools_node(state: AgentState, runtime) -> dict:
                     ),
                     "_duration_ms": None,
                 }
+        # ---- 用户回答（恢复段应用；缺失/跳过统一合成“用户跳过”）----
+        # answers 经 /agent/resume 透传，按 call_id + index 对应；旧客户端
+        # 不带 answers 时不会卡死——每题都按跳过回填，模型可继续或再问。
+        answers_map = (resume_value or {}).get("answers") or {}
+        for req in question_requests:
+            given = (answers_map.get(req.get("call_id")) or {}).get("items") or []
+            by_index: dict[int, dict] = {}
+            for item in given:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    by_index[int(item.get("index"))] = item
+                except (TypeError, ValueError):
+                    continue
+            rows: list[dict] = []
+            answered = 0
+            for idx, q in enumerate(req["questions"]):
+                item = by_index.get(idx) or {}
+                selected = [
+                    str(s).strip()
+                    for s in (item.get("selected") or [])
+                    if str(s).strip()
+                ]
+                other = str(item.get("other") or "").strip()
+                if item.get("skipped") or (not selected and not other):
+                    answer = "（用户跳过了该问题）"
+                else:
+                    answered += 1
+                    answer = "、".join(selected)
+                    if other:
+                        answer = f"{answer}；补充：{other}" if answer else other
+                rows.append({"question": q["question"], "answer": answer})
+            ask_result[req["call_id"]] = {
+                "summary": f"用户已回答 {answered}/{len(rows)} 个问题",
+                "answers": rows,
+                "_duration_ms": None,
+            }
 
     # 并行执行多个工具调用（检索类内部已有 GPU 锁；API 类并发安全），保持返回顺序
     tool_cache: dict = rt.setdefault("tool_cache", {})
@@ -290,9 +455,9 @@ def _tools_node(state: AgentState, runtime) -> dict:
                 "permission": "plan_only",
                 "_duration_ms": None,
             }
-        preset = plan_result.get(tc.get("id"))
+        preset = plan_result.get(tc.get("id")) or ask_result.get(tc.get("id"))
         if preset is not None:
-            # 计划提交不真正执行工具：结果由恢复段合成
+            # 计划提交/向用户提问不真正执行工具：结果由恢复段合成
             return tc, dict(preset)
         gate = approval.get(tc.get("id"))
         if gate is not None and not gate["ok"]:
@@ -349,6 +514,26 @@ def _tools_node(state: AgentState, runtime) -> dict:
                 "retry": True,
                 "_duration_ms": None,
             }
+        # 变更前预校验：目标缺失、枚举非法、新旧目标相同、转人工无用户授权。
+        # 纯计算，无副作用；失败复用上面的 retry 协议。
+        if effective_or(settings, "agent_tool_preflight", True):
+            contract = (getattr(deps, "tool_contracts", None) or {}).get(name)
+            reason = validate_call(
+                contract,
+                name,
+                args,
+                last_user_text=state.get("question") or "",
+                check_consent=bool(
+                    effective_or(settings, "agent_transfer_consent", True)
+                ),
+            )
+            if reason:
+                return tc, {
+                    "summary": reason,
+                    "error": reason,
+                    "retry": True,
+                    "_duration_ms": None,
+                }
         try:
             t0 = time.perf_counter()
             if name.startswith("mcp_"):
@@ -366,7 +551,11 @@ def _tools_node(state: AgentState, runtime) -> dict:
             # 旧检索结果失效，不能继续命中
             if cache_key is not None and not result.get("error"):
                 tool_cache[cache_key] = dict(result)
-            if name == "add_document" and not result.get("error"):
+            # 写/改/删/命令成功后，同轮再读必须看到新状态：任何敏感操作都可能
+            # 改动磁盘或知识库，清空 per-run 查询缓存（add_document 建索引同理）。
+            if not result.get("error") and (
+                name == "add_document" or is_sensitive_tool(name, args)
+            ):
                 tool_cache.clear()
             if gate is not None and gate.get("remember"):
                 result["summary"] = (
@@ -411,6 +600,31 @@ def _tools_node(state: AgentState, runtime) -> dict:
             "duration_ms": result.pop("_duration_ms", None),
         }
         state["tool_trace"].append(entry)
+        # 写后回读：在所有并行写完成后顺序执行（pool.map 之后），反映最终状态。
+        # 回读不产生模型可见的 tool_call，也不写 tool_trace；只把压缩后的
+        # 真实状态塞进本次结果，并记入 per-run ledger 供 finalize 核对。
+        contract = (getattr(deps, "tool_contracts", None) or {}).get(name)
+        if contract is not None and contract.mutating and isinstance(result, dict):
+            try:
+                ledger_entry = augment_mutation(
+                    name=name,
+                    args=tc.get("args") or {},
+                    result=result,
+                    tools_by_name=tools_by_name,
+                    contract=contract,
+                    is_sensitive=is_sensitive_tool,
+                    enabled=bool(
+                        effective_or(settings, "agent_tool_readback", True)
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - 回读失败不能影响工具结果
+                logger.warning("写后回读失败（%s）：%s", name, exc)
+                ledger_entry = None
+            if ledger_entry:
+                ledger_entry["call_id"] = tc.get("id") or ""
+                if ledger_entry.get("verified") is not None:
+                    result["_verified"] = ledger_entry["verified"]
+                rt.setdefault("mutation_ledger", []).append(ledger_entry)
         bus.emit(
             "tool_start",
             {
@@ -420,13 +634,12 @@ def _tools_node(state: AgentState, runtime) -> dict:
             },
         )
 
-        # 工具结果进历史前瘦身：content 类字段超过阈值时保留首尾、
-        # 中间省略（Hermes proactive_prune 思路）。模型已在本轮看过完整
-        # 输出，下一轮只需 summary + 关键片段；小输出原样保留，
-        # 不破坏工具已发的缓存前缀。
-        # 技能全文必须完整进历史（后续轮次还要照着步骤做），不参与通用瘦身
+        # 工具结果「入链即定型」：ToolMessage 首次进入历史时就已瘦身，
+        # 紧接着的 agent 节点看到的也是瘦身版（这是前缀缓存纯追加的前提）。
+        # 阈值按工具类型分级：技能全文不截断；read_file / knowledge_base_search
+        # 保留 6000；其余 2500。
         slim_result = _slim_tool_result(
-            result, content_limit=None if name == "skill_view" else 2500
+            result, content_limit=tool_content_limit(name)
         )
         messages.append(
             ToolMessage(
@@ -528,20 +741,48 @@ def _tools_node(state: AgentState, runtime) -> dict:
         and str((tc.get("args") or {}).get("path") or "").strip()
     ]
     if written_paths:
-        verify_results = _run_verify(settings, written_paths)
+        verify_results = _run_verify(
+            settings, written_paths, state.get("project_dir")
+        )
         if verify_results:
+            env_failures = [
+                r for r in verify_results if r.get("environment_error")
+            ]
+            real_results = [
+                r for r in verify_results if not r.get("environment_error")
+            ]
+            if env_failures and not verify_env_warned:
+                # 解释器/路径不可用是环境问题：只提示一次，不按文件错误计数，
+                # 也不诱导模型反复重写同一个文件。
+                verify_env_warned = True
+                _bump_patch(rt, "verify_env_missing")
+                reason = (
+                    env_failures[0].get("error")
+                    or env_failures[0].get("output")
+                    or ""
+                )
+                messages.append(
+                    SystemMessage(content=verify_env_notice(str(reason)))
+                )
+                bus.emit(
+                    "status",
+                    {
+                        "phase": "verify_env",
+                        "text": "自动验证不可用，已跳过（不影响文件写入）",
+                    },
+                )
             failed = [
                 r
-                for r in verify_results
+                for r in real_results
                 if r.get("exit_code") not in (None, 0) or r.get("error")
             ]
             lines = []
-            for r in verify_results:
+            for r in real_results:
                 head = str(r.get("output") or "").strip() or r.get("error") or "（无输出）"
                 lines.append(f"### {r['path']}  ({r['command']})\n{head[:300]}")
-            if not failed:
+            if real_results and not failed:
                 messages.append(SystemMessage(content=verify_pass_notice(lines)))
-            else:
+            elif failed:
                 verify_fail_count = int(state.get("verify_fail_count") or 0) + 1
                 state["verify_fail_count"] = verify_fail_count
                 _bump_patch(rt, "verify_fail")
@@ -688,6 +929,7 @@ def _tools_node(state: AgentState, runtime) -> dict:
         "forced_final": bool(state["forced_final"]),
         "last_call_warned": state["last_call_warned"],
         "verify_fail_count": int(state.get("verify_fail_count") or 0),
+        "verify_env_warned": verify_env_warned,
         "plan_done_count": state.get("plan_done_count", 0),
         "plan_progress_sig": state.get("plan_progress_sig", ""),
         "task_mode": bool(state.get("task_mode")),

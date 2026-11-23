@@ -5,7 +5,7 @@ RAGService = RetrieveMixin + IngestMixin + DocsMixin + RAGServiceBase 的薄装�
 方法按职责拆分：入库与索引账本 → ingest、在线检索 → retrieve、文档与生成 → docs，
 各自只允许依赖 base。
 """
-from .base import RAGServiceBase, UploadOutcome
+from .base import IndexRebuildInProgress, RAGServiceBase, UploadOutcome
 from .docs import DocsMixin
 from .ingest import IngestMixin
 from .retrieve import RetrieveMixin
@@ -15,4 +15,4 @@ class RAGService(RetrieveMixin, IngestMixin, DocsMixin, RAGServiceBase):
     """RAG 服务：加载、Parent-Child 切分、嵌入、存储、检索、重排、生成串成完整流程。"""
 
 
-__all__ = ["RAGService", "UploadOutcome"]
+__all__ = ["RAGService", "UploadOutcome", "IndexRebuildInProgress"]

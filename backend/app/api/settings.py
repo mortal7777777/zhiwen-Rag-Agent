@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..agent.agent import AgentService
 from ..config import get_settings
 from ..db import get_db
+from ..provider_candidates import models_candidates as _models_candidates
 from ..rag.service import RAGService
 from ..runtime_config import (
     EDITABLE_KEYS,
@@ -24,6 +25,26 @@ from ..runtime_config import (
 from .deps import get_agent_service, get_service
 
 router = APIRouter(tags=["settings"])
+
+# 这些键决定本地嵌入/重排/索引资源，保存后必须全量 refresh；
+# 其余键只重置对话模型/查询扩展器，避免每次改阈值都卸载重载本地 BGE。
+_RAG_INFRA_KEYS = frozenset(
+    {
+        "data_dir",
+        "embedding_provider",
+        "embedding_api_base_url",
+        "embedding_api_key",
+        "embedding_api_model",
+        "reranker_provider",
+        "reranker_api_base_url",
+        "reranker_api_key",
+        "reranker_api_model",
+    }
+)
+
+
+def _needs_full_rag_refresh(updates: dict) -> bool:
+    return bool(set(updates or {}) & _RAG_INFRA_KEYS)
 
 
 @router.get("/settings/schema")
@@ -92,18 +113,41 @@ def _mask_provider(provider: dict) -> dict:
     return out
 
 
+_HOST_SENSITIVE_SETTING_KEYS = frozenset(
+    {
+        "data_dir",
+        "tool_workspace",
+        "project_memory_file",
+        "verify_command",
+        "command_allowlist",
+        "tool_permission_mode",
+        "skill_sandbox_enabled",
+    }
+)
+
+
 @router.put("/settings")
 def update_settings(
     payload: dict,
+    request: Request = None,
     db: Session = Depends(get_db),
     agent: AgentService = Depends(get_agent_service),
     service: RAGService = Depends(get_service),
 ) -> dict:
     """保存设置并立即生效（清空模型缓存，下次请求用新配置）。"""
     updates = payload.get("updates") if isinstance(payload, dict) else None
-    merged = save_overrides(db, updates or {}, settings=get_settings())
+    if not isinstance(updates, dict):
+        updates = {}
+    if set(updates) & _HOST_SENSITIVE_SETTING_KEYS:
+        from .fs import require_local_or_token
+
+        require_local_or_token(request)
+    merged = save_overrides(db, updates, settings=get_settings())
     agent.refresh()
-    service.refresh()
+    if _needs_full_rag_refresh(updates):
+        service.refresh()
+    else:
+        service.refresh_chat_only()
     # 响应脱敏:providers 里的 api_key 只留后 4 位(与 GET 一致),
     # 避免保存设置后响应把完整密钥明文带回浏览器/日志
     masked = dict(merged)
@@ -115,45 +159,6 @@ def update_settings(
     return {"ok": True, "overrides": masked}
 
 
-# Anthropic 兼容子路径：剥离后可回到同一厂商的 OpenAI 兼容根端点
-# （照搬 cc-switch services/model_fetch.rs 的 strip_compat_suffix 列表，
-#  长后缀在前，避免 /anthropic 提前匹配掉 /api/anthropic）
-_COMPAT_SUFFIXES = ("/api/anthropic", "/apps/anthropic", "/anthropic")
-
-
-def _models_candidates(cfg: dict) -> list[tuple[str, dict]]:
-    """按序生成模型列表候选请求（URL + 鉴权头）。
-
-    1. 格式对应端点：openai → {base}/models（Bearer）；
-       anthropic → {base}/v1/models（x-api-key，Anthropic 官方形状）；
-    2. 剥离 Anthropic 兼容子路径后的 OpenAI 兼容端点：{root}/models、
-       {root}/v1/models——DeepSeek /anthropic 未实现模型列表，但根端点可用
-       （cc-switch 的 DeepSeek 预设同样直接指向 https://api.deepseek.com/models）。
-    """
-    from ..runtime_config import normalize_base_url, provider_api_format
-
-    fmt = provider_api_format(cfg)
-    base = normalize_base_url(cfg.get("base_url"), fmt)
-    api_key = cfg.get("api_key") or ""
-    auth = {"Authorization": f"Bearer {api_key}"}
-    if fmt == "anthropic":
-        candidates = [
-            (
-                f"{base}/v1/models",
-                {"x-api-key": api_key, "anthropic-version": "2023-06-01"},
-            )
-        ]
-    else:
-        candidates = [(f"{base}/models", auth)]
-    root = base
-    for suffix in _COMPAT_SUFFIXES:
-        if base.endswith(suffix):
-            root = base[: -len(suffix)]
-            break
-    if root != base:
-        candidates.append((f"{root}/models", auth))
-        candidates.append((f"{root}/v1/models", auth))
-    return candidates
 
 
 @router.get("/settings/models")
@@ -300,4 +305,80 @@ def switch_chat_provider(
         "ok": True,
         "active_chat_provider": merged.get("active_chat_provider"),
         "model": target.get("model") or "",
+    }
+
+
+@router.post("/settings/tool-permission-mode")
+def switch_tool_permission_mode(
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    """聊天页快捷切换敏感操作确认模式。
+
+    只写覆盖值：权限模式在 tools 节点按请求读取（effective_or），
+    不涉及模型/RAG 缓存，无需 refresh。
+    """
+    mode = str((payload or {}).get("mode") or "").strip().lower()
+    if mode not in ("ask", "acceptedits", "allow"):
+        raise HTTPException(status_code=422, detail="无效的权限模式")
+    merged = save_overrides(
+        db, {"tool_permission_mode": mode}, settings=get_settings()
+    )
+    return {
+        "ok": True,
+        "tool_permission_mode": merged.get("tool_permission_mode") or mode,
+    }
+
+
+@router.post("/settings/chat-provider-thinking")
+def switch_chat_provider_thinking(
+    payload: dict,
+    db: Session = Depends(get_db),
+    agent: AgentService = Depends(get_agent_service),
+    service: RAGService = Depends(get_service),
+) -> dict:
+    """聊天页快捷切换当前对话供应商的思考开关/强度（对后续消息生效）。"""
+    payload = payload or {}
+    has_enabled = "thinking_enabled" in payload
+    effort = payload.get("thinking_effort")
+    if effort is not None:
+        effort = str(effort).strip().lower()
+        if effort not in ("low", "medium", "high", "max"):
+            raise HTTPException(status_code=422, detail="无效的思考强度")
+    if not has_enabled and effort is None:
+        raise HTTPException(
+            status_code=422, detail="缺少 thinking_enabled 或 thinking_effort"
+        )
+
+    settings = get_settings()
+    active_id = get_overrides().get("active_chat_provider") or (
+        get_active_provider(settings, "chat") or {}
+    ).get("id")
+    providers = [dict(p) for p in get_providers(settings)]
+    target = next(
+        (
+            p
+            for p in providers
+            if p.get("id") == active_id and p.get("type") == "chat"
+        ),
+        None,
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="当前对话供应商不存在")
+
+    if effort is not None:
+        # 选具体强度意味着开启思考（关闭走 thinking_enabled=false）
+        target["thinking_effort"] = effort
+        target["thinking_enabled"] = True
+    if has_enabled:
+        target["thinking_enabled"] = bool(payload.get("thinking_enabled"))
+
+    save_overrides(db, {"providers": providers}, settings=settings)
+    agent.refresh_chat_only()
+    service.refresh_chat_only()
+    return {
+        "ok": True,
+        "provider_id": active_id,
+        "thinking_enabled": bool(target.get("thinking_enabled", True)),
+        "thinking_effort": target.get("thinking_effort") or "high",
     }

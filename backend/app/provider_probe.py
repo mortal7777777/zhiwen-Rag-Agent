@@ -8,6 +8,7 @@ base_url 主机一致"——否则把已存 Key 发往任意 base_url 就是一�
 
 from __future__ import annotations
 
+import ipaddress
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
@@ -15,6 +16,11 @@ from urllib.parse import urlparse
 from .runtime_config import build_chat_model
 
 MAX_ERROR_CHARS = 200
+_METADATA_HOSTS = {
+    "169.254.169.254",
+    "metadata.google.internal",
+    "100.100.100.200",
+}
 
 
 def _host_of(url: str) -> str:
@@ -22,6 +28,31 @@ def _host_of(url: str) -> str:
         return (urlparse(str(url or "")).hostname or "").lower()
     except ValueError:
         return ""
+
+
+def _validate_probe_url(url: str | None) -> str | None:
+    """校验供应商 base_url 协议与主机，拦截非 HTTP(S) 协议及云元数据 SSRF 地址。"""
+    raw = str(url or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return "供应商地址格式不合法"
+    if parsed.scheme.lower() not in ("http", "https"):
+        return "供应商地址仅支持 http 或 https 协议"
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return "供应商地址缺少主机名"
+    if host in _METADATA_HOSTS:
+        return "禁止访问云元数据地址"
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+        if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+            return "禁止访问链路本地或保留地址"
+    except ValueError:
+        pass
+    return None
 
 
 def restore_masked_key(cfg: dict, saved: list[dict] | None) -> tuple[dict, str | None]:
@@ -54,14 +85,17 @@ def _short_error(exc: Exception) -> str:
 
 def probe_models(cfg: dict, timeout: float = 15.0) -> dict:
     """拉模型列表（复用 /settings/models 的候选端点逻辑），非致命探测。"""
-    from .api.settings import _models_candidates
     from .network import make_httpx_client
+    from .provider_candidates import models_candidates
 
     if not cfg.get("api_key"):
         return {"ok": False, "models": [], "error": "未配置 API Key"}
+    url_err = _validate_probe_url(cfg.get("base_url"))
+    if url_err:
+        return {"ok": False, "models": [], "error": url_err}
     last_error = ""
     with make_httpx_client(timeout=timeout) as client:
-        for url, headers in _models_candidates(cfg):
+        for url, headers in models_candidates(cfg):
             try:
                 resp = client.get(url, headers=headers)
                 resp.raise_for_status()
@@ -111,6 +145,9 @@ def probe_chat(cfg: dict, timeout: float = 20.0) -> dict:
     model = str(cfg.get("model") or "").strip()
     if not model:
         return {"ok": False, "latency_ms": None, "error": "未设置默认模型"}
+    url_err = _validate_probe_url(cfg.get("base_url"))
+    if url_err:
+        return {"ok": False, "latency_ms": None, "error": url_err}
     started = time.perf_counter()
     llm = None
     try:

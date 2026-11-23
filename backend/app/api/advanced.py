@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -16,9 +16,27 @@ from ..db import repository as repo
 from ..mcp_secrets import mask_mcp_servers, merge_mcp_secrets
 from ..project_memory import export_project_memory, load_project_memory, project_memory_path
 from ..runtime_config import effective_or, load_overrides
-from .deps import get_agent_service
+from .deps import get_agent_service, get_service
 
 router = APIRouter(tags=["advanced"])
+
+
+@router.get("/models/status")
+def models_status(service=Depends(get_service)) -> dict:
+    """本地 GPU 模型加载/空闲状态（不触发模型加载）。"""
+    return service.gpu_models_status()
+
+
+@router.post("/models/warm")
+def models_warm(service=Depends(get_service)) -> dict:
+    """立即加载本地 BGE/reranker（空闲释放后的手动预热）。"""
+    service.acquire_gpu()
+    try:
+        _ = service.embeddings
+        _ = service.reranker
+        return service.gpu_models_status()
+    finally:
+        service.release_gpu()
 
 
 # 人工确认（HITL）审批接口已移除：审批走原生 interrupt 挂起，
@@ -79,10 +97,14 @@ def list_mcp_servers(
 @router.put("/mcp")
 def save_mcp_servers(
     payload: dict,
+    request: Request = None,
     db: Session = Depends(get_db),
     agent: LangGraphAgentService = Depends(get_agent_service),
 ) -> dict:
     """保存 MCP 服务器配置并重新加载连接。"""
+    from .fs import require_local_or_token
+
+    require_local_or_token(request)
     cleaned = []
     for s in payload.get("servers") or []:
         cleaned.append(
@@ -121,10 +143,12 @@ def save_mcp_servers(
 
 
 @router.post("/mcp/test")
-def test_mcp_server(payload: dict) -> dict:
+def test_mcp_server(payload: dict, request: Request = None) -> dict:
     """一次性测试 MCP 服务器连接（不保存、独立进程）。"""
     from ..mcp_manager import MCPServerSession
+    from .fs import require_local_or_token
 
+    require_local_or_token(request)
     session = MCPServerSession(payload)
     started = time.time()
     ok = session.start(timeout=60)
@@ -159,6 +183,33 @@ def connect_mcp(
 # ---------------- 原生 checkpointer：时间旅行（快照审计） ----------------
 
 
+def _checkpoint_full_messages(
+    ch: dict, db: Session, conversation_id: int
+) -> list:
+    """把检查点 state 消息与历史前缀拼回完整链（旧格式原样返回）。
+
+    P2-8 后 state["messages"] 不再含历史窗口；时间线展示/回滚需要按
+    history_row_ids 从 DB 取回当时的历史，否则回滚会丢掉更早的对话。
+    """
+    messages = list(ch.get("messages") or [])
+    insert_at = ch.get("history_insert_at")
+    row_ids = ch.get("history_row_ids") or []
+    if insert_at is None or not row_ids:
+        return messages
+    try:
+        rows = repo.get_messages_by_ids(db, [int(i) for i in row_ids])
+        if not rows:
+            return messages
+        from ..agent.utils import _rows_to_history
+
+        history = _rows_to_history(rows, [])
+        return (
+            messages[: int(insert_at)] + history + messages[int(insert_at):]
+        )
+    except Exception:
+        return messages
+
+
 @router.get("/conversations/{conversation_id}/timeline")
 def conversation_timeline(
     conversation_id: int,
@@ -175,11 +226,17 @@ def conversation_timeline(
         cp = tup.checkpoint or {}
         ch = cp.get("channel_values") or {}
         msgs = ch.get("messages") or []
+        # 新格式检查点不含历史：展示总条数时把窗口行数补回（近似值）
+        history_count = (
+            len(ch.get("history_row_ids") or [])
+            if ch.get("history_insert_at") is not None
+            else 0
+        )
         items.append(
             {
                 "checkpoint_id": cp.get("id"),
                 "created_at": cp.get("ts"),
-                "messages": len(msgs),
+                "messages": len(msgs) + history_count,
                 "plan": ch.get("plan_steps") or [],
                 "todos": ch.get("todos") or [],
                 "plan_done_count": ch.get("plan_done_count", 0),
@@ -197,6 +254,7 @@ def conversation_timeline_detail(
     conversation_id: int,
     checkpoint_id: str,
     agent: LangGraphAgentService = Depends(get_agent_service),
+    db: Session = Depends(get_db),
 ) -> dict:
     """查看某个快照的完整内容（消息/计划/任务清单/来源/轨迹）。"""
     saver = getattr(agent, "checkpoint_saver", None)
@@ -213,12 +271,13 @@ def conversation_timeline_detail(
     if tup is None:
         raise HTTPException(status_code=404, detail="快照不存在")
     ch = (tup.checkpoint or {}).get("channel_values") or {}
+    full = _checkpoint_full_messages(ch, db, conversation_id)
     return {
         "checkpoint_id": (tup.checkpoint or {}).get("id"),
         "created_at": (tup.checkpoint or {}).get("ts"),
         "messages": [
             {"type": type(m).__name__, "content": getattr(m, "content", "")}
-            for m in (ch.get("messages") or [])
+            for m in full
         ],
         "plan": ch.get("plan_steps") or [],
         "todos": ch.get("todos") or [],
@@ -237,7 +296,10 @@ def rollback_to_checkpoint(
     """把会话回滚到某个快照：重建消息历史与任务清单，下一次提问从该状态继续。"""
     from ..native_checkpoint import messages_to_history_rows
     from ..todos import save_todos
+    from .agent import is_conversation_active
 
+    if is_conversation_active(conversation_id):
+        raise HTTPException(status_code=409, detail="会话正在运行，先停止后再回滚")
     saver = getattr(agent, "checkpoint_saver", None)
     if saver is None:
         raise HTTPException(status_code=404, detail="原生 checkpointer 未启用")
@@ -252,7 +314,9 @@ def rollback_to_checkpoint(
     if tup is None:
         raise HTTPException(status_code=404, detail="快照不存在")
     ch = (tup.checkpoint or {}).get("channel_values") or {}
-    rows = messages_to_history_rows(ch.get("messages") or [])
+    rows = messages_to_history_rows(
+        _checkpoint_full_messages(ch, db, conversation_id)
+    )
     repo.clear_messages(db, conversation_id)
     for row in rows:
         repo.add_message(
@@ -263,6 +327,14 @@ def rollback_to_checkpoint(
             tool_trace=row.get("tool_trace"),
         )
     save_todos(db, conversation_id, ch.get("todos") or [])
+    # 线程里仍留着回滚点之后的快照；删除线程强制下一轮从 MySQL 历史重建，
+    # 避免崩溃续跑/恢复读到与已回滚消息矛盾的状态。
+    abandon = getattr(agent, "abandon_run", None)
+    if callable(abandon):
+        try:
+            abandon(conversation_id)
+        except Exception:
+            pass
     return {
         "ok": True,
         "checkpoint_id": checkpoint_id,
@@ -289,9 +361,13 @@ def list_hooks(db: Session = Depends(get_db)) -> dict:
 @router.put("/hooks")
 def save_hooks(
     payload: HooksUpdateRequest,
+    request: Request = None,
     db: Session = Depends(get_db),
 ) -> dict:
     """保存 hooks 配置（立即生效，无需重启）。"""
+    from .fs import require_local_or_token
+
+    require_local_or_token(request)
     cleaned = []
     for h in payload.hooks:
         command = str(h.get("command") or "").strip()
@@ -328,9 +404,13 @@ class ToolExecRequest(BaseModel):
 @router.post("/tools/execute")
 def execute_tool(
     req: ToolExecRequest,
+    request: Request = None,
     db: Session = Depends(get_db),
 ) -> dict:
     """执行受控工具（文件操作 / 白名单命令）。"""
+    from .fs import require_local_or_token
+
+    require_local_or_token(request)
     settings = get_settings()
     load_overrides(db)
     # 注意：这里原来写的是 effective(..., False)，会让 config/env 里的 True 失效，
@@ -394,9 +474,13 @@ def skill_commands(name: str) -> dict:
 def run_skill_command(
     name: str,
     payload: dict,
+    request: Request = None,
     db: Session = Depends(get_db),
 ) -> dict:
     """在沙箱中执行技能命令（需开启技能沙箱 + 命令在白名单内）。"""
+    from .fs import require_local_or_token
+
+    require_local_or_token(request)
     settings = get_settings()
     load_overrides(db)
     if not effective_or(settings, "skill_sandbox_enabled", False):

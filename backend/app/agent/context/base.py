@@ -79,6 +79,9 @@ def trim_history_for_budget(rows: list[dict], budget_tokens: int) -> list[dict]:
         kept.append(row)
         total += tokens
     kept.reverse()
+    if not kept:
+        # 最近一条本身就超预算：至少保留它，绝不返回空历史
+        kept = rows[-1:]
     # 最小回收门控：裁剪掉的 token 不足预算 15% 时不值得断缓存前缀
     total_all = sum(estimate_tokens(r["content"]) for r in rows)
     reclaimed = total_all - total
@@ -116,6 +119,24 @@ class ContextServiceBase:
         )
 
 
+    def _conversation_budget_category(
+        self, db: Session, conversation_id: int
+    ) -> str | None:
+        """会话锁定的模板类别；无模板/未知类别返回 None。"""
+        try:
+            conv = repo.get_conversation(db, conversation_id)
+            if conv is None:
+                return None
+            # 优先用会话锁定的模板类别：编辑模板分类不应改变进行中会话的预算
+            lock = repo.get_conversation_prompt_lock(conv)
+            category = (lock or {}).get("template_category")
+            if not category and getattr(conv, "template_id", None):
+                tpl = repo.get_template(db, conv.template_id)
+                category = tpl.category if tpl is not None else None
+            return category or None
+        except Exception:
+            return None
+
     def history_budget_for(self, db: Session, conversation_id: int) -> int:
         """按会话绑定的模板类别返回历史上下文 token 预算（config.history_budget_*）。
 
@@ -132,16 +153,16 @@ class ContextServiceBase:
             "writing": self.settings.history_budget_writing,
             "translate": self.settings.history_budget_translate,
         }
-        budget = default
-        try:
-            conv = repo.get_conversation(db, conversation_id)
-            if conv is not None and getattr(conv, "template_id", None):
-                tpl = repo.get_template(db, conv.template_id)
-                if tpl is not None:
-                    budget = by_category.get(tpl.category, default)
-        except Exception:
-            pass
+        category = self._conversation_budget_category(db, conversation_id)
+        budget = by_category.get(category, default) if category else default
         return self._clamp_to_context_window(budget)
+
+    def history_budget_source(self, db: Session, conversation_id: int) -> str:
+        """预算来源（给 /context 面板解释为什么是这个数）。"""
+        category = self._conversation_budget_category(db, conversation_id)
+        if category:
+            return f"模板类别 {category}"
+        return "设置 history_max_tokens"
 
 
     def context_ceiling(self) -> int:

@@ -10,6 +10,8 @@ from datetime import datetime
 
 import pytest
 
+from fastapi import HTTPException
+
 from app.api import runs as runs_module
 
 # 2026-10-19 是周一；北京 13:00 = UTC 05:00（Off-Peak）
@@ -81,3 +83,56 @@ def test_history_without_model_falls_back_to_active(monkeypatch):
         usd_cny=7.2,
     )
     assert cost == pytest.approx(0.15 * 7.2)
+
+
+def test_enrich_run_row_adds_cache_rate_and_cost(monkeypatch):
+    monkeypatch.setattr(runs_module, "_active_model", lambda: "deepseek-v4.1-flash")
+    row = {
+        "token_usage": {
+            "cache_hit_tokens": 1_000_000,
+            "cache_miss_tokens": 1_000_000,
+            "completion_tokens": 0,
+            "model": "deepseek-v4.1-flash",
+        },
+        "created_at": MONDAY_OFF_PEAK,
+    }
+    out = runs_module._enrich_run_row(row)
+    assert out["cache_hit_rate"] == 0.5
+    assert out["estimated_cost_yuan"] > 0
+
+
+def test_scope_and_quote_meta_for_replay():
+    from app.agent.nodes.finalize import _quote_meta, _scope_meta
+
+    assert _scope_meta({}) == {}
+    scope = _scope_meta(
+        {"kb_scope_paths": ["a.md", "b.md"], "kb_scope_label": "a、b"}
+    )
+    assert scope == {"label": "a、b", "files": ["a.md", "b.md"], "count": 2}
+
+    assert _quote_meta({}) == {}
+    quote = _quote_meta(
+        {
+            "quote": {
+                "text": "原文",
+                "context": "上下文",
+                "source": "a.pdf",
+                "page": 3,
+            }
+        }
+    )
+    assert quote["source"] == "a.pdf"
+    assert quote["page"] == 3
+    assert quote["chars"] == 2
+    assert quote["context_chars"] == 3
+    assert len(quote["sha1"]) == 12
+
+
+def test_get_run_returns_404_when_missing():
+    class _EmptyDb:
+        def get(self, model, key):
+            return None
+
+    with pytest.raises(HTTPException) as exc:
+        runs_module.get_run(123, db=_EmptyDb())
+    assert exc.value.status_code == 404

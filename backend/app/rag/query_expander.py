@@ -135,21 +135,35 @@ class QueryExpander:
     ) -> tuple[list[str], dict[str, list[str]]]:
         """全局扩展 + 每本书的 1-2 条书内查询。
 
-        书内查询用一次 LLM 调用批量生成；失败时 by_book 为空，调用方
-        退回 P0 的“原问题+全局扩展”书内检索。
+        全局扩展与书内查询互不依赖，并行提交（省一次串行 LLM 往返）；
+        失败时 by_book 为空，调用方退回 P0 的“原问题+全局扩展”书内检索。
         """
-        queries = self.expand(question, history)
         titles = [str(t).strip() for t in (titles or []) if str(t).strip()]
         if not titles:
-            return queries, {}
+            return self.expand(question, history), {}
         cache_key = self._cache_key(question, history) + "|" + "|".join(titles)
         hit = self._book_cache.get(cache_key)
         if hit and time.time() - hit[0] < self._cache_ttl:
-            return queries, {k: list(v) for k, v in hit[1].items()}
-        try:
-            raw = self._chat.per_book_queries(question, titles, history)
-        except Exception:
-            raw = {}
+            return self.expand(question, history), {
+                k: list(v) for k, v in hit[1].items()
+            }
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            queries_future = pool.submit(self.expand, question, history)
+            book_future = pool.submit(
+                self._chat.per_book_queries, question, titles, history
+            )
+            try:
+                queries = queries_future.result()
+            except Exception as exc:
+                logger.warning("全局查询扩展失败，退化为原问题：%s", exc)
+                queries = [question]
+            try:
+                raw = book_future.result()
+            except Exception:
+                raw = {}
         by_book: dict[str, list[str]] = {}
         for title in titles:
             seen: set[str] = set()

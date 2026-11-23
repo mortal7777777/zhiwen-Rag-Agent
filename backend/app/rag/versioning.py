@@ -182,11 +182,13 @@ def archive_as_version(
 
 
 def restore_version(
-    service, db, *, version_id: int, new_version_no: str, note: str = ""
+    service, db, *, version_id: int, new_version_no: str, note: str = "",
+    defer_index: bool = False,
 ) -> dict:
     """恢复某历史版本为当前，原当前版本归档（两者交换；当前不一定是最大号）。
 
     跨扩展名恢复：版本文件以「主名 + 版本扩展名」落回 data/，文档族整体改名为新路径。
+    defer_index=True：交换完成后即返回，重嵌交给后台增量索引线程（大书分钟级）。
     """
     from ..db import repository as repo
 
@@ -262,8 +264,11 @@ def restore_version(
             repo.rename_document_versions(db, doc_rel, new_rel)
             new_relative_path = new_rel
 
-        service.ensure_index()  # changed（或跨扩展名时 removed+added）→ 重嵌
+        if not defer_index:
+            service.ensure_index()  # changed（或跨扩展名时 removed+added）→ 重嵌
 
+    if defer_index:
+        service.start_background_ingest(reason="restore")
     logger.info("已恢复《%s》的 %s 版本为当前", doc_rel, row.version_no)
     payload = list_versions(service, db, new_rel)
     payload["documents"] = service.list_documents()
@@ -293,8 +298,13 @@ def delete_version(service, db, *, version_id: int) -> dict:
     return {"versions": _versions_rows(service, db, doc_rel)}
 
 
-def rename_document(service, db, *, relative_path: str, new_name: str) -> list[dict]:
-    """重命名（仅同目录改基名）：重名（精确/归一化）→ FileExistsError。"""
+def rename_document(
+    service, db, *, relative_path: str, new_name: str, defer_index: bool = False
+) -> list[dict]:
+    """重命名（仅同目录改基名）：重名（精确/归一化）→ FileExistsError。
+
+    defer_index=True：改名（文件移动 + 元数据）完成后即返回，该书重嵌
+    （removed+added → 全删重嵌，大书可达分钟级）交给后台增量索引线程。"""
     from ..db import repository as repo
 
     data_dir = Path(service.settings.data_dir)
@@ -347,7 +357,11 @@ def rename_document(service, db, *, relative_path: str, new_name: str) -> list[d
             except Exception as rollback_exc:
                 logger.warning("改名回滚失败：%s", rollback_exc)
             raise
-        service.ensure_index()  # removed+added → 该书全删重嵌
+        if not defer_index:
+            service.ensure_index()  # removed+added → 该书全删重嵌
 
+    if defer_index:
+        # 大书重嵌分钟级：锁内只做文件/元数据移动，重嵌交后台线程
+        service.start_background_ingest(reason="rename")
     logger.info("文档已改名：%s → %s", relative_path, new_rel)
     return service.list_documents()

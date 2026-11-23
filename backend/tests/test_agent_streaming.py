@@ -134,7 +134,7 @@ def test_tool_round_streams_then_retracts():
     ]
     assert [e["event"] for e in stream_events] == ["stream_delta", "stream_end"]
     assert stream_events[0]["data"] == "我先读一下文件 "
-    assert stream_events[1]["data"] == {"keep": False}
+    assert stream_events[1]["data"] == {"keep": False, "reason": "tool_round"}
     assert not any(e["event"] == "token" for e in events)
     assert state["runtime"]["final_text"] == ""
     assert out["pending_tool_calls"] and out["pending_tool_calls"][0]["name"] == "read_file"
@@ -167,5 +167,5 @@ def test_stall_after_partial_output_retracts():
     assert state["runtime"]["status"] == "error"
     assert "卡死" in state["runtime"]["error"]
     ends = [e for e in events if e["event"] == "stream_end"]
-    assert ends and ends[-1]["data"] == {"keep": False}
+    assert ends and ends[-1]["data"] == {"keep": False, "reason": "stalled"}
     assert not any(e["event"] == "token" for e in events)

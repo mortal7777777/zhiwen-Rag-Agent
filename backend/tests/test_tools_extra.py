@@ -29,7 +29,9 @@ def test_safe_path_rejects_escape(tmp_path):
 
 def test_command_allowlist():
     settings = FakeSettings(".", allowlist="python, ls, echo")
-    assert tools_extra.command_allowed(settings, "python run.py") == (True, "")
+    # 解释器前缀不能自动放行：命令体不受前缀约束（python -c 可做任意事）
+    ok, reason = tools_extra.command_allowed(settings, "python run.py")
+    assert ok is False and "解释器" in reason
     assert tools_extra.command_allowed(settings, "ls -la") == (True, "")
     ok, reason = tools_extra.command_allowed(settings, "rm -rf x")
     assert ok is False and "白名单" in reason
@@ -46,15 +48,15 @@ def test_allowlist_rejects_compound_commands():
         assert ok is False, cmd
         assert "重定向" in reason, cmd
 
-    # 管道 / 串联 / 命令替换
+    # 管道 / 串联 / 命令替换 / 多行
     for cmd in ("ls | xargs rm -rf", "ls; rm -rf x", "echo $(rm -rf x)", "ls && rm x"):
         ok, reason = tools_extra.command_allowed(settings, cmd)
         assert ok is False, cmd
+    ok, reason = tools_extra.command_allowed(settings, "ls\nrm -rf x")
+    assert ok is False and "多行" in reason
 
     # 引号内的操作符是普通字符，不能误伤
-    assert tools_extra.command_allowed(
-        settings, 'python -c "import a; print(b)"'
-    ) == (True, "")
+    assert tools_extra.command_allowed(settings, 'echo "a;b"') == (True, "")
 
     # 无害重定向放行
     assert tools_extra.command_allowed(settings, "ls 2>/dev/null") == (True, "")

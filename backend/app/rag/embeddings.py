@@ -133,12 +133,10 @@ class LocalBGEEmbeddings:
             raise
 
     def embed_documents(self, texts: list[str], batch_size: int = 64) -> list[list[float]]:
-        """批量生成文档向量。"""
+        """批量生成文档向量（输出与入参一一对应，空白文本用占位符保住位置）。"""
         if not texts:
             return []
-        cleaned = [text.strip() for text in texts if text.strip()]
-        if not cleaned:
-            return []
+        cleaned = [text.strip() or " " for text in texts]
         try:
             model = self._ensure_model()
             vectors = model.encode(
@@ -159,9 +157,7 @@ class LocalBGEEmbeddings:
         """批量生成查询向量（带 BGE 查询前缀；一次 encode 替代逐条调用）。"""
         if not texts:
             return []
-        cleaned = [QUERY_PREFIX + text.strip() for text in texts if text.strip()]
-        if not cleaned:
-            return []
+        cleaned = [QUERY_PREFIX + (text.strip() or " ") for text in texts]
         try:
             model = self._ensure_model()
             vectors = model.encode(
@@ -240,8 +236,8 @@ class APIBGEEmbeddings:
     def embed_documents(
         self, texts: list[str], batch_size: int | None = None
     ) -> list[list[float]]:
-        """批量嵌入（按 max_batch 分批请求，保持输入顺序）。"""
-        cleaned = [t.strip() for t in (texts or []) if t and t.strip()]
+        """批量嵌入（按 max_batch 分批请求，输出与入参一一对应）。"""
+        cleaned = [str(t or "").strip() or " " for t in (texts or [])]
         if not cleaned:
             return []
         batch = batch_size or self.max_batch

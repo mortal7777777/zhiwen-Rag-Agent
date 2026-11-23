@@ -204,8 +204,9 @@ def test_empty_body_retries_even_when_usage_is_missing(monkeypatch):
 
 
 def test_tool_result_is_slimmed_in_history(monkeypatch):
+    # read_file 的分级阈值是 6000，超过才会触发瘦身
     tool = _FakeTool(
-        "read_file", {"summary": "ok", "content": "x" * 6000}
+        "read_file", {"summary": "ok", "content": "x" * 7000}
     )
     chat = _SeqChat(
         [
@@ -218,7 +219,7 @@ def test_tool_result_is_slimmed_in_history(monkeypatch):
 
     tool_msg = next(m for m in chat.seen if isinstance(m, ToolMessage))
     assert "中间省略" in tool_msg.content
-    assert len(tool_msg.content) < 6000
+    assert len(tool_msg.content) < 7000
 
 
 def test_skill_view_content_is_not_slimmed(monkeypatch):
@@ -312,3 +313,52 @@ def test_subagent_llm_call_budget_is_shared_and_enforced(monkeypatch):
     assert chat.calls == 1
     assert deps.subagent_llm_calls == 1
     assert "预算已耗尽" in out["subagent_results"][0]["summary"]
+
+
+def test_llm_semaphore_released_during_tool_io(monkeypatch):
+    """回归：子代理只在发起 LLM 请求时持信号量，工具 I/O 期间必须释放。"""
+
+    class _RecordingRag:
+        def __init__(self):
+            self.held = 0
+            self.acquires = 0
+            self.releases = 0
+
+        def acquire_llm(self):
+            self.held += 1
+            self.acquires += 1
+
+        def release_llm(self):
+            self.held -= 1
+            self.releases += 1
+
+    rag = _RecordingRag()
+
+    class _CheckingTool(_FakeTool):
+        def invoke(self, args):
+            assert rag.held == 0, "工具 I/O 期间不应持有 LLM 信号量"
+            return super().invoke(args)
+
+    tool = _CheckingTool("read_file", {"summary": "ok"})
+    chat = _SeqChat(
+        [
+            AIMessage(content="", tool_calls=[_call("read_file")]),
+            AIMessage(content="结论"),
+        ]
+    )
+    deps = SimpleNamespace(
+        service=SimpleNamespace(
+            settings=_Settings(),
+            chat=chat,
+            chat_plain=_SeqChat([]),
+            rag=rag,
+        ),
+        bus=EventBus(Queue()),
+        db=None,
+        stop_event=None,
+    )
+
+    _run(monkeypatch, chat=chat, tool=tool, deps=deps)
+
+    assert rag.held == 0
+    assert rag.acquires == rag.releases == 2  # 两轮模型调用各一次

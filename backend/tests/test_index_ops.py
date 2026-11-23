@@ -117,7 +117,9 @@ class _StubStore:
         self.deleted.append(relative_path)
         return 2
 
-    def bulk_index(self, chunks, embeddings, batch_size=64, target=None) -> int:
+    def bulk_index(
+        self, chunks, embeddings, batch_size=64, target=None, batch_guard=None
+    ) -> int:
         self.bulk_sizes.append(len(chunks))
         self.count += len(chunks)
         return len(chunks)
@@ -138,7 +140,11 @@ def _service(tmp_path) -> RAGService:
     settings.ensure_dirs()
     service = RAGService(settings)
     service._embeddings = _FakeEmbeddings()
-    service._loader_kwargs = lambda: {"layout_pdf": False, "pdf_workers": 1}
+    service._loader_kwargs = lambda report=None: {
+        "layout_pdf": False,
+        "pdf_workers": 1,
+        **({"report": report} if report is not None else {}),
+    }
     return service
 
 
@@ -166,12 +172,17 @@ def test_apply_incremental_delete_modify_add(tmp_path):
 
     store = _StubStore()
     service._apply_incremental(
-        store, file_fps, added=["new.md"], changed=["mod.md"], removed=["gone.md"]
+        store,
+        file_fps,
+        old_fps,
+        added=["new.md"],
+        changed=["mod.md"],
+        removed=["gone.md"],
     )
 
-    # 删除与修改都先删旧块；只有新增/修改才重嵌
+    # 删除与修改都先删旧块；只有新增/修改才重嵌（逐文件写入以便失败隔离）
     assert set(store.deleted) == {"mod.md", "gone.md"}
-    assert len(store.bulk_sizes) == 1 and store.bulk_sizes[0] > 0
+    assert len(store.bulk_sizes) == 2 and all(n > 0 for n in store.bulk_sizes)
 
     # 账本文件集 = 当前 data/ 内容；已删文件的 parent 副本被移除
     manifest = json.loads(service._manifest_file().read_text(encoding="utf-8"))
@@ -197,9 +208,52 @@ def test_apply_incremental_removal_only_never_embeds(tmp_path):
     )
 
     store = _StubStore()
-    service._apply_incremental(store, file_fps, added=[], changed=[], removed=["gone.md"])
+    service._apply_incremental(
+        store, file_fps, old_fps, added=[], changed=[], removed=["gone.md"]
+    )
 
     assert store.deleted == ["gone.md"]
     assert store.bulk_sizes == []  # 零嵌入
     manifest = json.loads(service._manifest_file().read_text(encoding="utf-8"))
     assert set(manifest["files"]) == {"keep.md"}
+
+
+def test_apply_incremental_isolates_bad_file(tmp_path, monkeypatch):
+    """单个坏文件不能拖垮整库：其余文件照常索引，坏文件保留旧指纹待重试。"""
+    import app.rag.service.ingest as ingest_mod
+
+    service = _service(tmp_path)
+    data_dir = service.settings.data_dir
+    (data_dir / "good.md").write_text("正常内容。" * 30, encoding="utf-8")
+    (data_dir / "bad.md").write_text("损坏内容。" * 30, encoding="utf-8")
+
+    file_fps = service._compute_file_fingerprints()
+    old_fps = {"good.md": "old-good", "bad.md": "old-bad"}
+    service._save_meta(old_fps, [], child_count=0)
+
+    def fake_load(root, rels=None, **kw):
+        rel = next(iter(rels or []))
+        if rel == "bad.md":
+            raise ValueError("corrupt file")
+        return [
+            Document(
+                page_content="正常内容。" * 30,
+                metadata={"relative_path": "good.md", "source": "good.md"},
+            )
+        ]
+
+    monkeypatch.setattr(ingest_mod, "load_documents", fake_load)
+    store = _StubStore()
+    service._apply_incremental(
+        store,
+        file_fps,
+        old_fps,
+        added=["good.md", "bad.md"],
+        changed=[],
+        removed=[],
+    )
+
+    assert len(store.bulk_sizes) == 1 and store.bulk_sizes[0] > 0
+    manifest = json.loads(service._manifest_file().read_text(encoding="utf-8"))
+    assert manifest["files"]["good.md"] == file_fps["good.md"]
+    assert manifest["files"]["bad.md"] == "old-bad", "失败文件保留旧指纹以便重试"

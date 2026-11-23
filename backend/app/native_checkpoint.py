@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
@@ -60,14 +61,52 @@ class SafeJsonPlusSerializer(JsonPlusSerializer):
         return super().loads_typed(data)
 
 
+@contextmanager
+def _saver_lock(saver):
+    """借用 SqliteSaver 的内部锁串行化裸 conn 操作（Celery 风格单连接）。"""
+    lock = getattr(saver, "lock", None)
+    if lock is None:
+        yield
+        return
+    with lock:
+        yield
+
+
 def build_saver(meta_dir: Path):
     """创建 SqliteSaver（同步）；返回 (saver, connection)。"""
     meta_dir = Path(meta_dir)
     meta_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(meta_dir / "checkpoints.sqlite"), check_same_thread=False)
+    # 并行 Send 分支与多会话共用这一条连接：WAL 降低读写互相阻塞，
+    # busy_timeout 避免瞬时写冲突直接抛 database is locked。
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     saver = SqliteSaver(conn, serde=SafeJsonPlusSerializer())
     saver.setup()
     return saver, conn
+
+
+def _prune_thread_locked(conn, thread_id: str, keep: int) -> int:
+    """调用方必须持有 saver.lock。"""
+    rows = conn.execute(
+        "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? "
+        "ORDER BY checkpoint_id DESC LIMIT -1 OFFSET ?",
+        (thread_id, keep),
+    ).fetchall()
+    stale = [r[0] for r in rows]
+    if not stale:
+        return 0
+    conn.executemany(
+        "DELETE FROM writes WHERE thread_id = ? AND checkpoint_id = ?",
+        [(thread_id, cid) for cid in stale],
+    )
+    conn.executemany(
+        "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_id = ?",
+        [(thread_id, cid) for cid in stale],
+    )
+    conn.commit()
+    return len(stale)
 
 
 def prune_thread(saver, thread_id: str, keep: int = 20) -> int:
@@ -82,24 +121,8 @@ def prune_thread(saver, thread_id: str, keep: int = 20) -> int:
     if conn is None or keep <= 0:
         return 0
     try:
-        rows = conn.execute(
-            "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? "
-            "ORDER BY checkpoint_id DESC LIMIT -1 OFFSET ?",
-            (thread_id, keep),
-        ).fetchall()
-        stale = [r[0] for r in rows]
-        if not stale:
-            return 0
-        conn.executemany(
-            "DELETE FROM writes WHERE thread_id = ? AND checkpoint_id = ?",
-            [(thread_id, cid) for cid in stale],
-        )
-        conn.executemany(
-            "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_id = ?",
-            [(thread_id, cid) for cid in stale],
-        )
-        conn.commit()
-        return len(stale)
+        with _saver_lock(saver):
+            return _prune_thread_locked(conn, thread_id, keep)
     except Exception as exc:
         logger.warning("裁剪检查点失败（thread=%s）：%s", thread_id, exc)
         return 0
@@ -110,12 +133,18 @@ def prune_all(saver, keep: int = 20) -> dict:
     conn = getattr(saver, "conn", None)
     if conn is None:
         return {"threads": 0, "deleted": 0}
-    threads = [
-        r[0] for r in conn.execute("SELECT DISTINCT thread_id FROM checkpoints").fetchall()
-    ]
-    deleted = 0
-    for tid in threads:
-        deleted += prune_thread(saver, tid, keep)
+    # 整段持锁：批量维护时不能与在线 put/get 交错（锁不可重入，
+    # 因此这里直接调用不加锁的 _prune_thread_locked）。
+    with _saver_lock(saver):
+        threads = [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT thread_id FROM checkpoints"
+            ).fetchall()
+        ]
+        deleted = 0
+        for tid in threads:
+            deleted += _prune_thread_locked(conn, tid, keep)
     return {"threads": len(threads), "deleted": deleted}
 
 
@@ -125,7 +154,8 @@ def vacuum(saver) -> None:
     if conn is None:
         return
     try:
-        conn.execute("VACUUM")
+        with _saver_lock(saver):
+            conn.execute("VACUUM")
     except Exception as exc:
         logger.warning("VACUUM 失败：%s", exc)
 

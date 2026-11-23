@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.agent.utils import _CACHEABLE_TOOLS, _tool_cache_key
+from app.agent.utils import _CACHEABLE_TOOLS, _tool_cache_key, tool_content_limit
 
 # 副作用类工具：绝不进缓存集合
 _NON_CACHEABLE = {
@@ -45,6 +45,17 @@ def test_slim_tool_result_can_preserve_skill_content():
     assert kept["content"] == content
     slimmed = _slim_tool_result({"content": content})
     assert len(slimmed["content"]) < len(content)
+
+
+def test_tool_content_limits_are_per_tool():
+    """长文档/代码片段需要更大保留度；技能全文不截断；其余走通用阈值。"""
+    assert tool_content_limit("skill_view") is None
+    assert tool_content_limit("read_file") == 6000
+    assert tool_content_limit("knowledge_base_search") == 6000
+    # 用户回答是后续分支依据，不能被 2500 默认阈值截断
+    assert tool_content_limit("ask_user_question") == 6000
+    assert tool_content_limit("bash") == 2500
+    assert tool_content_limit("unknown_tool") == 2500
 
 
 def test_cache_key_none_args_and_unserializable():

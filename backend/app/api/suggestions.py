@@ -11,9 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+from collections import OrderedDict
 from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from langchain_core.messages import HumanMessage
 from sqlalchemy.orm import Session
 
@@ -21,6 +23,7 @@ from ..agent.agent import AgentService
 from ..db import get_db
 from ..db import repository as repo
 from ..llm_text import message_text
+from ..prompt_safety import UNTRUSTED_NOTE
 from ..rag.service import RAGService
 from .deps import get_agent_service, get_service
 
@@ -243,3 +246,147 @@ def suggestions(
     items = _build_items(db, agent, service)
     _save_cache(db, items)
     return items
+
+
+# ============================================================
+# 对话内「下一步建议」（2026-11-23）
+# ============================================================
+
+_NEXT_CACHE: "OrderedDict[tuple[int, int], tuple[datetime, list[str]]]" = (
+    OrderedDict()
+)
+_NEXT_CACHE_LOCK = threading.Lock()
+_NEXT_CACHE_MAX = 256
+
+
+def _next_cache_get(key: tuple[int, int], ttl_minutes: int) -> list[str] | None:
+    with _NEXT_CACHE_LOCK:
+        item = _NEXT_CACHE.get(key)
+        if item is None:
+            return None
+        created_at, items = item
+        if datetime.now() - created_at > timedelta(minutes=max(1, ttl_minutes)):
+            _NEXT_CACHE.pop(key, None)
+            return None
+        _NEXT_CACHE.move_to_end(key)
+        return list(items)
+
+
+def _next_cache_put(key: tuple[int, int], items: list[str]) -> None:
+    with _NEXT_CACHE_LOCK:
+        _NEXT_CACHE[key] = (datetime.now(), list(items))
+        _NEXT_CACHE.move_to_end(key)
+        while len(_NEXT_CACHE) > _NEXT_CACHE_MAX:
+            _NEXT_CACHE.popitem(last=False)
+
+
+def _parse_suggestion_list(text: str) -> list[str]:
+    """解析小模型输出：优先 JSON 数组，失败按行取；统一清洗/去重/限 3 条。"""
+    cleaned = (text or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", cleaned, re.S)
+    if fenced:
+        cleaned = fenced.group(1).strip()
+    raw_items: list = []
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            data = data.get("items") or data.get("suggestions") or []
+        if isinstance(data, list):
+            raw_items = data
+    except Exception:
+        raw_items = [line for line in cleaned.splitlines()]
+    out: list[str] = []
+    for raw in raw_items:
+        question = _clean_question(raw, max_len=40)
+        if question and question not in out:
+            out.append(question)
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _build_next_prompt(messages: list[dict]) -> str:
+    last_assistant = next(
+        (m for m in reversed(messages) if m.get("role") == "assistant"),
+        {},
+    )
+    last_user = next(
+        (m for m in reversed(messages) if m.get("role") == "user"),
+        {},
+    )
+    tools: list[str] = []
+    for item in last_assistant.get("tool_trace") or []:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            if name and name not in tools:
+                tools.append(name)
+    answer = str(last_assistant.get("content") or "").strip()[:800]
+    question = str(last_user.get("content") or "").strip()[:300]
+    return (
+        "你是对话助手的下一步建议生成器。根据下面最近一轮问答，生成 3 条用户"
+        "可能接着问的问题。要求：每条不超过 24 字、口语化、互不重复、紧扣回答"
+        "内容；只输出 JSON 字符串数组（例如 [\"...\", \"...\", \"...\"]），"
+        "不要编号、不要解释。\n"
+        + UNTRUSTED_NOTE
+        + f"\n\n最近用户问题：{question}\n"
+        f"最近助手回答：{answer}\n"
+        f"本轮用到的工具：{', '.join(tools) if tools else '无'}"
+    )
+
+
+def _llm_next_suggestions(agent: AgentService, messages: list[dict]) -> list[str]:
+    """标题小模型优先；其模型可能不属于当前供应商（如 OpenCode Go），失败回退主模型。"""
+    prompt = _build_next_prompt(messages)
+    candidates = [
+        ("title", getattr(agent, "title_chat", None)),
+        ("main", getattr(agent, "chat_plain", None)),
+    ]
+    for label, chat in candidates:
+        if chat is None:
+            continue
+        try:
+            resp = chat.invoke([HumanMessage(content=prompt)])
+            items = _parse_suggestion_list(message_text(resp.content))
+            if items:
+                return items
+        except Exception as exc:
+            logger.warning("生成下一步建议失败（%s 模型）：%s", label, exc)
+    return []
+
+
+@router.post("/conversations/{conversation_id}/next-suggestions")
+def next_suggestions(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    agent: AgentService = Depends(get_agent_service),
+) -> dict:
+    """输入框「下一步建议」：按最新一轮问答生成 3 条追问（带 30 分钟内存缓存）。
+
+    前端在收到 done 后调用；失败/关闭时返回空列表，由前端保留本地启发式建议。
+    """
+    if repo.get_conversation(db, conversation_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    messages = repo.list_messages(db, conversation_id, limit=8)
+    assistant = next(
+        (
+            m
+            for m in reversed(messages)
+            if m.get("role") == "assistant"
+            and str(m.get("content") or "").strip()
+        ),
+        None,
+    )
+    if assistant is None:
+        return {"items": [], "source": "none"}
+    key = (conversation_id, int(assistant.get("id") or 0))
+    settings = getattr(agent, "settings", None)
+    ttl = int(getattr(settings, "next_suggestions_cache_minutes", 30) or 30)
+    cached = _next_cache_get(key, ttl)
+    if cached is not None:
+        return {"items": cached, "source": "cache"}
+    if not getattr(settings, "next_suggestions_enabled", True):
+        return {"items": [], "source": "disabled"}
+    items = _llm_next_suggestions(agent, messages)
+    if items:
+        _next_cache_put(key, items)
+    return {"items": items, "source": "llm" if items else "none"}

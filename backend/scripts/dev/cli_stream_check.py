@@ -2,7 +2,8 @@
 
 验证三件事（对应 2026-09-28 的 CLI 改造）：
 1. 正文随 stream_delta 边到边打印（不再等整轮 token）；
-2. 工具轮的过渡文本被 stream_end{keep:false} 按行数撤回（ANSI 上移 + 清屏）；
+2. 工具轮的过渡文本被 stream_end{keep:false,reason:tool_round} 按行数撤回
+   （ANSI 上移 + 清屏），并归档为一行 dim「过程说明」；
 3. stream_end{keep:true} 后那条全文 token 被跳过 —— 正文只出现一次。
 
 用法：D:/conda_envs/pytorch_env/python.exe backend/scripts/dev/cli_stream_check.py
@@ -30,7 +31,7 @@ EVENTS = [
     ("status", {"phase": "thinking", "text": "正在思考并生成回答…"}),
     ("stream_delta", TRANSITIONAL[:14]),
     ("stream_delta", TRANSITIONAL[14:]),
-    ("stream_end", {"keep": False}),
+    ("stream_end", {"keep": False, "reason": "tool_round"}),
     ("tool_start", {"id": "t1", "name": "list_dir", "arguments": {"path": "."}}),
     ("tool_result", {"id": "t1", "name": "list_dir", "summary": "列出 5 个条目", "duration_ms": 120}),
     ("stream_delta", ANSWER[:10]),
@@ -121,6 +122,11 @@ def main() -> int:
         tool_at = out.find("list_dir")
         check(0 < erase_at < tool_at, "撤回发生在 tool_start 之前",
               f"erase@{erase_at} tool@{tool_at}")
+        note_at = out.find("过程说明")
+        check(erase_at < note_at < tool_at, "撤回后补一行过程说明（在 tool_start 前）",
+              f"note@{note_at} tool@{tool_at}")
+        check(out.count("过程说明") == 1, "过程说明只出现一次",
+              f"出现 {out.count('过程说明')} 次")
         check(out.count("目录里有 5 个条目") == 1, "正文只出现一次（全文 token 被跳过）",
               f"出现 {out.count('目录里有 5 个条目')} 次")
         # 正文经 Markdown 渲染，列表项会被渲染成项目符号，故按内容断言

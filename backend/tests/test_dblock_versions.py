@@ -17,7 +17,9 @@ from langchain_core.messages import SystemMessage
 
 from app.agent.nodes import prepare as prepare_module
 from app.agent.nodes.prepare import _prepare_node
+from app.agent.prompts import default_fragments
 from app.agent.state import AgentState
+from app.prompting import PromptResolution
 from app.agent.utils import (
     _dblock_needs_injection,
     _dblock_version,
@@ -166,9 +168,6 @@ class _FakeService:
         self.rag = _FakeRag()
         self.context = context
 
-    def _get_template_content(self, db, template_id, system_prompt):
-        return ""
-
     def build_tool_list(self, db, **kwargs):
         return []
 
@@ -231,6 +230,16 @@ def _run_prepare(
     """跑一次真实的 _prepare_node（repo / 项目记忆用替身，不碰真库与真文件）。"""
     monkeypatch.setattr(prepare_module, "repo", _FakeRepo(window_rows))
     monkeypatch.setattr(
+        prepare_module,
+        "resolve_conversation_prompt",
+        lambda *args, **kwargs: PromptResolution(
+            template_content="",
+            fragments=default_fragments(),
+            telemetry={},
+            source="fallback",
+        ),
+    )
+    monkeypatch.setattr(
         "app.project_memory.load_project_memory", lambda settings, path=None: None
     )
 
@@ -244,8 +253,19 @@ def _run_prepare(
         dblock_versions=dict(ledger),
         **overrides,
     )
-    result = _prepare_node(state, runtime_from_state(state))
+    runtime = runtime_from_state(state)
+    result = _prepare_node(state, runtime)
+    # P2-8：历史前缀不再进 state["messages"]，需要断言"模型实际看到的消息"时
+    # 从 runtime.context.prefix_messages 取回。
+    state["_runtime"] = runtime
     return state, result
+
+
+def _model_messages(state: dict, result: dict) -> list:
+    prefix = list(getattr(state["_runtime"].context, "prefix_messages", None) or [])
+    insert_at = int(result.get("history_insert_at") or 0)
+    messages = list(result.get("messages") or [])
+    return messages[:insert_at] + prefix + messages[insert_at:]
 
 
 def test_prepare_records_stage_timings(monkeypatch, tmp_path):
@@ -254,7 +274,7 @@ def test_prepare_records_stage_timings(monkeypatch, tmp_path):
         monkeypatch, tmp_path, window_rows=[], memory_summary=None, ledger={}
     )
     timings = state["runtime"]["timings"]
-    assert {"compact_ms", "memory_ms", "tools_ms"} <= set(timings)
+    assert {"compact_ms", "memory_ms", "tools_build_ms"} <= set(timings)
     assert all(isinstance(v, int) and v >= 0 for v in timings.values())
 
 
@@ -297,6 +317,25 @@ def test_prepare_returns_ledger_and_renders_time_block(monkeypatch, tmp_path):
     assert state["dblock_versions"] == {}
 
 
+def test_prepare_moves_history_out_of_checkpoint_state(monkeypatch, tmp_path):
+    """P2-8：历史窗口只进 Deps.prefix_messages，不进 state["messages"]。"""
+    marker = "历史消息标记-ABC"
+    state, result = _run_prepare(
+        monkeypatch,
+        tmp_path,
+        window_rows=[{**_row("user", marker), "id": 101}],
+        memory_summary=None,
+        ledger={},
+    )
+
+    state_contents = [str(m.content) for m in result["messages"]]
+    assert all(marker not in content for content in state_contents)
+    prefix = state["_runtime"].context.prefix_messages
+    assert any(marker in str(m.content) for m in prefix)
+    assert result["persist_start"] == result["history_insert_at"]
+    assert result["history_row_ids"] == [101]
+
+
 def test_prepare_reinjects_reverted_memory_block(monkeypatch, tmp_path):
     """端到端回归：窗口里是旧的 A、账本记录最近注入 B → 本轮必须重新注入 A。"""
     window_rows = [_row("system", BLOCK_A)]
@@ -307,7 +346,7 @@ def test_prepare_reinjects_reverted_memory_block(monkeypatch, tmp_path):
         memory_summary="用户住北京。",
         ledger={"memory_profile": _dblock_version(BLOCK_B)},
     )
-    contents = [str(m.content) for m in result["messages"]]
+    contents = [str(m.content) for m in _model_messages(state, result)]
     # 一份来自历史窗口回放，一份是本轮重新注入的 D 块——两份缺一不可
     assert contents.count(BLOCK_A) == 2, "状态回退后必须重新注入当前版本"
     assert result["dblock_versions"]["memory_profile"] == _dblock_version(BLOCK_A)
@@ -316,13 +355,13 @@ def test_prepare_reinjects_reverted_memory_block(monkeypatch, tmp_path):
 def test_prepare_skips_when_version_matches_and_present(monkeypatch, tmp_path):
     """同一版本且仍在窗口内 → 不重复注入，维持纯追加链。"""
     window_rows = [_row("system", BLOCK_A)]
-    _state_out, result = _run_prepare(
+    state_out, result = _run_prepare(
         monkeypatch,
         tmp_path,
         window_rows=window_rows,
         memory_summary="用户住北京。",
         ledger={"memory_profile": _dblock_version(BLOCK_A)},
     )
-    contents = [str(m.content) for m in result["messages"]]
+    contents = [str(m.content) for m in _model_messages(state_out, result)]
     # 只有历史窗口回放的那一份，本轮不再追加
     assert contents.count(BLOCK_A) == 1

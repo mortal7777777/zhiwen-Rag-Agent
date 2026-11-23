@@ -121,14 +121,36 @@ def test_token_high_water_triggers_compaction(svc_state):
     assert len(state["saved"]) == 1
 
 
-def test_few_giant_rows_skip_compaction(svc_state):
-    """条数很少但单条超长（cutoff=0）：不压缩，交给 trim 裁剪。"""
+def test_few_giant_rows_compact_by_token(svc_state):
+    """条数未到上限但 token 超水位：按 token 保留最近一段并生成摘要。
+
+    回归：旧实现 cutoff=0 直接返回，导致长会话每轮被 trim 静默丢历史、
+    永远不生成摘要（2026-11-09）。
+    """
     svc, state = svc_state
-    state["rows"] = make_rows(20, content="字" * 12000)
+    state["rows"] = make_rows(20, content="字" * 12000)  # 每条约 8000 token
     summary, window = svc.compact_conversation(None, 1)
-    assert summary is None
-    assert len(window) == 20
-    assert state["saved"] == []
+    assert summary == "摘要"
+    assert len(window) == 4  # 32K 预算 / 每条约 8K
+    assert state["up_to"] == 16  # rows[15] 的 id
+    assert state["saved"] == [("摘要", 16)]
+
+
+def test_trim_keeps_newest_even_if_over_budget():
+    """最近一条本身超预算：trim 至少保留它，不能返回空历史。"""
+    from app.agent.context import trim_history_for_budget
+
+    rows = [{"content": "x" * 400}, {"content": "x" * 40000}]
+    assert trim_history_for_budget(rows, 1000) == [rows[-1]]
+
+
+def test_token_cutoff_keeps_recent_within_budget():
+    from app.agent.context.compact import _token_cutoff
+
+    rows = [{"content": "x" * 400} for _ in range(6)]  # 每条 100 token
+    assert _token_cutoff(rows, 250) == 4  # 保留最近 2 条（200），至少压 1 条
+    assert _token_cutoff(rows, 1000) == 0  # 全部装得下：无需压缩
+    assert _token_cutoff(rows, 0) == 0
 
 
 def test_summarize_failure_does_not_advance(svc_state, monkeypatch):
@@ -191,6 +213,24 @@ def test_history_budget_follows_template_category(monkeypatch):
 
     class _Tpl:
         category = "coding"
+
+    monkeypatch.setattr(context_mod.repo, "get_conversation", lambda db, cid: _Conv())
+    monkeypatch.setattr(context_mod.repo, "get_template", lambda db, tid: _Tpl())
+    assert svc.history_budget_for(None, 1) == 96000
+
+
+def test_history_budget_prefers_locked_category(monkeypatch):
+    """锁定 bundle 的 category 优先于当前模板（编辑模板分类不应漂移预算）。"""
+    import json
+
+    svc = ContextService(BudgetSettings(), chat=None)
+
+    class _Conv:
+        template_id = 9
+        prompt_bundle = json.dumps({"template_category": "coding"})
+
+    class _Tpl:
+        category = "learning"
 
     monkeypatch.setattr(context_mod.repo, "get_conversation", lambda db, cid: _Conv())
     monkeypatch.setattr(context_mod.repo, "get_template", lambda db, tid: _Tpl())

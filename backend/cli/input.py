@@ -10,7 +10,16 @@ import os
 import sys
 import threading
 import time
-from cli.term import USE_COLOR, clip, paint, strwidth, term_width
+from cli.term import (
+    ASCII_MODE,
+    THEME,
+    USE_COLOR,
+    clip,
+    paint,
+    strwidth,
+    term_height,
+    term_width,
+)
 
 
 # "?" 键展开的命令帮助面板开关（本层行编辑 UI 的状态机）
@@ -18,28 +27,101 @@ HELP_OPEN: dict = {"on": False}
 
 
 COMMANDS = [
-    "/exit",
-    "/quit",
+    "/help",
     "/new",
-    "/continue",
-    "/tools",
-    "/todos",
-    "/status",
-    "/cost",
+    "/resume",
+    "/timeline",
+    "/model",
+    "/export",
     "/context",
+    "/cost",
+    "/status",
+    "/todos",
     "/compact",
     "/rewind",
     "/output",
+    "/tools",
     "/sandbox",
-    "/clear",
+    "/doctor",
+    "/mcp",
+    "/skills",
     "/init",
-    "/resume",
     "/memory",
-    "/help",
+    "/continue",
+    "/abandon",
+    "/clear",
+    "/exit",
+    "/quit",
 ]
+
+# / 命令面板的描述（类 Claude Code 的命令菜单）
+COMMAND_META = {
+    "/exit": "退出 CLI",
+    "/quit": "退出 CLI",
+    "/new": "开启新会话",
+    "/continue": "续跑被中断的一轮",
+    "/abandon": "丢弃被中断的一轮",
+    "/tools": "切换工具模式",
+    "/model": "切换对话供应商",
+    "/export": "导出当前会话",
+    "/todos": "查看任务清单",
+    "/status": "查看运行状态",
+    "/cost": "查看用量、缓存与成本",
+    "/context": "查看上下文占用",
+    "/compact": "手动压缩上下文",
+    "/rewind": "回退到历史消息",
+    "/output": "分页查看工具输出",
+    "/sandbox": "切换命令沙箱",
+    "/clear": "清屏并重绘横幅",
+    "/init": "创建 AGENTS.md",
+    "/resume": "恢复历史会话",
+    "/timeline": "检查点时间线 / 回滚",
+    "/doctor": "环境诊断（后端/索引/MCP/技能）",
+    "/mcp": "查看 MCP 服务器",
+    "/skills": "查看技能列表",
+    "/memory": "查看项目记忆",
+    "/help": "查看完整帮助",
+}
+
+
+MENU = {"prefix": "", "index": 0}
+
+
+def _command_matches(text: str) -> list[str]:
+    """纯命令前缀（不含参数）匹配；出现任何空白说明用户已在输入参数。"""
+    word = (text or "").lstrip()
+    if not word.startswith("/") or any(ch.isspace() for ch in word):
+        return []
+    return [c for c in COMMANDS if c.startswith(word)]
+
+
+def menu_matches(text: str) -> list[str]:
+    """返回命令菜单候选；前缀变化时把选中项重置到第一条。"""
+    matches = _command_matches(text)
+    prefix = (text or "").strip()
+    if MENU["prefix"] != prefix:
+        MENU["prefix"] = prefix
+        MENU["index"] = 0
+    if matches:
+        MENU["index"] = max(0, min(MENU["index"], len(matches) - 1))
+    return matches
+
+
+def menu_move(text: str, step: int) -> list[str]:
+    matches = menu_matches(text)
+    if matches:
+        MENU["index"] = (MENU["index"] + step) % len(matches)
+    return matches
+
+
+def menu_selected(text: str) -> str | None:
+    matches = menu_matches(text)
+    return matches[MENU["index"]] if matches else None
 
 
 _INPUT_ROWS = [1]  # 上次输入块占用的终端行数（含菜单行），用于回清残留
+_CURSOR_ROW = [0]  # 光标在输入块内的行号（0=输入首行；菜单在输入块下方）
+_FALLBACK_NOTICE = [False]
 
 
 class Key:
@@ -134,6 +216,8 @@ class KeyReader:
                         "G": "home",
                         "O": "end",
                         "S": "delete",
+                        "I": "pageup",
+                        "Q": "pagedown",
                     }
                     self._push(Key(mapping.get(nxt, "unknown"), nxt))
                     continue
@@ -159,6 +243,8 @@ class KeyReader:
             name = "ctrl-o"
         elif ch == "\x12":
             name = "ctrl-r"
+        elif ch == "\x19":
+            name = "ctrl-y"
         elif ch == "\t":
             name = "tab"
         elif ch in ("\r", "\n"):
@@ -218,13 +304,87 @@ class KeyReader:
             b"[D": "left",
             b"[H": "home",
             b"[F": "end",
+            b"[1~": "home",
+            b"[4~": "end",
+            b"[7~": "home",
+            b"[8~": "end",
             b"[3~": "delete",
+            b"[5~": "pageup",
+            b"[6~": "pagedown",
         }
         if data.startswith(b"\x1b[") and data[2:] in mapping:
             self._push(Key(mapping[data[2:]]))
             return
         for byte in data:
             self._push_key(chr(byte))
+
+
+_SKIP_DIRS = {
+    ".git", "node_modules", ".venv", "venv", "__pycache__",
+    ".mypy_cache", ".pytest_cache", ".idea", ".vscode",
+}
+
+
+def _at_fragment(text: str) -> tuple[str, int] | None:
+    """光标前最后一个空白分隔 token 是 @路径 时，返回 (片段, 替换长度)。"""
+    i = len(text) - 1
+    while i >= 0 and not text[i].isspace():
+        i -= 1
+    token = text[i + 1 :]
+    if not token.startswith("@"):
+        return None
+    fragment = token[1:]
+    if fragment[:1] in ("'", '"'):
+        return None  # 引号路径不做补全，用户自行补齐
+    return fragment, -len(fragment)
+
+
+def file_completions(fragment: str) -> list[str]:
+    """@路径 的文件名补全（目录补 /，含空格的路径自动加引号）。"""
+    expanded = os.path.expanduser(fragment)
+    if os.path.isabs(expanded) or (len(expanded) >= 2 and expanded[1] == ":"):
+        base, prefix = os.path.dirname(expanded), os.path.basename(expanded)
+    else:
+        base, prefix = os.path.dirname(fragment), os.path.basename(fragment)
+    scan_dir = os.path.expanduser(base or ".")
+    try:
+        entries = list(os.scandir(scan_dir))
+    except OSError:
+        return []
+
+    def key(entry) -> tuple:
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            is_dir = False
+        return (not is_dir, entry.name.lower())
+
+    out: list[str] = []
+    for entry in sorted(entries, key=key):
+        name = entry.name
+        if not name.startswith(prefix):
+            continue
+        if name.startswith(".") and not prefix.startswith("."):
+            continue
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            is_dir = False
+        if is_dir and name in _SKIP_DIRS and not prefix:
+            continue
+        rel = (
+            base + name
+            if not base or base.endswith(("/", "\\"))
+            else base + "/" + name
+        )
+        if is_dir:
+            rel += "/"
+        if " " in rel:
+            rel = f'"{rel}"'
+        out.append(rel)
+        if len(out) >= 50:
+            break
+    return out
 
 
 def _common_prefix(strings: list[str]) -> str:
@@ -287,37 +447,51 @@ def _render_input(buf: str, pos: int, with_ghost: bool = True) -> None:
     rows, pos_row, pos_col = input_layout(
         buf + (ghost if with_ghost else ""), pos, cols
     )
-    old_rows = _INPUT_ROWS[0]
+    old_total = max(1, _INPUT_ROWS[0])
+    old_cursor_row = _CURSOR_ROW[0]
 
     sys.stdout.write("\033[?25l")  # 隐藏光标，减少闪烁
-    # 1) 光标回到上次输入块顶部，并清掉所有旧行
-    if old_rows > 1:
-        sys.stdout.write(f"\033[{old_rows - 1}A")
-    sys.stdout.write("\r\033[2K")
-    # 2) 写出新内容（终端按 cols 自动换行）
+    # 1) 从旧光标行回到输入块顶部
+    if old_cursor_row:
+        sys.stdout.write(f"\033[{old_cursor_row}A")
+    sys.stdout.write("\r")
+    # 2) 清掉旧块（输入行 + 菜单行）：光标当前在块顶，向下逐行清
+    for i in range(old_total):
+        sys.stdout.write("\033[2K")
+        if i < old_total - 1:
+            sys.stdout.write("\033[1B\r")
+    if old_total > 1:
+        sys.stdout.write(f"\033[{old_total - 1}A")
+    sys.stdout.write("\r")
+    # 3) 写出新内容（终端按 cols 自动换行），光标停在最后一行
     sys.stdout.write(line)
-    # 3) 新块行数变少时，向下清残留行
-    extra = max(0, old_rows - rows)
-    for _ in range(extra):
-        sys.stdout.write("\033[1B\r\033[2K")
-    # 4) 从行尾回到块顶，再定位到 pos
-    up = (rows - 1) + extra
-    if up:
-        sys.stdout.write(f"\033[{up}A")
+    # 4) 从行尾回到块顶，再定位到 pos（菜单在输入块下方，光标基准是 pos_row）
+    if rows > 1:
+        sys.stdout.write(f"\033[{rows - 1}A")
     sys.stdout.write("\r")
     if pos_row:
         sys.stdout.write(f"\033[{pos_row}B")
     if pos_col:
         sys.stdout.write(f"\033[{pos_col + 1}G")
-    # 5) / 命令候选菜单（画在输入块下方一行，再回到光标处）
+    # 5) / 命令菜单（画在输入块下方一行，再回到光标处）
     menu_rows = 0
-    if buf.startswith("/") and matches and with_ghost:
+    command_list = menu_matches(buf) if with_ghost and buf.startswith("/") else []
+    menu_text = ""
+    if command_list:
+        selected = command_list[MENU["index"]]
+        mark = "> " if ASCII_MODE else "❯ "
+        menu_text = (
+            f"{mark}{selected}  {COMMAND_META.get(selected, '')}"
+            f"   ↑/↓ 选择 · 回车执行 · {MENU['index'] + 1}/{len(command_list)}"
+        )
+    elif with_ghost and matches and " " in buf:
+        menu_text = "  " + "  ".join(clip(m, 26) for m in matches[:6])
+    if menu_text:
         down = rows - pos_row
         if down:
             sys.stdout.write(f"\033[{down}B")
         sys.stdout.write("\r\033[2K")
-        menu = "  " + "  ".join(clip(m, 26) for m in matches[:6])
-        sys.stdout.write(clip(menu, cols))
+        sys.stdout.write(clip(menu_text, cols))
         menu_rows = 1
         if down:
             sys.stdout.write(f"\033[{down}A")
@@ -325,23 +499,57 @@ def _render_input(buf: str, pos: int, with_ghost: bool = True) -> None:
         if pos_col:
             sys.stdout.write(f"\033[{pos_col + 1}G")
     _INPUT_ROWS[0] = rows + menu_rows
+    _CURSOR_ROW[0] = pos_row
     sys.stdout.write("\033[?25h")
     sys.stdout.flush()
 
 
 def _toolbar_text():
-    """底部工具栏：常驻快捷键提示；? 展开完整命令面板（类 Claude Code）。"""
+    """底部工具栏：/ 命令菜单（可上下选择）或常驻快捷键提示。"""
+    from prompt_toolkit.application import get_app
+
     key = lambda s: ("class:tbkey", s)
     txt = lambda s: ("class:tb", s)
+    try:
+        buf_text = get_app().current_buffer.text
+    except Exception:
+        buf_text = ""
+
+    menu_list = menu_matches(buf_text) if buf_text.strip().startswith("/") else []
+    if menu_list:
+        rows = max(3, min(6, term_height() - 8))
+        idx = MENU["index"]
+        start = max(0, min(idx - rows // 2, len(menu_list) - rows))
+        mark = "> " if ASCII_MODE else "❯ "
+        out: list[tuple[str, str]] = []
+        for i in range(start, min(start + rows, len(menu_list))):
+            cmd = menu_list[i]
+            style = "class:menu.current" if i == idx else "class:menu"
+            prefix = mark if i == idx else "  "
+            out.append((style, f"{prefix}{cmd:<14} {COMMAND_META.get(cmd, '')}\n"))
+        out.append(
+            (
+                "class:menu.hint",
+                f"↑/↓ 选择 · 回车执行 · {idx + 1}/{len(menu_list)}",
+            )
+        )
+        return out
+
     if not HELP_OPEN["on"]:
         return [
             key(" ? "),
             txt("命令帮助   "),
             key(" / "),
             txt("命令补全   "),
+            key("@"),
+            txt("文件补全   "),
+            key("Ctrl+J "),
+            txt("换行   "),
             key("Ctrl+O "),
-            txt("展开输出   "),
+            txt("分页查看   "),
             key("Ctrl+R "),
+            txt("历史搜索   "),
+            key("Ctrl+Y "),
             txt("重发   "),
             key("Ctrl+C "),
             txt("打断 / 双击退出"),
@@ -350,10 +558,16 @@ def _toolbar_text():
         key(" /context "), txt("上下文占用   "),
         key(" /compact "), txt("手动压缩   "),
         key(" /rewind "), txt("消息回退   "),
-        key(" /output [n] "), txt("展开工具输出\n"),
+        key(" /output [n] "), txt("分页查看工具输出\n"),
         key(" /todos "), txt("任务清单   "),
         key(" /cost "), txt("用量   "),
         key(" /status "), txt("状态   "),
+        key(" /model "), txt("切换模型   "),
+        key(" /export "), txt("导出会话\n"),
+        key(" /timeline "), txt("快照回滚   "),
+        key(" /doctor "), txt("环境诊断   "),
+        key(" /mcp "), txt("MCP   "),
+        key(" /skills "), txt("技能\n"),
         key(" /tools auto|knowledge|web|none\n"),
         key(" /new "), txt("新会话   "),
         key(" /resume "), txt("恢复会话   "),
@@ -365,7 +579,25 @@ def _toolbar_text():
     ]
 
 
-def make_prompt_session(history: list[str]):
+def completion_candidates(text: str) -> list[tuple[str, int, str]]:
+    """返回 (补全文本, 替换起点, 描述)；命令菜单与测试共用。
+
+    替换起点用空白分隔的最后一个 token（而不是 prompt_toolkit 的
+    get_word_before_cursor——它把 "/" 当标点，会把 /mo 补成 //model）。
+    """
+    at = _at_fragment(text)
+    if at is not None:
+        fragment, start = at
+        return [(path, start, "") for path in file_completions(fragment)]
+    matches, _ = complete(text)
+    i = len(text)
+    while i > 0 and not text[i - 1].isspace():
+        i -= 1
+    start = -(len(text) - i)
+    return [(m, start, COMMAND_META.get(m, "")) for m in matches]
+
+
+def make_prompt_session(history: list[str], submit_empty: bool = True):
     """构建 prompt_toolkit PromptSession：历史 + Tab 补全 + 键绑定语义。
 
     取代手写 KeyReader 行编辑（Windows 终端上末字符不可见/光标错位/
@@ -373,18 +605,71 @@ def make_prompt_session(history: list[str]):
     底部工具栏常驻快捷键提示，空输入按 ? 展开/收起完整命令面板。
     """
     from prompt_toolkit import PromptSession
+    from prompt_toolkit.application import get_app
     from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.filters import Condition
     from prompt_toolkit.history import InMemoryHistory
     from prompt_toolkit.key_binding import KeyBindings
 
     class _CmdCompleter(Completer):
         def get_completions(self, document, complete_event):
-            matches, _ = complete(document.text)
-            word = document.get_word_before_cursor()
-            for m in matches:
-                yield Completion(m, start_position=-len(word))
+            # 纯 / 命令交给底栏菜单（保证在 cmd/PowerShell 也可见）；
+            # 参数补全与 @ 文件补全仍走 completion 弹层。
+            if _command_matches(document.text_before_cursor):
+                return
+            for value, start, meta in completion_candidates(
+                document.text_before_cursor
+            ):
+                yield Completion(
+                    value, start_position=start, display=value, display_meta=meta
+                )
 
     kb = KeyBindings()
+
+    def menu_active() -> bool:
+        try:
+            return bool(_command_matches(get_app().current_buffer.text))
+        except Exception:
+            return False
+
+    @kb.add("up", filter=Condition(menu_active))
+    def _(event):
+        menu_move(event.current_buffer.text, -1)
+        event.app.invalidate()
+
+    @kb.add("down", filter=Condition(menu_active))
+    def _(event):
+        menu_move(event.current_buffer.text, 1)
+        event.app.invalidate()
+
+    @kb.add("enter")
+    def _(event):
+        # 多行编辑：回车提交。命令菜单：执行选中项；@ 文件补全：只接受路径。
+        buf = event.current_buffer
+        selected = menu_selected(buf.text)
+        if selected:
+            buf.text = selected
+            buf.cursor_position = len(selected)
+            buf.validate_and_handle()
+            return
+        if not submit_empty and not buf.text.strip():
+            return  # 主输入框：空内容回车不提交、不闪屏
+        state = buf.complete_state
+        if state and state.completions and _at_fragment(buf.text_before_cursor):
+            buf.apply_completion(state.current_completion or state.completions[0])
+            buf.cancel_completion()
+            return
+        if state and state.completions:
+            buf.apply_completion(state.current_completion or state.completions[0])
+        buf.validate_and_handle()
+
+    @kb.add("c-j")
+    def _(event):
+        event.current_buffer.insert_text("\n")
+
+    @kb.add("escape", "enter")
+    def _(event):
+        event.current_buffer.insert_text("\n")
 
     @kb.add("escape")
     def _(event):
@@ -403,8 +688,9 @@ def make_prompt_session(history: list[str]):
         if not event.app.current_buffer.text:
             raise QuitRequested()
 
-    @kb.add("c-r")
+    @kb.add("c-y")
     def _(event):
+        # Ctrl+R 交还给 prompt_toolkit 的历史搜索；重发改到 Ctrl+Y
         raise RetryRequested()
 
     @kb.add("c-o")
@@ -434,7 +720,13 @@ def make_prompt_session(history: list[str]):
     )
 
 
-def read_line(reader: KeyReader, history: list[str], default: str = "", status: str = "") -> str:
+def read_line(
+    reader: KeyReader,
+    history: list[str],
+    default: str = "",
+    status: str = "",
+    submit_empty: bool = True,
+) -> str:
     """prompt_toolkit 行编辑；Ctrl+C/Esc/D/R/O 抛对应异常（与旧语义兼容）。
 
     default：预填文本（/rewind 后把被回退的用户消息放回输入框）。
@@ -442,14 +734,17 @@ def read_line(reader: KeyReader, history: list[str], default: str = "", status: 
     与对话历史之间用全宽分隔线隔开（类 Claude Code 输入框分区）。
     """
     # 非 TTY（管道/IDE 终端/测试）走 legacy：prompt_toolkit 需要真实终端，
-    # 管道输入下会挂起等待
+    # 管道输入下会挂起等待；ZHIWEN_INPUT=legacy 可强制旧实现（排查终端兼容）
     if not sys.stdin.isatty():
         return _read_line_legacy(reader, history, default)
+    if os.environ.get("ZHIWEN_INPUT") == "legacy":
+        return _read_line_legacy(reader, history, default, status, submit_empty)
     try:
-        session = make_prompt_session(history)
+        session = make_prompt_session(history, submit_empty)
     except Exception:
         # prompt_toolkit 不可用（极老环境/非 Windows 控制台）时回退旧实现
-        return _read_line_legacy(reader, history, default, status)
+        _FALLBACK_NOTICE[0] = True
+        return _read_line_legacy(reader, history, default, status, submit_empty)
     from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.styles import Style
 
@@ -461,10 +756,38 @@ def read_line(reader: KeyReader, history: list[str], default: str = "", status: 
         message = FormattedText(
             [
                 ("class:status", "─" * cols + "\n"),
-                ("class:status", " " + status + "\n"),
+                ("class:status", " " + clip(status, max(10, cols - 2)) + "\n"),
                 ("class:prompt", "› "),
             ]
         )
+
+    # 命令菜单/底栏配色随主题走（浅色终端用浅底，避免深色块突兀）
+    if THEME == "light":
+        chrome = {
+            "bottom-toolbar": "noreverse bg:#eeeeee fg:#666666",
+            ".tbkey": "fg:ansiblue bold",
+            ".tb": "fg:#444444",
+            ".menu": "fg:#444444",
+            ".menu.current": "bg:#dbe7ff fg:#111111 bold",
+            ".menu.hint": "fg:#777777",
+            "completion-menu.completion": "bg:#f4f4f4 fg:#333333",
+            "completion-menu.completion.current": "bg:#dbe7ff fg:#111111",
+            "completion-menu.meta.completion": "bg:#f4f4f4 fg:#777777",
+            "completion-menu.meta.completion.current": "bg:#dbe7ff fg:#111111",
+        }
+    else:
+        chrome = {
+            "bottom-toolbar": "noreverse bg:#262626 fg:#9e9e9e",
+            ".tbkey": "fg:ansicyan bold",
+            ".tb": "fg:#c8c8c8",
+            ".menu": "fg:#c8c8c8",
+            ".menu.current": "bg:#3a3a3a fg:#ffffff bold",
+            ".menu.hint": "fg:#8a8a8a",
+            "completion-menu.completion": "bg:#262626 fg:#c8c8c8",
+            "completion-menu.completion.current": "bg:#3a3a3a fg:#ffffff",
+            "completion-menu.meta.completion": "bg:#262626 fg:#8a8a8a",
+            "completion-menu.meta.completion.current": "bg:#3a3a3a fg:#ffffff",
+        }
 
     # prompt_toolkit 接管 stdin 期间暂停 KeyReader，避免两个读取者抢键
     reader.pause()
@@ -475,13 +798,12 @@ def read_line(reader: KeyReader, history: list[str], default: str = "", status: 
                 {
                     "prompt": "ansigreen bold",
                     "status": "ansibrightblack",
-                    "bottom-toolbar": "noreverse bg:#262626 fg:#9e9e9e",
-                    ".tbkey": "fg:ansicyan bold",
-                    ".tb": "fg:#c8c8c8",
+                    **chrome,
                 }
             ),
-            multiline=False,
+            multiline=True,
             wrap_lines=True,
+            complete_while_typing=True,
             default=default or "",
         )
     except KeyboardInterrupt:
@@ -500,7 +822,11 @@ def read_line(reader: KeyReader, history: list[str], default: str = "", status: 
 
 
 def _read_line_legacy(
-    reader: KeyReader, history: list[str], default: str = "", status: str = ""
+    reader: KeyReader,
+    history: list[str],
+    default: str = "",
+    status: str = "",
+    submit_empty: bool = True,
 ) -> str:
     """旧实现：仅当 prompt_toolkit 不可用/非 TTY 时回退（保持 Ctrl+C 语义）。"""
     if not sys.stdin.isatty():
@@ -518,10 +844,21 @@ def _read_line_legacy(
     pos = len(buf)
     draft = ""
     idx = len(history)
+    if _FALLBACK_NOTICE[0]:
+        _FALLBACK_NOTICE[0] = False
+        print(
+            paint(
+                "输入：prompt_toolkit 不可用，已切换 legacy 模式（/ 菜单仍可用；"
+                "可设 ZHIWEN_INPUT=legacy 固定此模式）",
+                "dim",
+            )
+        )
     if status:
-        sys.stdout.write(paint("─" * term_width(), "dim") + "\n")
-        sys.stdout.write(paint(f" {status}", "dim") + "\n")
+        cols = term_width()
+        sys.stdout.write(paint("─" * cols, "dim") + "\n")
+        sys.stdout.write(paint(" " + clip(status, max(10, cols - 2)), "dim") + "\n")
     _INPUT_ROWS[0] = 1
+    _CURSOR_ROW[0] = 0
     sys.stdout.write(paint("› ", "green", bold=True))
     sys.stdout.flush()
     if buf:
@@ -552,6 +889,10 @@ def _read_line_legacy(
                 pos = 0
             elif key.name == "end":
                 pos = len(buf)
+            elif key.name == "up" and menu_matches(buf):
+                menu_move(buf, -1)
+            elif key.name == "down" and menu_matches(buf):
+                menu_move(buf, 1)
             elif key.name == "up":
                 if history and idx > 0:
                     if idx == len(history):
@@ -583,11 +924,18 @@ def _read_line_legacy(
             elif key.name == "ctrl-l":
                 sys.stdout.write("\033[2J\033[H")
                 _INPUT_ROWS[0] = 1
+                _CURSOR_ROW[0] = 0
             elif key.name == "ctrl-o":
                 raise OutputRequested()
-            elif key.name == "ctrl-r":
+            elif key.name in ("ctrl-r", "ctrl-y"):
                 raise RetryRequested()
             elif key.name == "enter":
+                if not submit_empty and not buf.strip():
+                    continue  # 主输入框：空内容回车不提交
+                selected = menu_selected(buf)
+                if selected:
+                    buf = selected
+                    pos = len(buf)
                 _render_input(buf, pos, with_ghost=False)
                 sys.stdout.write("\n")
                 sys.stdout.flush()

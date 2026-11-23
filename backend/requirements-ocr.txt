@@ -1,0 +1,14 @@
+# PP-StructureV3 本地 OCR 依赖（可选；主依赖 requirements*.txt 不含 paddle）
+# 安装顺序（Windows/Linux，GPU 版按驱动选择 cu118/cu126/cu129 index）：
+#   python -m pip install paddlepaddle-gpu==3.2.2 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
+#   python -m pip install -r requirements-ocr.txt
+# CPU 机器把 paddlepaddle-gpu 换成 paddlepaddle==3.2.2 -i .../packages/stable/cpu/
+#
+# 约束（与已安装环境一致）：
+# - paddlex 要求 numpy<2.4（当前实测 2.3.5）
+# - PyYAML 被 paddlex 精确锁 ==6.0.2
+# - chardet 保持 5.x（langchain-community 0.3 与 7.x 不兼容）
+numpy>=1.24,<2.4
+PyYAML==6.0.2
+chardet>=5.0,<6
+paddleocr[doc-parser]==3.7.0

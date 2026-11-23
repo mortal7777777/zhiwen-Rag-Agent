@@ -16,8 +16,12 @@ if ($targetPids.Count -eq 0) {
     foreach ($m in $matches) { $targetPids += [int]$m.Matches[0].Groups[1].Value }
 }
 foreach ($targetPid in ($targetPids | Select-Object -Unique)) {
-    Write-Output ("killing old backend PID " + $targetPid)
-    Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue
+    Write-Output ("killing old backend tree PID " + $targetPid)
+    # /T 连子进程一起杀：MCP 的 npx/node/browser 是后端子进程，只杀父进程会留孤儿
+    & taskkill.exe /F /T /PID $targetPid 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue
+    }
 }
 # 等端口释放（最多 5s），避免新进程绑定失败
 for ($i = 0; $i -lt 10; $i++) {

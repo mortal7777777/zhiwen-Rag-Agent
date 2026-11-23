@@ -22,9 +22,11 @@ def test_strwidth_ascii_cjk_ansi_tab():
 
 
 def test_clip_cjk_aware():
-    assert c.clip("你好世界", 5) == "你好…"
+    # ASCII 省略号（3 列）：中文终端不会把 U+2026 按 2 列渲染导致边框错位
+    assert c.clip("你好世界", 5) == "你..."
     assert c.clip("你好世界", 8) == "你好世界"
-    assert c.clip("abcdef", 4) == "abc…"
+    assert c.clip("abcdef", 4) == "a..."
+    assert c.strwidth(c.clip("abcdefgh", 7)) == 7
 
 
 def test_pad_right():
@@ -99,6 +101,109 @@ def test_markdown_stream_code_fence():
     assert "结尾" in out
 
 
+# 2026-11-19：表格改为"缓存整表后按全部行定宽"（否则 310ms 对 42ms 会被
+# mid-token 折行），因此以下用例改为 feed(...) + flush() 取整表输出。
+def test_markdown_table_separator_matches_row_width():
+    m = c.MarkdownStream(80)
+    out = c.strip_ansi(m.feed("| 列1 | 列2 |\n|---|---|\n| a | b |\n") + m.flush())
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len({c.strwidth(line) for line in lines}) == 1
+
+
+def test_table_long_cell_wraps_instead_of_clipping():
+    """单元格超宽要按列宽换行完整显示；旧实现 clip 成省略号会丢内容。"""
+    m = c.MarkdownStream(80)
+    long_text = (
+        "这是一段较长的说明文字，用来验证表格单元格会按列宽自动换行，"
+        "而不是被省略号截断。"
+    )
+    plain = c.strip_ansi(m.feed(f"| 说明 |\n|---|\n| {long_text} |\n") + m.flush())
+    compact = plain.replace("│", "").replace("\n", "").replace(" ", "")
+    assert long_text in compact
+    assert "..." not in plain
+    widths = {c.strwidth(line) for line in plain.splitlines() if line.strip()}
+    assert len(widths) == 1
+
+
+def test_table_wrapped_row_keeps_borders_aligned():
+    m = c.MarkdownStream(80)
+    plain = c.strip_ansi(
+        m.feed("| 序号 | 说明 |\n|---|---|\n| 1 | " + "长文本" * 20 + " |\n") + m.flush()
+    )
+    widths = {c.strwidth(line) for line in plain.splitlines() if line.strip()}
+    assert len(widths) == 1
+
+
+def test_table_columns_adapt_to_content():
+    """列宽按表头 + 首行数据分配：序号/备注窄，说明列宽。"""
+    m = c.MarkdownStream(80)
+    plain = c.strip_ansi(
+        m.feed(
+            "| 序号 | 说明 | 备注 |\n"
+            "|---|---|---|\n"
+            "| 1 | 这是一段较长的说明文字，用来验证列宽会按内容分配而不是平均分。 | 正常 |\n"
+        )
+        + m.flush()
+    )
+    header = next(line for line in plain.splitlines() if "序号" in line)
+    parts = header.split("│")[1:-1]
+    widths = [c.strwidth(p) for p in parts]
+    assert widths[0] < widths[1] and widths[2] < widths[1]
+    assert widths[0] <= 10
+
+
+def test_table_header_only_is_flushed_at_end():
+    m = c.MarkdownStream(80)
+    plain = c.strip_ansi(m.feed("| 表头一 | 表头二 |\n") + m.flush())
+    assert "表头一" in plain and "│" in plain
+    assert "| 表头一" not in plain
+
+
+def test_table_header_flushed_when_followed_by_text():
+    m = c.MarkdownStream(80)
+    plain = c.strip_ansi(m.feed("| 表头 |\n正文\n"))
+    assert "表头" in plain and "正文" in plain
+
+
+def test_code_block_not_whole_line_dim(monkeypatch):
+    monkeypatch.setattr(cli_term, "USE_COLOR", True)
+    out = c.MarkdownStream(80).feed("```\nplain code\n```\n```unknown\nother code\n```\n")
+    for line in out.splitlines():
+        if "plain code" in line or "other code" in line:
+            assert "\x1b[2m" not in line  # 非 token 正文不再整段灰色
+
+
+def test_single_line_fence_does_not_swallow_rest():
+    m = c.MarkdownStream(80)
+    out = m.feed("```code```\n后面的正文\n")
+    assert m._in_fence is False
+    assert "┌─" not in out
+    assert "后面的正文" in c.strip_ansi(out)
+
+
+def test_table_rendered_consistently_when_streamed_in_pieces():
+    """表格行被分片到达时也必须整体走表格渲染，不能退化成原始 Markdown。"""
+    m = c.MarkdownStream(80)
+    out = ""
+    for chunk in ["| 项目 | 结", "果 |\n", "|---|", "---|\n", "| a | b |\n"]:
+        out += m.feed(chunk)
+        if m.has_partial():
+            out += m.partial()
+    out += m.flush()
+    plain = c.strip_ansi(out)
+    assert "│ 项目" in plain and "│ 结果" in plain
+    assert "|---" not in plain
+    lines = [line for line in plain.splitlines() if line.strip()]
+    assert len({c.strwidth(line) for line in lines}) == 1
+
+
+def test_heading_levels_and_nested_lists_are_distinct():
+    m = c.MarkdownStream(80)
+    plain = c.strip_ansi(m.feed("# 一级\n## 二级\n### 三级\n- 顶层\n  - 子项\n"))
+    assert "█ 一级" in plain and "▌ 二级" in plain and "▸ 三级" in plain
+    assert "  • 顶层" in plain and "    • 子项" in plain
+
+
 def test_markdown_stream_table_and_hr():
     m = c.MarkdownStream(60)
     out = m.feed("| 列1 | 列2 |\n|---|---|\n| a | b |\n---\n")
@@ -110,12 +215,10 @@ def test_markdown_stream_table_and_hr():
 def test_markdown_stream_partial_no_double_print():
     m = c.MarkdownStream(60)
     assert m.feed("这是第一段") == ""
-    assert m.has_partial()
-    partial = m.partial()
-    assert "这是第一段" in c.strip_ansi(partial)
+    assert not m.has_partial()  # 行缓冲：半行不提前输出
+    assert m.partial() == ""
     rest = m.feed("的结尾\n")
-    assert "这是第一段" not in c.strip_ansi(rest)  # 已打印前缀不再重复
-    assert "的结尾" in c.strip_ansi(rest)
+    assert "这是第一段的结尾" in c.strip_ansi(rest)  # 完整行一次性渲染
     assert m.flush() == ""
 
 
@@ -140,7 +243,8 @@ def test_visible_rows_counts_wrap_cjk_and_ansi():
 def test_markdown_stream_reset_discards_partial():
     m = c.MarkdownStream(80)
     assert m.feed("半截过渡文本") == ""
-    assert m.has_partial()
+    assert not m.has_partial()
+    assert m.partial() == ""
     m.reset()
     assert not m.has_partial()
     assert m.partial() == ""  # 撤回后残留片段不会再被打印
@@ -170,7 +274,9 @@ def test_complete_commands():
     matches, ghost = c.complete("/to")
     assert "/tools" in matches and "/todos" in matches
     assert ghost == ""
-    assert c.complete("/ex")[1] == "it"  # /exit
+    # /exit 与 /export 同前缀：无幽灵补全，补到 /exi 才唯一
+    assert c.complete("/ex")[1] == ""
+    assert c.complete("/exi")[1] == "t"
 
 
 def test_complete_tools_argument():

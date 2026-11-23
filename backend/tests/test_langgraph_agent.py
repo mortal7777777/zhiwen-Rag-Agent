@@ -208,6 +208,42 @@ def test_subagent_tools_execute_mode_has_write():
     assert {"list_dir", "read_file", "grep_search", "write_file", "edit_file", "delete_file", "bash"} <= names
 
 
+def test_subagent_tools_explore_review_are_fs_only():
+    for mode in ("explore", "review"):
+        names = {t.name for t in _subagent_tools(_SubagentService(), mode, [0])}
+        assert {"list_dir", "read_file", "grep_search", "skill_view"} <= names
+        # 侦察/审查是只读文件面：不联网、不查库、不写文件
+        assert not (
+            {"knowledge_base_search", "web_search", "write_file", "edit_file", "delete_file", "bash"}
+            & names
+        )
+
+
+def test_mode_aliases_and_unknown_fallback():
+    from app.agent.nodes.subagent import _normalize_mode
+
+    assert _normalize_mode("scan") == "explore"
+    assert _normalize_mode("AUDIT") == "review"
+    assert _normalize_mode("kb") == "research"
+    assert _normalize_mode("write") == "execute"
+    assert _normalize_mode("typo-mode") == "research"
+    assert _normalize_mode("") == "research"
+
+
+def test_parse_declared_subtasks_new_modes_and_execute_downgrade():
+    calls = [
+        {"id": "c1", "args": {"task": "探索代码结构与入口" * 2, "mode": "scan"}},
+        {"id": "c2", "args": {"task": "检索知识库中的相关章节" * 2, "mode": "kb"}},
+        {"id": "c3", "args": {"task": "创建 out/a.txt 并写入验证内容" * 2, "mode": "write"}},
+        {"id": "c4", "args": {"task": "创建 out/b.txt 并写入验证内容" * 2, "mode": "execute"}},
+    ]
+    subtasks, downgraded = _parse_declared_subtasks(calls)
+    assert [s["mode"] for s in subtasks] == [
+        "explore", "research", "execute", "research",
+    ]
+    assert downgraded == 1
+
+
 def test_sensitive_subagent_tool_allow_mode():
     class Settings:
         tool_permission_mode = "allow"
@@ -326,7 +362,9 @@ def test_run_verify_skips_unknown_ext(tmp_path):
 
 def test_run_verify_docker_translates_path(tmp_path, monkeypatch):
     import app.tools_extra as te
+    from app.agent import utils as agent_utils
 
+    agent_utils._VERIFY_PROBE_CACHE.clear()
     f = tmp_path / "app.py"
     f.write_text("x = 1\n", encoding="utf-8")
     calls = []
@@ -336,14 +374,17 @@ def test_run_verify_docker_translates_path(tmp_path, monkeypatch):
         lambda settings, cmd: calls.append(cmd)
         or {"exit_code": 0, "output": "ok"},
     )
-    monkeypatch.setattr(te, "_resolve_workspace", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        te, "_resolve_workspace", lambda settings, project_dir=None: str(tmp_path)
+    )
 
     class S(VSettings):
         command_sandbox = "docker"
 
     results = _run_verify(S(), [str(f)])
     assert results and results[0]["exit_code"] == 0
-    assert calls and "/workspace/app.py" in calls[0]
+    # 第一次调用是解释器探活；真正的 py_compile 在后面
+    assert any("/workspace/app.py" in cmd for cmd in calls)
 
 
 def test_run_verify_json_and_yaml(tmp_path):

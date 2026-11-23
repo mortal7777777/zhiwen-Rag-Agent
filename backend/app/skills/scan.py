@@ -23,6 +23,10 @@ from .prefs import _get_cached_prefs
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+# 知问内置技能（随仓库版本化）：目前是 dispatch 用的 brief 模板
+BUILTIN_SKILLS_DIR = Path(__file__).resolve().parent / "builtin"
+
+
 AGENT_SKILLS_DIR = Path(os.environ.get("DATA_DIR") or (_PROJECT_ROOT / "data")) / "agent_skills"
 
 
@@ -62,6 +66,8 @@ def _expand_plugin_skill_root(rel_glob: str) -> str | None:
 
 
 DEFAULT_ROOTS = [
+    # 知问内置技能（随仓库版本化，始终启用；目前是 brief 模板）
+    ("zhiwen", str(BUILTIN_SKILLS_DIR), "nested"),
     # 知问自创技能（write_skill 写入；用户可共享到 Hermes 个人层）
     (AGENT_SOURCE, str(AGENT_SKILLS_DIR), "nested"),
     ("codex", os.path.expanduser("~/.codex/skills"), "flat"),
@@ -80,7 +86,7 @@ DEFAULT_ROOTS = [
 ]
 
 
-_SOURCE_PRIORITY = {"codex": 0, "agent": 0.5, "hermes": 1, "claude": 3}
+_SOURCE_PRIORITY = {"codex": 0, "zhiwen": 0.4, "agent": 0.5, "hermes": 1, "claude": 3}
 
 
 SKIP_NAMES = {

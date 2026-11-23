@@ -14,6 +14,7 @@ from app.rag.loader import load_documents
 class _FakeSettings:
     def __init__(self, data_dir):
         self.data_dir = data_dir
+        self.meta_dir = data_dir.parent / "meta"
 
 
 class _FakeService:
@@ -67,7 +68,7 @@ def test_loader_sets_relative_path(tmp_path):
     assert all(d.metadata.get("relative_path") == "docs/note.md" for d in docs)
 
 
-def test_extract_sources_passes_relative_path():
+def test_extract_sources_passes_relative_path_and_images():
     result = {
         "results": [
             {
@@ -77,9 +78,22 @@ def test_extract_sources_passes_relative_path():
                 "page": 3,
                 "relative_path": "sub/a.pdf",
                 "index": 1,
+                "images": [{"id": "p0003_img0", "path": "ocr_cache/a/p0003_img0.png"}],
             }
         ]
     }
     sources = extract_sources(result)
     assert sources[0]["relative_path"] == "sub/a.pdf"
     assert sources[0]["page"] == 3
+    assert sources[0]["images"][0]["id"] == "p0003_img0"
+
+
+def test_image_endpoint_only_serves_ocr_cache(tmp_path):
+    client = _make_client(tmp_path)
+    img_dir = tmp_path.parent / "meta" / "ocr_cache" / "doc"
+    img_dir.mkdir(parents=True)
+    (img_dir / "p1.png").write_bytes(b"png-bytes")
+    ok = client.get("/images", params={"path": "ocr_cache/doc/p1.png"})
+    assert ok.status_code == 200 and ok.content == b"png-bytes"
+    bad = client.get("/images", params={"path": "../secret.png"})
+    assert bad.status_code == 404

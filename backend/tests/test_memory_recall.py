@@ -11,6 +11,7 @@ import pytest
 
 from app.agent import context as context_mod
 from app.agent.context import ContextService
+from app.agent.context import memory as memory_mod
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +47,18 @@ class FakeEmbeddings:
 
     def embed_documents(self, texts: list[str], batch_size: int = 64) -> list[list[float]]:
         return [self.mapping.get(t, [1.0, 0.0]) for t in texts]
+
+
+class _CountingEmbeddings(FakeEmbeddings):
+    """统计 embed_documents 调用批次，用于验证记忆向量缓存命中。"""
+
+    def __init__(self, mapping: dict[str, list[float]] | None = None):
+        super().__init__(mapping)
+        self.doc_batches: list[list[str]] = []
+
+    def embed_documents(self, texts: list[str], batch_size: int = 64) -> list[list[float]]:
+        self.doc_batches.append(list(texts))
+        return super().embed_documents(texts, batch_size)
 
 
 def _memories(n: int = 5) -> list[dict]:
@@ -209,6 +222,61 @@ def test_recall_asks_for_creation_order(monkeypatch):
 
     service.retrieve_memories(None, FakeEmbeddings(), "完全不相关的问题")
     assert seen.get("order") == "created"
+
+
+def test_add_facts_reuses_memory_vector_cache(monkeypatch):
+    """回归：add_facts 不得每轮把全库既有记忆重新 embed 一遍。"""
+    monkeypatch.setattr(
+        context_mod.repo,
+        "list_memories",
+        lambda db, limit=1000, **kw: _memories(3),
+    )
+    service = ContextService(FakeSettings(), chat=None)
+    emb = _CountingEmbeddings()
+
+    service.add_facts(None, emb, [], 1)
+    service.add_facts(None, emb, [], 1)
+
+    assert len(emb.doc_batches) == 1
+    assert len(emb.doc_batches[0]) == 3
+
+
+def test_add_facts_caches_new_fact_vector(monkeypatch):
+    monkeypatch.setattr(
+        context_mod.repo,
+        "list_memories",
+        lambda db, limit=1000, **kw: _memories(3),
+    )
+
+    class _Memory:
+        def __init__(self, mid: int):
+            self.id = mid
+            self.updated_at = "2026-11-02T10:00:00"
+
+    def fake_add(db, content, **kw):
+        return _Memory(100)
+
+    monkeypatch.setattr(context_mod.repo, "add_memory", fake_add)
+    service = ContextService(FakeSettings(), chat=None)
+    emb = _CountingEmbeddings()
+
+    added = service.add_facts(
+        None, emb, [{"content": "新事实", "category": "other"}], 1
+    )
+
+    assert added == 1
+    assert context_mod._memory_vec_cache[100][1] == [0.0, 1.0]
+    emb.doc_batches.clear()
+    service.add_facts(None, emb, [], 1)
+    assert emb.doc_batches == []  # 既有 3 条全部命中缓存
+
+
+def test_memory_vector_cache_is_bounded():
+    for i in range(memory_mod._MEMORY_VEC_CACHE_MAX + 5):
+        memory_mod._cache_memory_vector(i, "t", [0.0])
+
+    assert len(context_mod._memory_vec_cache) == memory_mod._MEMORY_VEC_CACHE_MAX
+    assert 0 not in context_mod._memory_vec_cache
 
 
 def test_is_duplicate_detects_match_beyond_recent_window():

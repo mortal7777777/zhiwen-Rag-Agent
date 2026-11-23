@@ -93,8 +93,15 @@ def app_env(tmp_path, monkeypatch):
     data.mkdir()
     settings = Settings(data_dir=data, meta_dir=tmp_path / "meta")
     service = RAGService(settings)
-    calls = {"ensure_index": 0}
+    calls = {"ensure_index": 0, "ingest": 0}
     service.ensure_index = lambda **kw: calls.__setitem__("ensure_index", calls["ensure_index"] + 1)  # type: ignore[method-assign]
+
+    def _fake_ingest(reason: str = "upload") -> dict:
+        # 同步计数替代后台线程：测试里不能让 ingest 线程去碰真实 OpenSearch
+        calls["ingest"] += 1
+        return {"started": True, "reason": reason}
+
+    service.start_background_ingest = _fake_ingest  # type: ignore[method-assign]
 
     app = FastAPI()
     app.include_router(router)
@@ -124,7 +131,19 @@ def test_upload_no_conflict_ok(app_env):
     assert resp.status_code == 200
     assert resp.json()[0]["name"] == "新书.txt"
     assert (app_env.data / "新书.txt").is_file()
+    # 默认 async_ingest=true：落盘即返回，索引转后台（ensure 不在请求内执行）
+    assert resp.headers.get("x-zhiwen-index-async") == "1"
+    assert app_env.calls["ensure_index"] == 0
+    assert app_env.calls["ingest"] == 1
+
+
+def test_upload_sync_ingest_opt_in(app_env):
+    """async_ingest=false 保留旧同步路径（CLI/脚本可用的确定性模式）。"""
+    resp = _upload(app_env, "同步.txt", "内容".encode("utf-8"), async_ingest="false")
+    assert resp.status_code == 200
+    assert resp.headers.get("x-zhiwen-index-async") is None
     assert app_env.calls["ensure_index"] == 1
+    assert app_env.calls["ingest"] == 0
 
 
 def test_upload_dry_run_no_write(app_env):
@@ -134,6 +153,7 @@ def test_upload_dry_run_no_write(app_env):
     assert body["has_conflict"] is False
     assert body["files"][0]["file_name"] == "预检.txt"
     assert not (app_env.data / "预检.txt").exists()
+    assert app_env.calls["ingest"] == 0
 
 
 def test_upload_same_name_409(app_env):
@@ -196,7 +216,9 @@ def test_rename_ok(app_env):
     assert resp.status_code == 200
     assert (app_env.data / "新名.txt").is_file()
     assert not (app_env.data / "旧名.txt").exists()
-    assert app_env.calls["ensure_index"] >= 1
+    # 改名端点 defer_index=True：锁内只做移动，重嵌转后台线程
+    assert app_env.calls["ensure_index"] == 0
+    assert app_env.calls["ingest"] == 1
 
 
 def test_rename_same_name_400(app_env):

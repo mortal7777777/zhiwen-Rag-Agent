@@ -6,6 +6,7 @@ structure（章节摘要）/ sanitize（内容安全）/ catalog（目录组装�
 （tests 的 `app.skills.X` 访问）保持不变。
 """
 from .prefs import (  # noqa: F401
+    ALWAYS_ENABLED,
     DEFAULT_ENABLED,
     _prefs,
     _prefs_lock,
@@ -17,6 +18,7 @@ from .prefs import (  # noqa: F401
 from .scan import (  # noqa: F401
     _PROJECT_ROOT,
     AGENT_SKILLS_DIR,
+    BUILTIN_SKILLS_DIR,
     HERMES_SKILLS_DIR,
     AGENT_SOURCE,
     _expand_plugin_skill_root,

@@ -3,10 +3,14 @@
 拆分后的依赖必须单向（只允许向下），否则"拆出去"会退化成"互相调用"：
 
     cli_agent.py（REPL/主循环）
-      ├─ cli.http   -> term, format
-      ├─ cli.input  -> term
-      ├─ cli.format -> term
-      └─ cli.term   -> 只依赖标准库
+      ├─ cli.stream   -> term, format, input, http, pending, render, pager
+      ├─ cli.commands -> term, format, http, input
+      ├─ cli.pending  -> term, http
+      ├─ cli.render   -> term
+      ├─ cli.http     -> term, format
+      ├─ cli.input    -> term
+      ├─ cli.format   -> term
+      └─ cli.term     -> 只依赖标准库
 
 同时用"行数棘轮"防止 cli_agent.py 重新长回巨型文件。
 """
@@ -25,6 +29,11 @@ ALLOWED_LAYER_IMPORTS = {
     "format": {"term"},
     "input": {"term"},
     "http": {"term", "format"},
+    "pending": {"term", "http"},
+    "render": {"term"},
+    "pager": {"term"},
+    "commands": {"term", "format", "http", "input"},
+    "stream": {"term", "format", "input", "http", "pending", "render", "pager"},
 }
 
 
@@ -72,9 +81,9 @@ def test_compat_layer_reexports_public_api():
 
 
 def test_cli_agent_stays_small():
-    """行数棘轮：主入口不得再长回巨型文件（拆分前 2,423 行）。"""
+    """行数棘轮：主入口不得再长回巨型文件（拆分前 2,423 行；stream 拆出后 847）。"""
     lines = len((BACKEND / "cli_agent.py").read_text(encoding="utf-8").splitlines())
-    assert lines <= 1400, (
-        f"cli_agent.py 已 {lines} 行（上限 1400）：新逻辑请放进 cli/ 对应分层"
-        "（终端原语→term、格式化→format、行编辑→input、HTTP/文件→http）"
+    assert lines <= 900, (
+        f"cli_agent.py 已 {lines} 行（上限 900）：新逻辑请放进 cli/ 对应分层"
+        "（终端原语→term、格式化→format、行编辑→input、HTTP/文件→http、流式→stream）"
     )

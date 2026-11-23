@@ -124,13 +124,13 @@ def tool_failure_notice(name: str, error: str) -> str:
     return (
         f"工具 {name} 执行失败：{error}\n"
         "这是一次可重试的失败，不消耗你的工具调用预算。"
-        "请换一种方式继续完成任务，不要就此停止：\n"
-        "1. 先 list_dir / read_file / grep_search 确认路径与现状；\n"
-        "2. 按错误信息修正参数（例如改用工作目录内的相对路径，或先创建父目录）；\n"
+        "请按原因分流处理，不要盲目停止或强行绕过：\n"
+        "1. 若因【用户拒绝】或【计划模式只读拦截】：立即停止该写/命令动作，不要换写法重试；计划模式下改用只读工具并调 exit_plan_mode，用户拒绝时先询问用户意图或采用其备注中的替代方案；\n"
+        "2. 若因【路径/参数/语法错误】：先 list_dir / read_file / grep_search 确认路径与现状，按错误信息修正参数（例如改用工作目录内的相对路径，或先创建父目录）后重试；\n"
         "3. 若目标确实不可达（如在工作目录之外），向用户说明限制，"
         "并给出可落地的替代方案（写入工作目录内、修改工作目录等），"
         "询问用户后再继续。\n"
-        "任务未完成前，请持续尝试合理的替代方法。"
+        "任务未完成且未触及用户拒绝/只读禁区前，请持续尝试合理的替代方法。"
     )
 
 
@@ -139,6 +139,16 @@ def verify_pass_notice(lines: list) -> str:
         "写后自动验证结果（全部通过）：\n"
         + "\n\n".join(lines)
         + "\n\n可以继续后续步骤。"
+    )
+
+
+def verify_env_notice(reason: str) -> str:
+    """验证环境不可用（解释器/路径缺失）：跳过验证，不代表文件有错。"""
+    return (
+        "# 写后验证不可用（环境问题，不是文件错误）\n"
+        f"自动验证命令无法启动：{str(reason or '')[:300]}\n"
+        "本轮已跳过自动验证；这不代表写入失败。请继续任务，不要为了"
+        "“验证失败”反复重写同一个文件；如需自证，用 bash 或 read_file 做一次实际检查。"
     )
 
 
@@ -196,6 +206,29 @@ def budget_exhausted_notice(task_mode: bool) -> str:
             "如果信息仍然不足，请明确告诉用户缺少什么，不要继续调用工具。"
         )
     )
+
+
+def quote_notice(quote: dict) -> str:
+    """查看器划选原文的注入块：直接给原文 + 所在段落上下文，标明是资料不是指令。"""
+    text = str((quote or {}).get("text") or "").strip()[:8000]
+    if not text:
+        return ""
+    source = str((quote or {}).get("source") or "文档").strip()
+    page = (quote or {}).get("page")
+    page_text = f"第 {page} 页" if page else ""
+    context = str((quote or {}).get("context") or "").strip()[:8000]
+    lines = [
+        f"用户在文档《{source}》{page_text}选中了以下原文，请以它为主要依据回答。",
+        UNTRUSTED_NOTE,
+        f"<quote>\n{text}\n</quote>",
+    ]
+    if context and context != text:
+        lines.append(f"所在段落上下文：\n<context>\n{context}\n</context>")
+    lines.append(
+        "若划选原文与段落上下文已足以完成用户的解释、翻译或总结要求，请直接作答；"
+        "仅在需要跨章节背景或核对前后文定义时才使用知识库检索（范围已限定到当前文档）。"
+    )
+    return "\n".join(lines)
 
 
 def failure_limit_notice(task_mode: bool) -> str:

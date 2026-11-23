@@ -104,6 +104,27 @@ def _q(p) -> str:
     return '"' + str(p).replace("\\", "/") + '"'
 
 
+def _verify_python(settings) -> str:
+    """验证用 Python 解释器：按 shell 后端翻译路径；docker 内用 python。"""
+    from ..tools_extra import shell_python
+
+    sandbox = str(effective(settings, "command_sandbox") or "subprocess").strip().lower()
+    if sandbox == "docker":
+        return "python"
+    return shell_python(settings)
+
+
+def _verify_target(settings, path: str) -> str:
+    """验证目标路径：按 shell 后端把 Windows 盘符路径翻译成 shell 可见路径。"""
+    from ..tools_extra import detect_bash_backend, shell_path
+
+    sandbox = str(effective(settings, "command_sandbox") or "subprocess").strip().lower()
+    if sandbox == "docker":
+        return path
+    backend = detect_bash_backend(settings).get("backend", "")
+    return shell_path(path, backend)
+
+
 def _pick_verify_command(settings, path: str) -> str | None:
     """为单个写入/编辑的文件选择验证命令。
 
@@ -117,29 +138,51 @@ def _pick_verify_command(settings, path: str) -> str | None:
     # 注意：effective(key) 不传 default，否则永远返回 default 读不到 settings 属性
     if not effective(settings, "verify_auto_detect"):
         return None
+    py = _verify_python(settings)
+    target = _verify_target(settings, path)
     ext = Path(path).suffix.lower()
     if ext == ".py":
-        return f"{_q(sys.executable)} -m py_compile {_q(path)}"
+        return f"{_q(py)} -m py_compile {_q(target)}"
     if ext in (".js", ".mjs", ".cjs"):
-        return f"node --check {_q(path)}"
+        return f"node --check {_q(target)}"
     if ext == ".json":
         # python -m json.tool：语法错误时非零退出，输出原样捕获，避免嵌套引号
-        return f"{_q(sys.executable)} -m json.tool {_q(path)}"
+        return f"{_q(py)} -m json.tool {_q(target)}"
     if ext in (".yaml", ".yml"):
         return (
-            f"{_q(sys.executable)} -c "
+            f"{_q(py)} -c "
             f"\"import yaml,sys; yaml.safe_load(open(sys.argv[1], encoding='utf-8'))\" "
-            f"{_q(path)}"
+            f"{_q(target)}"
         )
     return None
 
 
-def _run_verify(settings, paths: list[str]) -> list[dict]:
+# 验证解释器可用性探测（按 shell 后端缓存）：解释器不存在是环境问题，
+# 不是文件错误——不能计 verify_fail 或让模型反复重写同一文件。
+_VERIFY_PROBE_CACHE: dict[tuple[str, str, str], tuple[bool, str]] = {}
+
+
+def _verify_env_ok(settings, run_command) -> tuple[bool, str]:
+    py = _verify_python(settings)
+    sandbox = str(effective(settings, "command_sandbox") or "subprocess").strip().lower()
+    key = (py, sandbox, str(getattr(settings, "command_shell", "auto")))
+    if key in _VERIFY_PROBE_CACHE:
+        return _VERIFY_PROBE_CACHE[key]
+    result = run_command(settings, f"{_q(py)} -c \"print('verify-ok')\"")
+    ok = int(result.get("exit_code") or 0) == 0 and not result.get("error")
+    detail = str(result.get("output") or result.get("error") or "")[:300]
+    _VERIFY_PROBE_CACHE[key] = (ok, detail)
+    return ok, detail
+
+
+def _run_verify(
+    settings, paths: list[str], project_dir: str | None = None
+) -> list[dict]:
     """对写入/编辑的文件逐条运行验证，返回 [{path, command, exit_code, output}]。"""
     from ..tools_extra import _resolve_workspace, _run_command
 
     sandbox = str(effective(settings, "command_sandbox") or "subprocess").strip().lower()
-    workspace = Path(_resolve_workspace(settings)).resolve()
+    workspace = Path(_resolve_workspace(settings, project_dir)).resolve()
 
     def _verifiable_path(path: str) -> str:
         # Docker 沙箱里没有宿主机盘符路径：工作目录内的文件映射到 /workspace
@@ -151,6 +194,28 @@ def _run_verify(settings, paths: list[str]) -> list[dict]:
         except ValueError:
             return path
 
+    # 自动检测的验证依赖 Python 解释器：先探活一次。解释器不可用是环境问题，
+    # 直接返回 environment_error，由 tools 节点跳过而不是提示模型"修文件"。
+    explicit = str(effective(settings, "verify_command") or "").strip()
+    needs_python = any(
+        Path(p).suffix.lower() in (".py", ".json", ".yaml", ".yml") for p in paths
+    )
+    if not explicit and needs_python:
+        ok, detail = _verify_env_ok(settings, _run_command)
+        if not ok:
+            py = _verify_python(settings)
+            return [
+                {
+                    "path": p,
+                    "command": f"{_q(py)} ...",
+                    "exit_code": -1,
+                    "error": f"验证环境不可用：{detail or py}",
+                    "output": detail,
+                    "environment_error": True,
+                }
+                for p in paths
+            ]
+
     results: list[dict] = []
     for p in paths:
         target = _verifiable_path(p)
@@ -158,7 +223,11 @@ def _run_verify(settings, paths: list[str]) -> list[dict]:
         if not cmd:
             continue
         try:
-            r = _run_command(settings, cmd)
+            r = (
+                _run_command(settings, cmd, project_dir=project_dir)
+                if project_dir
+                else _run_command(settings, cmd)
+            )
             results.append(
                 {
                     "path": p,
@@ -274,6 +343,23 @@ def _strip_xml_tool_tags(text: str) -> str:
     return cleaned
 
 
+# 工具结果进历史前的单字段截断阈值（None = 不截断）。长文档/代码片段需要
+# 保留更多上下文；技能全文必须完整（后续轮次照着步骤执行）。
+_TOOL_CONTENT_LIMITS: dict[str, int | None] = {
+    "skill_view": None,
+    "read_file": 6000,
+    "knowledge_base_search": 6000,
+    # 用户回答是后续轮次的分支依据：4 题 ×（题干+选项+自定义回答）
+    # 最坏可到 ~5.6k，默认 2500 会把答案截掉。
+    "ask_user_question": 6000,
+}
+_DEFAULT_CONTENT_LIMIT = 2500
+
+
+def tool_content_limit(name: str) -> int | None:
+    return _TOOL_CONTENT_LIMITS.get(name, _DEFAULT_CONTENT_LIMIT)
+
+
 def _slim_tool_result(result: dict, content_limit: int | None = 2500) -> dict:
     """工具结果进历史前瘦身：大 content 字段保留首尾、中间省略。
 
@@ -288,6 +374,16 @@ def _slim_tool_result(result: dict, content_limit: int | None = 2500) -> dict:
     if not isinstance(result, dict):
         return result
     slim = dict(result)
+    # 写后回读块单独限长：它可能包含 payment_history 等结构化字段，
+    # 先压缩再进入历史，避免把 2500 字符预算吃光。
+    verified = slim.get("_verified")
+    if isinstance(verified, dict):
+        try:
+            from .tool_verification import compact_verified
+
+            slim["_verified"] = compact_verified(verified, 900)
+        except Exception:
+            pass
     for key in ("content", "output", "entries", "matches"):
         val = slim.get(key)
         if (

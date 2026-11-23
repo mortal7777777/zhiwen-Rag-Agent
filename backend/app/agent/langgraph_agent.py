@@ -41,6 +41,11 @@ class LangGraphAgentService(
         self.recursion_limit = getattr(settings, "agent_recursion_limit", 30)
         # conv_id -> (main, aux)：挂起前一段的用量快照，恢复线程 seed 后合并
         self._suspended_usage: dict = {}
+        # conv_id -> 已累计执行毫秒：挂起时写入、恢复时 seed（不含审批等待）
+        self._suspended_elapsed: dict[int, int] = {}
+        # conv_id -> 本轮历史前缀（不进检查点）：挂起时保留，finalize/abandon 清理。
+        # 进程重启后由 resume/continue 从 DB 重建。
+        self._pending_prefix: dict[int, list] = {}
 
     @property
     def graph(self):

@@ -63,7 +63,7 @@ class _Chat:
                 tool_calls=[
                     {
                         "name": "bash",
-                        "args": {"command": "echo hi"},
+                        "args": {"command": "touch marker.txt"},
                         "id": "t1",
                         "type": "tool_call",
                     }

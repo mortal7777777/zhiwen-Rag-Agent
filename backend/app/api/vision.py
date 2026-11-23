@@ -6,7 +6,11 @@ from fastapi import APIRouter, HTTPException
 
 from ..config import get_settings
 from ..rag.vision import SenseNovaVision
-from ..runtime_config import vision_provider_config
+from ..runtime_config import (
+    chat_model_supports_vision,
+    effective,
+    vision_provider_config,
+)
 from ..schemas import VisionDescribeRequest, VisionDescribeResponse
 
 router = APIRouter(tags=["vision"])
@@ -42,11 +46,12 @@ def status() -> dict:
     provider = vision_provider_config(settings) or {}
     return {
         "configured": bool(provider.get("api_key")),
-        "model": provider.get("model") or settings.sensenova_model,
-        "base_url": provider.get("base_url") or settings.sensenova_base_url,
+        "model": provider.get("model") or effective(settings, "sensenova_model"),
+        "base_url": provider.get("base_url")
+        or effective(settings, "sensenova_base_url"),
         "auto_describe": settings.vision_auto_describe,
-        "main_model_vision": settings.main_model_vision,
-        "max_images": settings.vision_max_images,
+        "main_model_vision": chat_model_supports_vision(settings),
+        "max_images": effective(settings, "vision_max_images"),
     }
 
 

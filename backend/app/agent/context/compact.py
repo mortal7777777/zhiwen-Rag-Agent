@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 from .base import estimate_tokens, trim_history_for_budget
 
 
+# 历史扫描上限：必须覆盖 1.5×history_max_messages（上限 500 → 高水位 750），
+# 否则条数触发压缩永远看不到水位，早期消息会被读取上限静默截掉。
+_MESSAGE_SCAN_LIMIT = 2000
+
+
 def _clip_summary(text: str, limit: int) -> str:
     """摘要硬限额：优先在句子边界截断（中文句末/换行），避免半句。"""
     text = (text or "").strip()
@@ -38,6 +43,26 @@ def _clip_summary(text: str, limit: int) -> str:
     if boundary >= limit * 0.6:
         return cut[: boundary + 1].strip()
     return cut.rstrip()
+
+
+def _token_cutoff(window: list[dict], budget: int) -> int:
+    """token 触发且条数未到上限时的切点：保留最近 ≤budget 的消息。
+
+    返回被并入摘要的消息数；至少压 1 条、至少保留 2 条（单条超长时
+    后面的 trim_history_for_budget 会继续兜底）。返回 0 表示无需压缩。
+    """
+    if len(window) <= 1 or budget <= 0:
+        return 0
+    total = 0
+    start = len(window)
+    for i in range(len(window) - 1, -1, -1):
+        tokens = estimate_tokens(window[i]["content"])
+        if total + tokens > budget:
+            break
+        total += tokens
+        start = i
+    start = min(start, len(window) - min(2, len(window) - 1))
+    return max(0, start)
 
 
 def _render_batch(batch: list[dict], max_chars: int = 20000, per_message: int = 1000) -> str:
@@ -106,9 +131,11 @@ class CompactMixin:
         - 窗口起点粘滞：窗口 = 摘要边界之后的消息（summary_up_to_id），
           没触发压缩时逐字节不变——provider 前缀缓存跨轮稳定命中；
         - 高水位触发：窗口条数超过上限 1.5 倍（或 token 超预算 1.25 倍）
-          才压缩，一次压到上限条数；token 触发线不得超过模型窗口可用上限；
+          才压缩；条数触发压到上限条数，token 超水位但条数未到上限时
+          按 token 保留最近一段（2026-11-09 修：之前会跳过压缩静默 trim）；
+          token 触发线不得超过模型窗口可用上限；
         - 预算按模板任务差异化（config.history_budget_*，默认
-          general/knowledge 128k、coding/writing 400k，最终按模型窗口夹紧）。
+          general/knowledge/coding/writing 400k，最终按模型窗口夹紧）。
 
         为什么是高水位而不是"超上限就压"：压缩会把窗口起点前移、改写历史
         开头，前缀缓存从第一行起失效。若压到恰好等于上限，工具轮较多的
@@ -117,7 +144,7 @@ class CompactMixin:
         留出 0.5× 上限的余量后，压缩一次可稳定多轮命中，与
         trim_history_for_budget 的 15% 回收门控同一思路。
         """
-        rows = repo.list_messages_with_id(db, conversation_id, limit=500)
+        rows = repo.list_messages_with_id(db, conversation_id, limit=_MESSAGE_SCAN_LIMIT)
         if not rows:
             return None, []
         max_messages = int(effective(self.settings, "history_max_messages") or 400)
@@ -135,8 +162,12 @@ class CompactMixin:
             return old_summary, window
 
         cutoff = max(0, len(window) - max(4, max_messages))
+        if cutoff == 0 and window_tokens > high_tokens:
+            # 条数没到上限但 token 已超水位：按 token 保留最近一段并生成摘要
+            # （旧实现直接返回，导致长会话每轮静默 trim、早期内容无摘要丢失）
+            cutoff = _token_cutoff(window, budget)
         if cutoff == 0:
-            # 超预算但条数很少（单条超长）：不压缩，交给 trim 裁剪
+            # 单条超长/无可安全切分：不压缩，交给 trim 裁剪
             return old_summary, window
         cutoff_id = window[cutoff - 1]["id"]
         batch = window[:cutoff]
@@ -150,8 +181,9 @@ class CompactMixin:
 
     def context_stats(self, db: Session, conversation_id: int) -> dict:
         """上下文占用统计（/context 命令与 Web 上下文面板共用）。"""
-        rows = repo.list_messages_with_id(db, conversation_id, limit=500)
+        rows = repo.list_messages_with_id(db, conversation_id, limit=_MESSAGE_SCAN_LIMIT)
         budget = self.history_budget_for(db, conversation_id)
+        budget_source = self.history_budget_source(db, conversation_id)
         max_messages = int(effective(self.settings, "history_max_messages") or 400)
         summary, up_to = repo.get_summary_state(db, conversation_id)
         covered = sum(1 for r in rows if r["id"] <= up_to)
@@ -161,15 +193,24 @@ class CompactMixin:
         window_tokens = sum(estimate_tokens(r["content"]) for r in window)
         high_messages = max_messages + max_messages // 2
         high_tokens = self.token_high_water(budget)
-        trigger = len(window) > high_messages or window_tokens > high_tokens
-        effective_messages = len(window) - (
-            max(0, len(window) - max(4, max_messages)) if trigger else 0
-        )
+        count_trigger = len(window) > high_messages
+        token_trigger = window_tokens > high_tokens
+        trigger = count_trigger or token_trigger
+        # 预计下一轮的发送窗口：先按压缩切点（条数/ token 两种），再走 trim。
+        # 面板显示"实际会发多少"，而不是压缩前的整窗估算。
+        cutoff = max(0, len(window) - max(4, max_messages))
+        if cutoff == 0 and token_trigger:
+            cutoff = _token_cutoff(window, budget)
+        projected = window[cutoff:] if cutoff else window
+        sent_rows = trim_history_for_budget(projected, budget)
+        sent_tokens = sum(estimate_tokens(r["content"]) for r in sent_rows)
+        effective_messages = len(sent_rows)
         # 最近运行的缓存命中统计（主循环口径，供上下文面板展示）
         cache_hit = 0
         cache_miss = 0
         recent_llm_calls = 0
         recent_runs = 0
+        runs: list[dict] = []
         try:
             runs = repo.list_agent_runs(db, limit=10, conversation_id=conversation_id)
             for r in runs:
@@ -185,6 +226,58 @@ class CompactMixin:
                 recent_runs += 1
         except Exception as exc:
             logger.warning("上下文面板读取运行统计失败：%s", exc)
+        # ---- 分项估算（Claude 式上下文构成） ----
+        # prompt_tokens 是跨调用累计值，不能与窗口估算混用；这里统一用
+        # 字符估算，并在响应里标注 estimated，前端按估算总量算百分比。
+        last_usage = None
+        if runs and isinstance(runs[0].get("token_usage"), dict):
+            last_usage = runs[0]["token_usage"]
+        prompt_meta = last_usage.get("prompt") if isinstance(last_usage, dict) else None
+        prompt_chars = 0
+        if isinstance(prompt_meta, dict):
+            prompt_chars = int(prompt_meta.get("template_chars") or 0) + int(
+                prompt_meta.get("fragment_chars") or 0
+            )
+        tools_chars = int((last_usage or {}).get("tools_chars") or 0)
+
+        last_user_index = -1
+        for index, row in enumerate(rows):
+            if row.get("role") == "user":
+                last_user_index = index
+        question_text = ""
+        injection_rows: list[dict] = []
+        if last_user_index >= 0:
+            question_text = str(rows[last_user_index].get("content") or "")
+            injection_rows = [
+                r for r in rows[last_user_index + 1 :] if r.get("role") == "system"
+            ]
+
+        # 系统提示词与工具 schema 没有现成文本：按中英混合/JSON 的保守字符比估算
+        system_prompt_tokens = max(0, int(round(prompt_chars / 2.0)))
+        tools_tokens = max(0, int(round(tools_chars / 4.0)))
+        injection_tokens = sum(
+            estimate_tokens(str(r.get("content") or "")) for r in injection_rows
+        )
+        question_tokens = estimate_tokens(question_text) if question_text else 0
+        # sent_tokens 是「发送窗口」的历史估算（含注入与当前问题）；系统提示词/
+        # 工具 schema 不在消息窗口里，应在窗口之上叠加，而不是从窗口里扣。
+        history_tokens = max(0, sent_tokens - injection_tokens - question_tokens)
+        history_chars = sum(len(str(r.get("content") or "")) for r in sent_rows)
+        breakdown = {
+            "estimated": True,
+            "system_prompt": {"tokens": system_prompt_tokens, "chars": prompt_chars},
+            "tools": {"tokens": tools_tokens, "chars": tools_chars},
+            "context_injections": {
+                "tokens": injection_tokens,
+                "chars": sum(len(str(r.get("content") or "")) for r in injection_rows),
+                "messages": len(injection_rows),
+            },
+            "history": {"tokens": history_tokens, "chars": history_chars},
+            "question": {"tokens": question_tokens, "chars": len(question_text)},
+        }
+        breakdown["total"] = (
+            system_prompt_tokens + tools_tokens + injection_tokens + history_tokens + question_tokens
+        )
         return {
             "conversation_id": conversation_id,
             "message_count": len(rows),
@@ -193,8 +286,14 @@ class CompactMixin:
             "history_max_messages": max_messages,
             # 压缩触发水位（1.5×上限）：窗口超过它才压缩到上限条数
             "history_high_water_messages": high_messages,
+            # 整窗估算（压缩/裁剪前，含全部工具/系统行）
             "estimated_tokens": window_tokens,
+            # 下一轮实际发送的历史估算（压缩切点 + trim 之后）
+            "sent_estimate_tokens": sent_tokens,
+            "trimmed_tokens": max(0, window_tokens - sent_tokens),
+            "trimmed_messages": max(0, len(window) - len(sent_rows)),
             "token_budget": budget,
+            "budget_source": budget_source,
             # token 压缩触发水位（预算 1.25×，且不超过模型窗口可用上限）
             "history_high_water_tokens": high_tokens,
             "summary_chars": len(summary or ""),
@@ -211,6 +310,9 @@ class CompactMixin:
                 if (cache_hit + cache_miss) > 0
                 else None
             ),
+            # 分项估算（Claude 式堆叠条）：system_prompt/tools/context_injections/
+            # history/question；estimated=True 表示基于字符估算，不是精确分词
+            "context_breakdown": breakdown,
         }
 
 
@@ -221,7 +323,7 @@ class CompactMixin:
         保留条数取 max(4, 总数/4)，上限 history_max_messages——
         类 Claude Code /compact 的"保留近期轮次、总结更早内容"语义。
         """
-        rows = repo.list_messages_with_id(db, conversation_id, limit=500)
+        rows = repo.list_messages_with_id(db, conversation_id, limit=_MESSAGE_SCAN_LIMIT)
         if len(rows) <= 4:
             return {
                 "compacted": False,

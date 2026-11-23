@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from typing import Callable
 
 from langchain_core.documents import Document
@@ -15,7 +16,7 @@ RRF_K = 60  # RRF 平滑常数：排名越靠前，融合分越高
 
 # 检索代码版本：改检索逻辑时 +1（eval_ragas 检索缓存指纹的一部分，
 # 保证代码改动后评测不会命中旧检索缓存）。
-RETRIEVAL_VERSION = 7
+RETRIEVAL_VERSION = 9
 
 # ---- 书名感知路由（S1，2026-09-11）----
 # 问题含《书名》时，命中该书的候选在跨查询融合中加权（TITLE_BOOST），且在
@@ -45,6 +46,10 @@ BOOK_SCOPED_TOP_K = 6
 BOOK_QUOTA_MIN_PER_BOOK = 2
 BOOK_QUOTA_MAX_FOREIGN = 1
 BROAD_CONTEXT_BUDGET = 8
+# S3′ 书内保底强制置顶的最低精排分（0-1 制）。点名书内完全没有相关内容时，
+# book_scoped_children 仍会返回书内最高分块；低于此分不插队，避免纯噪声
+# 占掉最终上下文槽位。
+SCOPE_GUARANTEE_MIN_SCORE = 0.05
 # 序言/前言块在内容型问题里常抢走正文名额（l1-kb-023），但版本/作者/
 # 写作过程类问题必须保留它们，所以只在非 meta 问题上轻惩罚。
 FRONT_MATTER_RERANK_PENALTY = 0.03
@@ -88,6 +93,20 @@ def _norm_text(text: str) -> str:
     return _TITLE_STRIP.sub("", str(text or "")).lower()
 
 
+def _doc_identity(doc: Document) -> str:
+    """RRF 融合去重键：优先块 _id（含 relative_path，跨书同文不碰撞）。
+
+    中文书籍常有相同引文/章节标题块；按 page_content 去重会把后检索到的
+    那本书的块吞进第一本书，破坏多书配额。_id = md5(relative_path + 内容)，
+    旧索引/测试文档没有 _id 时退回 source + 内容。
+    """
+    identity = doc.metadata.get("_id")
+    if identity:
+        return str(identity)
+    rel = doc.metadata.get("relative_path") or doc.metadata.get("source") or ""
+    return f"{rel}\x00{doc.page_content or ''}"
+
+
 # 中文书名与源文件名不一致的确定性别名。S1/S3′/最终配额都只按文件名
 # 匹配，若不补这层，《造物的七个奥秘》匹配不到 The Seven Mysteries，
 # 毛选篇名也匹配不到《毛泽东选集》容器文件。
@@ -101,6 +120,25 @@ _TITLE_ALIASES = {
 }
 
 
+# 请求级动态别名（查询期 BM25 解析出的“篇名 → 合集文件名”）。用 thread-local
+# 而不是全局 dict：不同会话并发检索时各线程互不影响；每次 retrieve 开头重设。
+_TITLE_ALIAS_OVERRIDES = threading.local()
+
+
+def set_dynamic_title_aliases(aliases: dict[str, tuple[str, ...]] | None) -> None:
+    _TITLE_ALIAS_OVERRIDES.aliases = aliases or {}
+
+
+def _dynamic_aliases(title: str) -> tuple[str, ...]:
+    return getattr(_TITLE_ALIAS_OVERRIDES, "aliases", {}).get(title, ())
+
+
+def title_in_text(title: str, text: str, min_len: int = 2) -> bool:
+    """归一化后篇名是否出现在文本中（查询期 BM25 解析的证据校验）。"""
+    t = _norm_text(title)
+    return len(t) >= min_len and t in _norm_text(text)
+
+
 def title_matches_source(title: str, source: str) -> bool:
     """书名与来源文件名的归一化子串匹配（兼容下划线/括号/中文别名）。"""
     t = _norm_text(title)
@@ -109,7 +147,8 @@ def title_matches_source(title: str, source: str) -> bool:
         return False
     if t in s:
         return True
-    return any(_norm_text(alias) in s for alias in _TITLE_ALIASES.get(t, ()))
+    aliases = tuple(_TITLE_ALIASES.get(t, ())) + _dynamic_aliases(title)
+    return any(_norm_text(alias) in s for alias in aliases)
 
 
 _BROAD_KEYWORDS = (
@@ -210,7 +249,9 @@ def book_scoped_children(
     merged: dict[str, dict] = {}
     for docs in (dense, sparse):
         for rank, doc in enumerate(docs, 1):
-            item = merged.setdefault(doc.page_content, {"doc": doc, "rrf": 0.0})
+            item = merged.setdefault(
+                _doc_identity(doc), {"doc": doc, "rrf": 0.0}
+            )
             item["rrf"] += 1.0 / (RRF_K + rank)
     ranked = sorted(merged.values(), key=lambda item: item["rrf"], reverse=True)
     # 书内也会出现本书自己的目录页（枚举类问题同样豁免）
@@ -276,6 +317,7 @@ def hybrid_search(
     candidate_pool: int = 24,
     demote_toc: bool = True,
     query_vector: list[float] | None = None,
+    filter_rel_paths: list[str] | None = None,
 ) -> list[Document]:
     """两路检索融合：
     - 稠密检索：kNN 向量相似度，擅长语义；
@@ -283,16 +325,23 @@ def hybrid_search(
     - RRF：融合分 = Σ 1/(K + rank)，两路都靠前的文本块分数更高。
 
     传入 query_vector 时跳过内部编码（批量编码 / 并行检索场景复用）。
+    filter_rel_paths：限定检索范围（单文档/整本书的多个文件）。
     """
     if query_vector is None:
         query_vector = embeddings.embed_query(question)
-    dense_docs = store.search_vector(query_vector, recall_k)
-    sparse_docs = store.search_bm25(question, recall_k)
+    dense_docs = store.search_vector(
+        query_vector, recall_k, filter_rel_paths=filter_rel_paths
+    )
+    sparse_docs = store.search_bm25(
+        question, recall_k, filter_rel_paths=filter_rel_paths
+    )
 
     merged: dict[str, dict] = {}
     for docs in (dense_docs, sparse_docs):
         for rank, doc in enumerate(docs, 1):
-            item = merged.setdefault(doc.page_content, {"doc": doc, "rrf": 0.0})
+            item = merged.setdefault(
+                _doc_identity(doc), {"doc": doc, "rrf": 0.0}
+            )
             item["rrf"] += 1.0 / (RRF_K + rank)
 
     ranked = sorted(merged.values(), key=lambda item: item["rrf"], reverse=True)
@@ -336,7 +385,9 @@ def merge_query_results(
     for qi, docs in enumerate(query_results):
         weight = original_weight if qi == 0 else 1.0
         for rank, doc in enumerate(docs, 1):
-            item = merged.setdefault(doc.page_content, {"doc": doc, "rrf": 0.0})
+            item = merged.setdefault(
+                _doc_identity(doc), {"doc": doc, "rrf": 0.0}
+            )
             item["rrf"] += weight * 1.0 / (RRF_K + rank)
     ranked = sorted(merged.values(), key=lambda item: item["rrf"], reverse=True)
     if boost_titles:

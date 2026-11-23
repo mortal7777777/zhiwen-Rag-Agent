@@ -86,8 +86,12 @@ def sanitize_token_usage(usage, max_bytes: int = _DEFAULT_MAX_BYTES):
     return out
 
 
-def sanitize_sources(sources, max_items: int = 20):
-    """来源列表兜底：正文/摘要类字段截短，条数封顶。"""
+def sanitize_sources(sources, max_items: int = 200):
+    """来源列表兜底：正文/摘要类字段截短，条数封顶（与 finalize.MAX_SOURCES 一致）。
+
+    注意：finalize 已按「正文引用的 [n] 无条件保留 + TEXT 字节压缩」完成取舍，
+    这里的上限只兜底异常调用方，不应再按 50 之类的旧上限截断引用。
+    """
     if not isinstance(sources, list):
         return sources
     out: list = []

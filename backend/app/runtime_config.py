@@ -112,13 +112,57 @@ _SPECS: dict[str, FieldSpec] = {
         "int", 400, 8, 500, label="历史窗口条数", group="context"
     ),
     "history_max_tokens": FieldSpec(
-        "int", 128000, 1000, 200000, label="历史 token 预算", group="context"
+        "int", 400000, 1000, 600000, label="历史 token 预算", group="context"
     ),
     "vision_max_images": FieldSpec(
         "int", 6, 1, 10, label="单次最多识图数", group="context"
     ),
+    "kb_vision_image_answer": FieldSpec(
+        "bool", True, label="知识库图片问答（视觉模型辅助）", group="parsing"
+    ),
+    "kb_vision_max_images": FieldSpec(
+        "int", 3, 1, 6, label="知识库单次最多送图数", group="parsing"
+    ),
     "checkpoint_keep_per_thread": FieldSpec(
         "int", 20, 5, 200, label="每线程保留快照数", group="context"
+    ),
+    # ---- 文档解析（2026-11-17 PP-StructureV3 混合解析）----
+    "pdf_parse_backend": FieldSpec(
+        "enum", "auto",
+        choices=("auto", "pymupdf", "paddle"),
+        label="PDF 解析模式",
+        group="parsing",
+    ),
+    "paddle_ocr_device": FieldSpec(
+        "enum", "cpu", choices=("cpu", "gpu"),
+        label="OCR Worker 设备", group="parsing"
+    ),
+    "paddle_ocr_lazy_start": FieldSpec(
+        "bool", True, label="OCR Worker 懒启动", group="parsing"
+    ),
+    "paddle_ocr_idle_timeout_s": FieldSpec(
+        "int", 600, 0, 7200, label="OCR Worker 空闲退出（秒，0=不退出）", group="parsing"
+    ),
+    "paddle_ocr_pages_per_process": FieldSpec(
+        "int", 300, 0, 5000, label="Worker 单进程 OCR 页数上限（0=不限）", group="parsing"
+    ),
+    "paddle_ocr_dpi": FieldSpec(
+        "int", 200, 150, 300, label="PP-Structure 渲染 DPI", group="parsing"
+    ),
+    "paddle_ocr_timeout": FieldSpec(
+        "int", 120, 30, 600, label="单页 Worker 超时（秒）", group="parsing"
+    ),
+    "paddle_ocr_max_image_ocr": FieldSpec(
+        "int", 6, 0, 20, label="单页图片块识别上限", group="parsing"
+    ),
+    "paddle_ocr_confidence_min": FieldSpec(
+        "float", 0.8, 0.0, 1.0, label="OCR 平均置信度下限", group="parsing"
+    ),
+    "paddle_ocr_vlm_fallback": FieldSpec(
+        "bool", False, label="图片/空页 VLM 兜底", group="parsing"
+    ),
+    "gpu_model_idle_unload_minutes": FieldSpec(
+        "int", 30, 0, 1440, label="GPU 模型空闲释放（分钟，0=常驻）", group="model"
     ),
     # ---- 记忆 ----
     "memory_auto_extract_min_chars": FieldSpec(
@@ -176,13 +220,20 @@ _SPECS: dict[str, FieldSpec] = {
     ),
     # ---- 审批 ----
     "tool_permission_mode": FieldSpec(
-        "enum", "ask", choices=("ask", "allow"), label="敏感操作确认模式", group="permission"
+        "enum",
+        "ask",
+        choices=("ask", "acceptedits", "allow"),
+        label="敏感操作确认模式",
+        group="permission",
     ),
     "permission_timeout": FieldSpec(
-        "int", 0, 30, 3600, label="确认超时（秒，0=无限等待）", group="permission"
+        "int", 0, 0, 3600, label="确认超时（秒，0=无限等待）", group="permission"
     ),
     "command_sandbox": FieldSpec(
         "enum", "subprocess", choices=("subprocess", "docker"), label="命令执行环境", group="permission"
+    ),
+    "sandbox_auto_allow": FieldSpec(
+        "bool", False, label="沙箱内命令免确认", group="permission"
     ),
     # ---- 联网搜索 ----
     "web_search_provider": FieldSpec(
@@ -213,6 +264,8 @@ _EDITABLE_LEGACY = {
     "main_model_vision",
     # 知识库数据目录（可在知识库管理页修改，改动即时生效并持久化）
     "data_dir",
+    # PP-StructureV3 Worker 地址（本机常驻服务，一般无需修改）
+    "paddle_ocr_url",
     # 旧式视觉模型键值（兼容保留）
     "sensenova_api_key",
     "sensenova_base_url",
@@ -262,6 +315,7 @@ _EDITABLE_LEGACY = {
     "command_sandbox",
     "sandbox_image",
     "sandbox_workspace_readonly",
+    "sandbox_auto_allow",
     "tool_permission_mode",
     "permission_timeout",
     "skill_sandbox_enabled",
@@ -1178,6 +1232,43 @@ def get_active_provider(settings, ptype: str) -> dict | None:
 def chat_provider_config(settings) -> dict | None:
     """对话模型供应商配置：{api_key, base_url, model}。"""
     return get_active_provider(settings, "chat")
+
+
+def provider_vision_capability(cfg: dict | None) -> bool | None:
+    """供应商 + 模型的视觉能力判定。
+
+    优先级：
+    1. supports_vision=False → 明确不支持；
+    2. vision_models 非空 → 按当前模型做通配符匹配；
+    3. supports_vision=True → 供应商声明支持；
+    4. 未声明 → None（调用方可回退旧全局 main_model_vision）。
+    """
+    if not cfg:
+        return None
+    flag = cfg.get("supports_vision")
+    if flag is False:
+        return False
+    model = str(cfg.get("model") or "").strip()
+    patterns = [
+        str(pattern).strip()
+        for pattern in (cfg.get("vision_models") or [])
+        if str(pattern).strip()
+    ]
+    if patterns:
+        from fnmatch import fnmatchcase
+
+        return any(fnmatchcase(model, pattern) for pattern in patterns)
+    if flag is True:
+        return True
+    return None
+
+
+def chat_model_supports_vision(settings) -> bool:
+    """当前对话供应商/模型是否支持原生图像输入（未声明时回退旧全局开关）。"""
+    capability = provider_vision_capability(chat_provider_config(settings))
+    if capability is not None:
+        return capability
+    return bool(effective_or(settings, "main_model_vision", False))
 
 
 def vision_provider_config(settings) -> dict | None:

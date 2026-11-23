@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sys
@@ -22,21 +23,120 @@ ANSI = {
     "cyan": "\033[36m",
 }
 
+# 浅色背景终端：基础 8 色对比度不足，用 256 色深色系替代
+_LIGHT_CODES = {
+    "red": "\033[38;5;160m",
+    "green": "\033[38;5;28m",
+    "yellow": "\033[38;5;130m",
+    "cyan": "\033[38;5;30m",
+    "dim": "\033[38;5;245m",
+}
 
-USE_COLOR = bool(sys.stdout.isatty())
+
+def _detect_theme() -> str:
+    """ZHIWEN_THEME=dark|light|auto；auto 读取 COLORFGBG 的背景色。"""
+    env = (os.environ.get("ZHIWEN_THEME") or "auto").strip().lower()
+    if env in ("dark", "light"):
+        return env
+    fgbg = os.environ.get("COLORFGBG") or ""
+    try:
+        bg = int(fgbg.split(";")[-1])
+        return "light" if bg >= 8 else "dark"
+    except ValueError:
+        return "dark"
 
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+THEME = _detect_theme()
+
+
+def _detect_no_color() -> bool:
+    """NO_COLOR 标准 + ZHIWEN_THEME=none/plain 关闭颜色。"""
+    if os.environ.get("NO_COLOR"):
+        return True
+    return (os.environ.get("ZHIWEN_THEME") or "").strip().lower() in (
+        "none", "off", "plain",
+    )
+
+
+USE_COLOR = bool(sys.stdout.isatty()) and not _detect_no_color()
+
+# ASCII 模式：把 UI 装饰字符替换成纯 ASCII（SSH/老终端/无障碍）
+ASCII_MODE = (os.environ.get("ZHIWEN_ASCII") or "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+_ASCII_MAP = {
+    "╭": "+", "╮": "+", "╰": "+", "╯": "+", "─": "-", "│": "|",
+    "⏺": "*", "⎿": "|", "⏸": "||", "▶": ">", "▸": ">", "•": "-",
+    "…": "...", "—": "-", "·": "-", "↑": "^", "↓": "v", "←": "<", "→": ">",
+    "💭": "[think]", "📋": "[plan]", "🪝": "[hook]", "👁": "[vision]",
+    "🖼": "[image]", "📎": "[file]", "⚠": "!", "✖": "x", "⏹": "[]",
+    "⏰": "!", "✔": "ok", "✓": "ok", "○": "o", "█": "#", "░": ".",
+    "❓": "?", "▏": "|",
+}
+
+
+def ascii_text(text: str) -> str:
+    if not ASCII_MODE:
+        return text
+    for src, dst in _ASCII_MAP.items():
+        text = text.replace(src, dst)
+    return text
+
+
+def _color_code(name: str) -> str:
+    if THEME == "light" and name in _LIGHT_CODES:
+        return _LIGHT_CODES[name]
+    return ANSI.get(name, "")
+
+
+def _env_on(name: str) -> bool:
+    return (os.environ.get(name) or "1").strip().lower() not in (
+        "0", "off", "false", "no",
+    )
+
+
+HYPERLINKS = USE_COLOR and _env_on("ZHIWEN_LINKS")
+NOTIFY = USE_COLOR and _env_on("ZHIWEN_NOTIFY")
+
+
+def link(text: str, url: str) -> str:
+    """OSC 8 可点击链接；关闭或不支持时退回纯文本。"""
+    clean = "".join(ch for ch in str(url or "") if ord(ch) >= 32)
+    if not HYPERLINKS or not clean:
+        return text
+    return f"\033]8;;{clean}\033\\{text}\033]8;;\033\\"
+
+
+def set_title(text: str) -> None:
+    """设置终端标题（生成中 / 等待审批）。"""
+    if not USE_COLOR:
+        return
+    sys.stdout.write(f"\033]0;{ascii_text(str(text))}\007")
+    sys.stdout.flush()
+
+
+def notify(title: str, message: str = "") -> None:
+    """桌面通知（OSC 9 + 响铃；Windows Terminal/iTerm2/WezTerm 支持）。"""
+    if not NOTIFY:
+        return
+    body = f"{title}: {message}" if message else title
+    sys.stdout.write(f"\033]9;{ascii_text(str(body))}\007\a")
+    sys.stdout.flush()
+
+
+# CSI 颜色 + OSC 8 超链接都按零宽处理（否则换行/裁剪会把链接字节算进宽度）
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*\x1b\\")
 
 
 def paint(text: str, color: str = "", bold: bool = False, italic: bool = False) -> str:
-    """按需上色；非终端输出时保持纯文本。"""
+    """按需上色；非终端输出时保持纯文本。ASCII 模式下同时替换装饰字符。"""
+    text = ascii_text(text)
     if not USE_COLOR:
         return text
     codes = "".join(
         c
         for c in (
-            ANSI.get(color),
+            _color_code(color),
             ANSI["bold"] if bold else "",
             ANSI["italic"] if italic else "",
         )
@@ -67,19 +167,39 @@ def strwidth(text: str) -> int:
     return width
 
 
-def clip(text: str, width: int, ellipsis: str = "…") -> str:
-    """按显示宽度截断（超宽尾部省略号）。"""
+def clip(text: str, width: int, ellipsis: str = "...") -> str:
+    """按显示宽度截断（超宽尾部省略号；ANSI/OSC 序列零宽且原样保留）。
+
+    默认用 ASCII 省略号：中文终端常把 U+2026 按 2 列渲染，会让边框错位。
+    """
     if strwidth(text) <= width:
         return text
     width -= strwidth(ellipsis)
     out = ""
     w = 0
-    for ch in text:
+    i = 0
+    opened_link = False
+    while i < len(text):
+        if text[i] == "\x1b":
+            match = _ANSI_RE.match(text, i)
+            if match:
+                seq = match.group(0)
+                out += seq
+                if seq.startswith("\x1b]8;;"):
+                    # OSC 8：空 URL 是关闭序列，非空是打开序列
+                    opened_link = seq != "\x1b]8;;\x1b\\"
+                i = match.end()
+                continue
+        ch = text[i]
         cw = 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
         if w + cw > width:
             break
         out += ch
         w += cw
+        i += 1
+    if opened_link:
+        # 截断时在省略号之后补关闭，避免链接状态泄漏到后续输出
+        return out + ellipsis + "\x1b]8;;\x1b\\"
     return out + ellipsis
 
 
@@ -151,6 +271,13 @@ def wrap_styled(
 def term_width(default: int = 80) -> int:
     try:
         return max(40, shutil.get_terminal_size((default, 24)).columns)
+    except Exception:
+        return default
+
+
+def term_height(default: int = 24) -> int:
+    try:
+        return max(8, shutil.get_terminal_size((80, default)).lines)
     except Exception:
         return default
 

@@ -10,7 +10,9 @@ import time
 from types import SimpleNamespace
 
 from app.agent.nodes import finalize as finalize_module
-from app.agent.nodes.finalize import _finalize_node
+from app.agent.nodes.finalize import _compute_latency_ms, _finalize_node
+from app.agent.service.run import RunMixin
+from app.db import database as db_module
 from _node_rt import runtime_from_state
 
 
@@ -38,11 +40,18 @@ def test_trajectory_compression_runs_after_done(monkeypatch):
             checkpoint_keep_per_thread=20,
         ),
         context=SimpleNamespace(_invoke=lambda *a, **k: None),
+        rag=SimpleNamespace(acquire_llm=lambda: None, release_llm=lambda: None),
         checkpoint_saver=None,
     )
 
     monkeypatch.setattr(finalize_module, "repo", _Repo())
     monkeypatch.setattr(finalize_module, "write_trace", lambda *a, **k: None)
+    monkeypatch.setattr(db_module, "db_ready", True)
+    monkeypatch.setattr(
+        db_module,
+        "SessionLocal",
+        lambda: SimpleNamespace(rollback=lambda: None, close=lambda: None),
+    )
 
     def fake_compress(*args, **kwargs):
         order.append("compress")
@@ -73,7 +82,35 @@ def test_trajectory_compression_runs_after_done(monkeypatch):
 
     _finalize_node(state, runtime_from_state(state))
 
+    # 压缩已改为 done 之后的后台线程：等它完成再断言顺序。
+    deadline = time.time() + 2.0
+    while "compress" not in order and time.time() < deadline:
+        time.sleep(0.01)
+
     assert "done" in order
     assert order.count("compress") == 1
     assert order.index("done") < order.index("compress")
-    assert order[-1] == "compress"
+
+
+def test_latency_accumulates_segments_and_ignores_suspension():
+    deps = SimpleNamespace(elapsed_ms=1200, started=time.perf_counter())
+    # rt["started"] 若是另一进程/挂起前的 perf_counter，不能参与计算
+    assert 1200 <= _compute_latency_ms(deps, {"started": -1e9}) < 1500
+    # 本段起点缺失时只返回已累计值，不产生负数/异常巨值
+    assert _compute_latency_ms(SimpleNamespace(elapsed_ms=500, started=0.0), {}) == 500
+
+
+def test_suspended_elapsed_accumulates_without_approval_wait():
+    service = SimpleNamespace(
+        _suspended_usage={},
+        _suspended_elapsed={},
+        settings=SimpleNamespace(permission_timeout=0),
+    )
+    deps = SimpleNamespace(elapsed_ms=1000, started=time.perf_counter() - 0.05)
+    bus = _OrderBus([])
+
+    RunMixin._emit_suspended(
+        service, bus, {"__interrupt__": []}, 7, deps
+    )
+
+    assert 1040 <= service._suspended_elapsed[7] < 1200

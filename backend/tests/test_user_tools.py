@@ -118,3 +118,40 @@ def helper_tool() -> dict:
 """,
     )
     assert loader.load_user_tools() == []
+
+
+def test_module_contracts_registered(tmp_path, monkeypatch):
+    from app.agent.tool_contracts import get_contract, reset_contracts
+
+    monkeypatch.setattr(loader, "USER_TOOLS_DIR", tmp_path)
+    _write_tool_module(
+        tmp_path,
+        "contracts",
+        '''
+from langchain_core.tools import tool
+
+SENSITIVE = set()
+TOOL_CONTRACTS = {
+    "ct_tool": {
+        "mutating": True,
+        "target_arg": "order_id",
+        "readback_tool": "get_order_details",
+        "readback_arg": "order_id",
+    }
+}
+
+@tool
+def ct_tool(order_id: str) -> dict:
+    """contract tool."""
+    return {"summary": order_id}
+''',
+    )
+    reset_contracts()
+    try:
+        loader.load_user_tools()
+        contract = get_contract("ct_tool")
+        assert contract is not None
+        assert contract.mutating is True
+        assert contract.readback_tool == "get_order_details"
+    finally:
+        reset_contracts()

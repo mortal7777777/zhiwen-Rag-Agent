@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from queue import Queue
 from langgraph.types import Command
 from sqlalchemy.orm import Session
 from ...tracing import reset_usage, seed_usage
 from ..state import Deps, EventBus, runtime_of
 from ..nodes.finalize import _finalize_node
+from ..tool_contracts import contracts_snapshot
 from .base import ServiceBaseMixin
 
 
@@ -33,6 +35,7 @@ class ResumeMixin(ServiceBaseMixin):
             "interrupted": False,
             "ops": [],
             "plan": None,
+            "questions": [],
             "_payload": None,
         }
         if conversation_id is None or self.checkpoint_saver is None:
@@ -56,6 +59,7 @@ class ResumeMixin(ServiceBaseMixin):
             result["pending"] = True
             result["ops"] = pending_payload.get("ops") or []
             result["plan"] = pending_payload.get("plan") or None
+            result["questions"] = pending_payload.get("questions") or []
             result["_payload"] = pending_payload
         elif has_tasks:
             result["interrupted"] = True
@@ -80,6 +84,7 @@ class ResumeMixin(ServiceBaseMixin):
             return False
         try:
             self.checkpoint_saver.delete_thread(f"conv:{conversation_id}")
+            self._pending_prefix.pop(conversation_id, None)
             return True
         except Exception as exc:
             logger.warning("删除会话检查点线程失败：%s", exc)
@@ -93,12 +98,14 @@ class ResumeMixin(ServiceBaseMixin):
         plan: dict | None = None,
         db: Session | None = None,
         stop_event: threading.Event | None = None,
+        answers: dict | None = None,
     ):
         """恢复挂起的运行：Command(resume=...) 续跑同一 thread，事件协议同 _run。
 
         stopped=True 表示用户在挂起期间点了停止：预置 stop_event 并以全拒决定
         续跑，收尾语义与旧阻塞式的"停止"路径一致。
         plan：计划确认决定（{approved, steps?, reason?}），随同一次 resume 提交。
+        answers：ask_user_question 的回答（{call_id: {"items": [...]}}）。
         """
         if stop_event is None:
             stop_event = threading.Event()
@@ -111,6 +118,7 @@ class ResumeMixin(ServiceBaseMixin):
                     "stopped": bool(stopped),
                     "decisions": decisions or {},
                     "plan": plan,
+                    "answers": answers or {},
                 }
             ),
             db=db,
@@ -137,6 +145,74 @@ class ResumeMixin(ServiceBaseMixin):
             stop_event=stop_event if stop_event is not None else threading.Event(),
         )
 
+    def _rebuild_history_prefix(
+        self, values: dict, db: Session | None
+    ) -> list:
+        """进程重启后重建历史前缀（与 prepare 首次组合同一口径）。"""
+        conv_id = (values or {}).get("conversation_id")
+        if db is None or conv_id is None:
+            return []
+        try:
+            from ..nodes.prepare import load_history_messages
+
+            history, _summary, _rows = load_history_messages(self, db, conv_id)
+            return history
+        except Exception as exc:
+            logger.warning("重建历史前缀失败（续跑可能缺历史）：%s", exc)
+            return []
+
+
+    def start_resume(
+        self,
+        conversation_id: int,
+        decisions: dict,
+        stopped: bool = False,
+        plan: dict | None = None,
+        db: Session | None = None,
+        stop_event: threading.Event | None = None,
+        answers: dict | None = None,
+        *,
+        event_sink,
+    ) -> threading.Thread:
+        """SSE 直连恢复入口：事件经 sink 推送，不再由生成器中转。"""
+        if stop_event is None:
+            stop_event = threading.Event()
+        if stopped:
+            stop_event.set()
+        return self._continue_core(
+            conversation_id,
+            Command(
+                resume={
+                    "stopped": bool(stopped),
+                    "decisions": decisions or {},
+                    "plan": plan,
+                    "answers": answers or {},
+                }
+            ),
+            db=db,
+            stop_event=stop_event,
+            emit=event_sink,
+        )
+
+
+    def start_continue(
+        self,
+        conversation_id: int,
+        db: Session | None = None,
+        stop_event: threading.Event | None = None,
+        *,
+        event_sink,
+    ) -> threading.Thread:
+        """SSE 直连续跑入口（崩溃恢复）：invoke(None)。"""
+        return self._continue_core(
+            conversation_id,
+            None,
+            db=db,
+            stop_event=stop_event if stop_event is not None else threading.Event(),
+            emit=event_sink,
+        )
+
+
     def _continue_stream(
         self,
         conversation_id: int,
@@ -144,9 +220,33 @@ class ResumeMixin(ServiceBaseMixin):
         db: Session | None,
         stop_event: threading.Event,
     ):
-        """resume / continue 共用的续跑骨架：重建 Deps、invoke、产出事件流。"""
+        """CLI/测试入口：阻塞队列 + 生成器逐事件产出。"""
         queue: Queue = Queue()
-        bus = EventBus(queue)
+        self._continue_core(
+            conversation_id,
+            graph_input,
+            db=db,
+            stop_event=stop_event,
+            emit=queue.put,
+        )
+        while True:
+            event = queue.get()
+            if event is None:
+                break
+            yield event
+
+
+    def _continue_core(
+        self,
+        conversation_id: int,
+        graph_input,
+        db: Session | None,
+        stop_event: threading.Event,
+        *,
+        emit,
+    ) -> threading.Thread:
+        """resume / continue 共用的续跑骨架：重建 Deps、invoke、通过 emit 推事件。"""
+        bus = EventBus(sink=emit)
         # db 缺省（SSE 端点走这里）：自建会话，语义与 AgentService.run 一致
         db_owned = None
         if db is None:
@@ -165,6 +265,21 @@ class ResumeMixin(ServiceBaseMixin):
         except Exception:
             values = {}
         rt = values.get("runtime") or {}
+        # 历史前缀不进检查点：优先复用挂起时留在内存的副本（逐字节一致，
+        # 缓存前缀不失效）；进程重启导致缓存丢失时从 DB 重建。
+        # 旧格式检查点没有 history_insert_at，其 messages 自带完整历史，跳过。
+        if values.get("history_insert_at") is not None:
+            cached_prefix = self._pending_prefix.pop(conversation_id, None)
+            deps.prefix_messages = (
+                cached_prefix
+                if cached_prefix is not None
+                else self._rebuild_history_prefix(values, db)
+            )
+        # 恢复段重新计时；把挂起前累计的纯执行耗时接上（不含人工审批等待）。
+        deps.elapsed_ms = self._suspended_elapsed.pop(
+            conversation_id, int((rt or {}).get("elapsed_ms") or 0)
+        )
+        deps.started = time.perf_counter()
         try:
             deps.tools = self.build_tool_list(
                 db,
@@ -173,9 +288,15 @@ class ResumeMixin(ServiceBaseMixin):
                 conv_id=conversation_id,
                 project_dir=values.get("project_dir"),
                 command_sandbox=(rt or {}).get("command_sandbox"),
+                kb_scope_paths=values.get("kb_scope_paths") or None,
+                counter=values.get("counter"),
             )
         except Exception as exc:
             logger.warning("续跑时重建工具列表失败：%s", exc)
+        try:
+            deps.tool_contracts = contracts_snapshot()
+        except Exception:
+            deps.tool_contracts = {}
 
         bus.emit("session", {"conversation_id": conversation_id})
 
@@ -184,34 +305,37 @@ class ResumeMixin(ServiceBaseMixin):
             reset_usage()
             if seed:
                 seed_usage(seed[0], seed[1])
+            completed_rt: dict | None = None
+            question_text = str(values.get("question") or "")
             try:
                 result = self.graph.invoke(graph_input, config=config, context=deps)
                 if isinstance(result, dict) and result.get("__interrupt__"):
                     # 续跑后再次挂起（新一轮敏感操作/计划）：同样发 run_suspended
-                    self._emit_suspended(bus, result, conversation_id)
-                    queue.put(None)
+                    self._emit_suspended(bus, result, conversation_id, deps)
                     return
-                queue.put(None)
+                if isinstance(result, dict):
+                    completed_rt = result.get("runtime") if isinstance(result.get("runtime"), dict) else rt
+                    question_text = str(result.get("question") or question_text)
             except Exception as exc:
                 logger.exception("续跑运行失败")
                 if isinstance(rt, dict):
                     rt["status"] = "error"
                     rt["error"] = str(exc)
-                queue.put({"event": "error", "data": {"message": str(exc)}})
+                bus.emit("error", {"message": str(exc)})
                 try:
                     _finalize_node(values, runtime_of(deps))
                 except Exception as inner:
                     logger.warning("兜底收尾失败：%s", inner)
-                queue.put(None)
+            finally:
+                if isinstance(completed_rt, dict):
+                    self._spawn_memory_postprocess(completed_rt, question_text)
+                emit(None)
+                if db_owned is not None:
+                    try:
+                        db_owned.close()
+                    except Exception:
+                        pass
 
-        threading.Thread(target=worker, daemon=True).start()
-
-        try:
-            while True:
-                event = queue.get()
-                if event is None:
-                    break
-                yield event
-        finally:
-            if db_owned is not None:
-                db_owned.close()
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        return thread

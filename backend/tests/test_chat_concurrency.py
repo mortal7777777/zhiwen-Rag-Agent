@@ -35,7 +35,7 @@ def _service(semaphore_size: int = 1) -> RAGService:
     svc = RAGService(Settings())
     svc._semaphore = threading.BoundedSemaphore(semaphore_size)
     svc._llm_semaphore = threading.BoundedSemaphore(1)
-    svc.retrieve = lambda question, history=None: []  # 检索很快，不碰磁盘
+    svc.retrieve = lambda question, history=None, scope_paths=None: []  # 检索很快，不碰磁盘
     return svc
 
 
@@ -75,7 +75,7 @@ def test_retrieve_locked_holds_lock_only_inside_retrieve():
     release = threading.Event()
     svc = _service()
 
-    def _slow_retrieve(question, history=None):
+    def _slow_retrieve(question, history=None, scope_paths=None):
         inside.set()
         release.wait(5)
         return []

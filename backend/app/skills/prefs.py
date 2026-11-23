@@ -36,6 +36,18 @@ DEFAULT_ENABLED = {
     "jupyter-live-kernel",
 }
 
+# 知问内置 brief 模板：随仓库版本化，任何偏好配置下都默认启用
+# （用户可在技能页显式隐藏，隐藏优先）。
+ALWAYS_ENABLED = {
+    "brief/multi-book-research",
+    "brief/code-review",
+    "brief/execute-file-change",
+}
+
+
+def _enabled_with_always(enabled, hidden) -> set[str]:
+    return set(enabled or ()) | (ALWAYS_ENABLED - set(hidden or ()))
+
 
 _prefs: dict | None = None
 
@@ -47,12 +59,14 @@ def _get_cached_prefs() -> dict:
     with _prefs_lock:
         if _prefs is None:
             return {
-                "enabled": set(DEFAULT_ENABLED),
+                "enabled": _enabled_with_always(DEFAULT_ENABLED, set()),
                 "hidden": set(),
                 "custom": False,
             }
         return {
-            "enabled": set(_prefs.get("enabled") or []),
+            "enabled": _enabled_with_always(
+                _prefs.get("enabled") or [], _prefs.get("hidden") or []
+            ),
             "hidden": set(_prefs.get("hidden") or []),
             "custom": bool(_prefs.get("custom")),
         }

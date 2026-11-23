@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 from langchain_core.tools import BaseTool
@@ -99,6 +100,29 @@ def load_user_tools() -> list:
             declared_set = set(declared)
             for t in found:
                 _SENSITIVE_BY_TOOL[t.name] = t.name in declared_set
+        declared_contracts = getattr(mod, "TOOL_CONTRACTS", None)
+        if isinstance(declared_contracts, Mapping):
+            names = {t.name for t in found}
+            filtered = {
+                str(k): v for k, v in declared_contracts.items() if k in names
+            }
+            unknown = set(declared_contracts) - names
+            if unknown:
+                logger.warning(
+                    "用户工具契约引用了不存在的工具 %s（%s），已忽略",
+                    sorted(unknown),
+                    py.name,
+                )
+            if filtered:
+                try:
+                    # 延迟导入：避免 user_tool_loader ←→ agent 包的加载期循环。
+                    # 注册表 first-wins，且**不要**在这里 reset——本函数每个请求
+                    # 都会调用，reset 会让并发请求互相清空契约。
+                    from .agent.tool_contracts import register_contracts
+
+                    register_contracts(filtered, source=py.name)
+                except Exception as exc:
+                    logger.warning("注册用户工具契约失败（%s）：%s", py.name, exc)
         tools.extend(found)
         logger.info("已加载用户工具 %d 个（来自 %s）", len(found), py.name)
     return tools

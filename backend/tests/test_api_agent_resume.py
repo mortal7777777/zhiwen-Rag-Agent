@@ -9,13 +9,19 @@ import anyio
 import pytest
 from fastapi import HTTPException
 
+from app.agent.service.run import _AUTO_LOCK, _AUTO_RUNNING, is_auto_running
 from app.api.agent import (
+    _service_source,
+    agent_pending_approval,
     agent_resume,
     agent_stream,
+    is_conversation_active,
     try_register_active_run,
     unregister_active_run,
 )
 from app.schemas import (
+    AgentAnswer,
+    AgentAnswerItem,
     AgentApprovalDecision,
     AgentChatRequest,
     AgentPlanDecision,
@@ -62,6 +68,8 @@ class ResumeService:
             "interrupted": self.interrupted,
             "ops": (payload or {}).get("ops") or [],
             "plan": (payload or {}).get("plan"),
+            "questions": (payload or {}).get("questions") or [],
+            "_payload": payload,
         }
 
     def pending_approval_payload(self, conversation_id):
@@ -75,12 +83,14 @@ class ResumeService:
         plan=None,
         db=None,
         stop_event=None,
+        answers=None,
     ):
         self.got = {
             "conversation_id": conversation_id,
             "decisions": decisions,
             "stopped": stopped,
             "plan": plan,
+            "answers": answers,
         }
         yield {"event": "session", "data": {"conversation_id": conversation_id}}
         yield {"event": "done", "data": {"ok": True}}
@@ -106,6 +116,30 @@ async def _drain(response) -> list[dict]:
         if text.startswith("data: "):
             frames.append(json.loads(text.strip()[6:]))
     return frames
+
+
+def test_service_source_prefers_sink_starter():
+    """真实服务走 start_* sink 直连，不再回退生成器桥接线程。"""
+    calls = {}
+
+    class SinkService:
+        def start_run(self, **kwargs):
+            calls["sink"] = kwargs["event_sink"]
+            calls["stop_event"] = kwargs["stop_event"]
+            return None
+
+        def run(self, **kwargs):
+            raise AssertionError("有 start_run 时不应回退生成器")
+
+    stop = threading.Event()
+    emitted: list[dict] = []
+    source = _service_source(
+        SinkService(), "run", question="q", db=None
+    )
+    source(emitted.append, stop)
+
+    assert calls["sink"] == emitted.append
+    assert calls["stop_event"] is stop
 
 
 def test_resume_without_pending_raises_409():
@@ -308,3 +342,80 @@ def test_resume_passes_plan_decision_and_defaults_to_reject():
     assert service2.got["plan"]["approved"] is False
     assert service2.got["plan"]["reason"] == "用户停止了回答"
     assert any(f["event"] == "done" for f in frames)
+
+
+def test_pending_endpoint_exposes_created_at_and_active():
+    service = ResumeService(pending=True)
+    result = agent_pending_approval(9, service)
+    assert result["pending"] is True
+    assert result["created_at"] == 1.0
+    assert result["active"] is False
+
+
+QUESTIONS_PAYLOAD = {
+    "kind": "approval",
+    "created_at": 3.0,
+    "ops": [],
+    "questions": [
+        {
+            "call_id": "q1",
+            "questions": [
+                {
+                    "question": "选哪个方案？",
+                    "header": "方案",
+                    "options": [{"label": "A"}, {"label": "B"}],
+                    "multi_select": False,
+                }
+            ],
+        }
+    ],
+}
+
+
+def test_pending_endpoint_exposes_questions():
+    res = agent_pending_approval(9, ResumeService(payload=QUESTIONS_PAYLOAD))
+    assert res["pending"] is True
+    assert res["questions"][0]["call_id"] == "q1"
+    assert res["questions"][0]["questions"][0]["question"] == "选哪个方案？"
+
+
+def test_resume_passes_answers():
+    service = ResumeService(payload=QUESTIONS_PAYLOAD)
+
+    async def scenario():
+        response = await agent_resume(
+            AgentResumeRequest(
+                conversation_id=9,
+                answers=[
+                    AgentAnswer(
+                        call_id="q1",
+                        items=[
+                            AgentAnswerItem(
+                                index=0, selected=["A"], other="补充说明"
+                            )
+                        ],
+                    )
+                ],
+            ),
+            service,
+        )
+        return await _drain(response)
+
+    anyio.run(scenario)
+    item = service.got["answers"]["q1"]["items"][0]
+    assert item["index"] == 0
+    assert item["selected"] == ["A"]
+    assert item["other"] == "补充说明"
+
+
+def test_auto_running_marks_conversation_active():
+    conv = 424242
+    with _AUTO_LOCK:
+        _AUTO_RUNNING.add(conv)
+    try:
+        assert is_auto_running(conv) is True
+        assert is_conversation_active(conv) is True
+    finally:
+        with _AUTO_LOCK:
+            _AUTO_RUNNING.discard(conv)
+    assert is_conversation_active(conv) is False

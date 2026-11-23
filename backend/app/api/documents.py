@@ -3,17 +3,28 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import FileResponse
 
 from ..db import get_db, get_db_optional
 from ..db import repository as repo
 from ..rag import versioning
 from ..rag.loader import TEXT_SUFFIXES
-from ..rag.service import RAGService
+from ..rag.service import IndexRebuildInProgress, RAGService
 from ..schemas import (
     DocumentInfo,
     DocumentMetaIn,
@@ -24,6 +35,7 @@ from ..schemas import (
     DocumentVersionsDeleteOut,
     DocumentVersionsOut,
     DocumentVersionsRestoreOut,
+    IndexHealth,
     IndexStatus,
     UploadCheckOut,
 )
@@ -78,6 +90,7 @@ def list_documents(
 @router.put("/documents/data-dir")
 def set_data_dir(
     payload: dict,
+    request: Request = None,
     db=Depends(get_db),
     service: RAGService = Depends(get_service),
 ) -> dict:
@@ -86,6 +99,9 @@ def set_data_dir(
     新目录不存在会自动创建；切换后旧索引仍指向旧目录，需要用户
     在界面点击「重建索引」把新目录的文档嵌入 OpenSearch。
     """
+    from .fs import require_local_or_token
+
+    require_local_or_token(request)
     raw = (payload or {}).get("path")
     if not raw or not str(raw).strip():
         raise HTTPException(status_code=400, detail="目录路径不能为空")
@@ -154,6 +170,22 @@ def preview_document(
         "char_count": len(content),
         "truncated": truncated,
     }
+
+
+@router.get("/images")
+def get_ocr_image(
+    path: str = Query(..., description="相对 meta_dir 的 OCR 图片路径"),
+    service: RAGService = Depends(get_service),
+) -> FileResponse:
+    """提供 PP-Structure 裁剪图片（仅 meta_dir/ocr_cache 下，防路径穿越）。"""
+    root = (service.settings.meta_dir / "ocr_cache").resolve()
+    target = (service.settings.meta_dir / path).resolve()
+    if root not in target.parents or not target.is_file():
+        raise HTTPException(status_code=404, detail="图片不存在")
+    if target.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(status_code=400, detail="不支持的图片格式")
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return FileResponse(target, media_type=media_type)
 
 
 @router.get("/documents/file/{relative_path:path}")
@@ -233,11 +265,16 @@ def _build_upload_check(service: RAGService, db, checks: list[dict]) -> dict:
 
 @router.post("/documents/upload", response_model=list[DocumentInfo] | UploadCheckOut)
 def upload_documents(
+    response: Response,
     files: list[UploadFile] = File(..., description="支持 txt/md/csv/docx/xlsx/pdf"),
     dry_run: bool = Form(False, description="只做查重预检，不落盘"),
     conflict_policy: str = Form("ask", description="ask=有冲突时 409 / proceed=确认后放行"),
     archive_version_no: str | None = Form(None, description="同名重传时旧文件的归档版本号"),
     archive_note: str = Form("", description="归档备注（可选）"),
+    async_ingest: bool = Form(
+        True,
+        description="落盘即返回，解析+嵌入转后台线程（进度见 /api/index/health 的 ingest 字段）",
+    ),
     service: RAGService = Depends(get_service),
     db=Depends(get_db_optional),
 ):
@@ -246,7 +283,10 @@ def upload_documents(
     - 无冲突：200 + 文档列表（老契约不变）；
     - 有冲突且 policy=ask：409，detail={"code":"upload_conflict","files":[...]}，零写入；
     - 同名重传（policy=proceed）：旧文件归档到 data_versions/，需 archive_version_no；
-    - dry_run=true：只返回查重报告，不落盘。
+    - dry_run=true：只返回查重报告，不落盘；
+    - async_ingest=true（默认）：文件落盘后立即返回，增量索引由后台线程执行
+      （大 PDF 的 PP-Structure 解析 + BGE 嵌入可达分钟级，不能挂在 HTTP 请求上；
+      响应头 X-Zhiwen-Index-Async: 1 标记该模式，前端据此轮询 /api/index/health）。
     """
     version_no = (archive_version_no or "").strip()
     # 同名 + 版本号已被占用 → 提前 409（避免文件已归档才失败）
@@ -269,7 +309,10 @@ def upload_documents(
             conflict_policy=conflict_policy,
             archive_version_no=version_no or None,
             archive_note=archive_note,
+            defer_index=async_ingest,
         )
+    except IndexRebuildInProgress:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -283,6 +326,13 @@ def upload_documents(
             status_code=409,
             detail={"code": "upload_conflict", "message": "检测到上传冲突，请确认后继续", **report},
         )
+    if outcome.index_pending:
+        # 解析器升级待重建：文件已落盘但本次不会进入索引
+        response.headers["X-Zhiwen-Index-Pending"] = "1"
+    if outcome.index_deferred and outcome.mode == "committed":
+        # 落盘即返回；增量索引在后台线程执行，前端轮询 /api/index/health
+        service.start_background_ingest(reason="upload")
+        response.headers["X-Zhiwen-Index-Async"] = "1"
 
     # committed：落归档版本行（同名重传的旧文件）
     if outcome.archived:
@@ -312,13 +362,14 @@ def rename_document_endpoint(
     service: RAGService = Depends(get_service),
     db=Depends(get_db),
 ) -> list[dict]:
-    """重命名知识库文档（重名 / 非法名拒绝；改名后该书重建索引）。"""
+    """重命名知识库文档（重名 / 非法名拒绝；改名后该书重嵌走后台线程）。"""
     try:
         return versioning.rename_document(
             service,
             db,
             relative_path=payload.relative_path,
             new_name=payload.new_name,
+            defer_index=True,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -326,6 +377,8 @@ def rename_document_endpoint(
         raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except IndexRebuildInProgress:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"重命名失败：{exc}")
 
@@ -367,6 +420,8 @@ def archive_document_version_endpoint(
         raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except IndexRebuildInProgress:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"归档失败：{exc}")
 
@@ -380,7 +435,7 @@ def restore_document_version_endpoint(
     service: RAGService = Depends(get_service),
     db=Depends(get_db),
 ) -> dict:
-    """恢复某历史版本为当前（当前版本归档为 new_version_no，两者交换）。"""
+    """恢复某历史版本为当前（当前版本归档为 new_version_no，两者交换；重嵌走后台线程）。"""
     try:
         return versioning.restore_version(
             service,
@@ -388,6 +443,7 @@ def restore_document_version_endpoint(
             version_id=version_id,
             new_version_no=payload.new_version_no,
             note=payload.note,
+            defer_index=True,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -395,6 +451,8 @@ def restore_document_version_endpoint(
         raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except IndexRebuildInProgress:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"恢复失败：{exc}")
 
@@ -428,6 +486,8 @@ def delete_document(
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except IndexRebuildInProgress:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"删除失败：{exc}")
     if purge_versions and db is not None:
@@ -442,13 +502,29 @@ def delete_document(
     return service.list_documents()
 
 
-@router.post("/index/rebuild", response_model=IndexStatus)
-def rebuild_index(service: RAGService = Depends(get_service)) -> dict:
-    """强制重建整个索引（蓝绿：写新物理索引 + 别名原子切换）。"""
+@router.post("/index/rebuild")
+def rebuild_index(
+    request: Request, service: RAGService = Depends(get_service)
+) -> dict:
+    """后台全量重建（蓝绿切换；重建期间旧索引继续服务检索）。
+
+    POST 立即返回；进度见 /index/health 的 rebuild 字段。解析器升级后需显式调用。
+    """
+    logger.info(
+        "索引重建请求来源：client=%s ua=%s referer=%s",
+        request.client.host if request.client else "?",
+        request.headers.get("user-agent", "")[:120],
+        request.headers.get("referer", "")[:200],
+    )
+    if request.headers.get("X-Zhiwen-Rebuild") != "confirm":
+        raise HTTPException(
+            status_code=400,
+            detail="重建需要显式确认：请从知识库页点击「重建索引」，或带 X-Zhiwen-Rebuild: confirm 请求头",
+        )
     try:
-        return service.rebuild_index()
+        return service.start_background_rebuild(force=True)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"重建失败：{exc}")
+        raise HTTPException(status_code=500, detail=f"启动重建失败：{exc}")
 
 
 @router.get("/index/status", response_model=IndexStatus)
@@ -458,3 +534,74 @@ def index_status(service: RAGService = Depends(get_service)) -> dict:
         return service.index_status()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"获取状态失败：{exc}")
+
+
+@router.get("/index/health", response_model=IndexHealth)
+def index_health(service: RAGService = Depends(get_service)) -> dict:
+    """索引健康：账本指纹 vs 当前目录（待增量/已删除/最近构建时间）。"""
+    try:
+        return service.index_health()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"获取索引健康失败：{exc}")
+
+
+@router.post("/index/search")
+def search_index(
+    question: str = Query(..., description="检索问题"),
+    service: RAGService = Depends(get_service),
+) -> dict:
+    """只读检索（不调用生成模型），用于解析/检索质量评测与调试。"""
+    try:
+        docs = service.retrieve_locked(question)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"检索失败：{exc}")
+    return {
+        "question": question,
+        "results": [
+            {
+                "content": (doc.page_content or "")[:900],
+                "source": doc.metadata.get("source"),
+                "page": doc.metadata.get("page"),
+                "pages": doc.metadata.get("pages"),
+                "relative_path": doc.metadata.get("relative_path"),
+                "score": doc.metadata.get("rerank_score")
+                or doc.metadata.get("parent_score"),
+                "images": (doc.metadata.get("image_refs") or [])[:6],
+            }
+            for doc in docs
+        ],
+    }
+
+
+@router.post("/index/reparse")
+def reparse_index_file(
+    path: str = Query(..., description="文档相对路径"),
+    service: RAGService = Depends(get_service),
+) -> dict:
+    """只重新解析/重嵌指定文件（缓存优先；用于重试 fallback 页或单文件修复）。"""
+    try:
+        return service.reparse_file(path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except IndexRebuildInProgress:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"单文件重解析失败：{exc}")
+
+
+@router.post("/index/refresh", response_model=IndexHealth)
+def refresh_index(service: RAGService = Depends(get_service)) -> dict:
+    """应用增量索引：按指纹 diff 重嵌新增/变化文件，清理磁盘已删除项。"""
+    try:
+        service.ensure_index()
+        health = service.index_health()
+        if health.get("parse_upgrade_required"):
+            raise HTTPException(
+                status_code=409,
+                detail="解析器已升级，需要全量重建：请点击「重建索引」或 POST /api/index/rebuild",
+            )
+        return health
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"增量更新失败：{exc}")

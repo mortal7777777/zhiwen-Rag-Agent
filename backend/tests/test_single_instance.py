@@ -197,6 +197,7 @@ def test_lifespan_acquires_and_releases_instance_lock(tmp_path, monkeypatch):
             version="0",
             meta_dir=tmp_path,
             ensure_dirs=lambda: None,
+            api_token="",
         ),
     )
     monkeypatch.setattr(main_module, "init_db", lambda: False)
@@ -223,6 +224,7 @@ def test_lifespan_refuses_when_lock_taken(tmp_path, monkeypatch):
             version="0",
             meta_dir=tmp_path,
             ensure_dirs=lambda: None,
+            api_token="",
         ),
     )
     monkeypatch.setattr(main_module, "init_db", lambda: False)

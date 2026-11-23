@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.orm import relationship
 
@@ -25,7 +26,7 @@ class Conversation(Base):
 
     __tablename__ = "conversations"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     title = Column(String(200), nullable=False, default="新对话")
     # 会话绑定的提示词模板（跟随会话持久化，切换会话自动恢复）
     template_id = Column(BigInteger, nullable=True)
@@ -37,6 +38,17 @@ class Conversation(Base):
     summary = Column(Text, nullable=True)
     # 已纳入摘要的最大消息 id，避免重复总结
     summary_up_to_id = Column(BigInteger, default=0, nullable=False)
+    # 会话首次运行时锁定的提示词 bundle（模板版本 + 各片段版本，JSON）
+    prompt_bundle = Column(Text, nullable=True)
+    prompt_bundle_hash = Column(String(64), nullable=True)
+    prompt_locked_at = Column(DateTime, nullable=True)
+    # 会话级 fork 来源（6.9）：从哪个会话的哪条消息分支出来；普通会话为 NULL。
+    # 不建外键：源会话删除后仍保留溯源 id（前端按 id 查不到时显示"来源已删除"）。
+    forked_from_conversation_id = Column(BigInteger, nullable=True)
+    forked_from_message_id = Column(BigInteger, nullable=True)
+    # 会话置顶（P3·2026-11-19）：置顶组排列表最前，组内仍按更新时间；
+    # server_default 兼容迁移给存量行补 False
+    pinned = Column(Boolean, nullable=False, default=False, server_default=false())
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(
         DateTime,
@@ -58,7 +70,13 @@ class Message(Base):
 
     __tablename__ = "messages"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    # 与 Conversation.id 同样的 sqlite 变体：BIGINT 主键在 SQLite 下不会自增
+    # （测试用内存库 create_all 建表，MySQL 侧仍是 BIGINT 不变）
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     conversation_id = Column(
         BigInteger,
         ForeignKey("conversations.id", ondelete="CASCADE"),
@@ -138,12 +156,18 @@ class PromptTemplate(Base):
 
     __tablename__ = "prompt_templates"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     name = Column(String(100), nullable=False)
     description = Column(String(255), default="")
     category = Column(String(50), default="general")
     content = Column(Text, nullable=False)
     is_system = Column(Boolean, default=False, nullable=False)
+    # 系统模板稳定标识（如 general/coding/default）；用户模板为 NULL
+    system_key = Column(String(100), nullable=True)
+    archived = Column(Boolean, default=False, nullable=False)
+    draft_content = Column(Text, nullable=True)
+    draft_note = Column(Text, default="")
+    draft_updated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(
         DateTime,
@@ -151,6 +175,106 @@ class PromptTemplate(Base):
         onupdate=datetime.now,
         nullable=False,
     )
+    __table_args__ = (
+        UniqueConstraint("system_key", name="uq_prompt_templates_system_key"),
+    )
+
+
+class PromptTemplateVersion(Base):
+    """提示词模板的不可变历史版本（最新版本 = prompt_templates.content）。"""
+
+    __tablename__ = "prompt_template_versions"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    template_id = Column(
+        BigInteger,
+        ForeignKey("prompt_templates.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version_no = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    content_hash = Column(String(64), nullable=False)
+    note = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    __table_args__ = (
+        UniqueConstraint(
+            "template_id", "version_no", name="uq_prompt_template_version"
+        ),
+    )
+
+
+class PromptFragment(Base):
+    """系统提示词中的固定片段（工具规则/计划模式/todos/技能/KB 清单）。"""
+
+    __tablename__ = "prompt_fragments"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    key = Column(String(100), nullable=False, unique=True, index=True)
+    title = Column(String(200), default="")
+    description = Column(String(255), default="")
+    scope = Column(String(20), default="static")  # static | dynamic
+    editable = Column(Boolean, default=True, nullable=False)
+    is_customized = Column(Boolean, default=False, nullable=False)
+    # 用户上次编辑时对应的代码默认哈希；用于发现“默认已升级”
+    base_default_hash = Column(String(64), nullable=True)
+    draft_content = Column(Text, nullable=True)
+    draft_note = Column(Text, default="")
+    draft_updated_at = Column(DateTime, nullable=True)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.now,
+        onupdate=datetime.now,
+        nullable=False,
+    )
+
+
+class PromptFragmentVersion(Base):
+    """提示词片段的不可变历史版本（最新版本 = prompt_fragments.content）。"""
+
+    __tablename__ = "prompt_fragment_versions"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    fragment_id = Column(
+        BigInteger,
+        ForeignKey("prompt_fragments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version_no = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    content_hash = Column(String(64), nullable=False)
+    note = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    __table_args__ = (
+        UniqueConstraint(
+            "fragment_id", "version_no", name="uq_prompt_fragment_version"
+        ),
+    )
+
+
+class PromptTrial(Base):
+    """提示词 A/B 试跑或轻量评测记录。"""
+
+    __tablename__ = "prompt_trials"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    kind = Column(String(20), default="ab", nullable=False)  # ab | eval
+    template_id = Column(
+        BigInteger,
+        ForeignKey("prompt_templates.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    version_a_id = Column(BigInteger, nullable=True)
+    version_b_id = Column(BigInteger, nullable=True)
+    question = Column(Text, default="")
+    status = Column(String(20), default="done", nullable=False)
+    result = Column(Text, nullable=True)  # JSON
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
 
 
 class Memory(Base):
@@ -197,6 +321,41 @@ class AppMeta(Base):
 
     key = Column(String(100), primary_key=True)
     value = Column(Text, nullable=True)
+    updated_at = Column(
+        DateTime,
+        default=datetime.now,
+        onupdate=datetime.now,
+        nullable=False,
+    )
+
+
+class AgentType(Base):
+    """子代理类型注册表（2026-11-21，Phase A 6.1）。
+
+    mode 仍只允许 research/explore/review/execute（决定只读语义与工具大类）；
+    system_prompt 是追加在 SUBAGENT_BASE_PROMPT 之后的模式段；tools 为空表示
+    用该 mode 的默认工具集，非空时只能是 mode 工具集的子集（收窄不扩权）。
+    model_* / thinking / llm_budget 为空表示继承主模型与全局预算。
+    """
+
+    __tablename__ = "agent_types"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    key = Column(String(64), nullable=False, unique=True, index=True)
+    name = Column(String(100), nullable=False)
+    description = Column(String(255), default="")
+    mode = Column(String(20), default="research", nullable=False)
+    system_prompt = Column(Text, default="")
+    tools = Column(Text, default="[]")  # JSON 数组
+    max_rounds = Column(Integer, nullable=True)
+    model_provider_id = Column(String(100), default="")
+    model = Column(String(200), default="")
+    thinking = Column(String(20), default="inherit")  # inherit | on | off
+    llm_budget = Column(Integer, nullable=True)
+    read_only = Column(Boolean, default=True, nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    version = Column(Integer, default=1, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(
         DateTime,
         default=datetime.now,

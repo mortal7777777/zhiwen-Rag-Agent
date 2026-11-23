@@ -2,6 +2,8 @@
 
 安全边界：后端可能监听 0.0.0.0 且无鉴权，所以本接口
 - 只允许来自本机（127.0.0.1 / ::1）的请求；
+- Docker 模式经 nginx 反代时，直连方是容器私网地址，真实来源读 X-Real-IP
+  （仅当直连方本身是私网地址时才信任该头，避免公网直连伪造）；
 - 只返回目录（名字/路径），不读任何文件内容；
 - 单层最多返回 500 条，不做递归。
 """
@@ -11,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import string
+from ipaddress import ip_address
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -21,9 +24,50 @@ router = APIRouter(tags=["fs"])
 _MAX_ENTRIES = 500
 
 
+def _is_loopback(host: str) -> bool:
+    text = str(host or "").strip().strip("[]")
+    if text.lower() == "localhost":
+        return True
+    try:
+        return ip_address(text).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_private(host: str) -> bool:
+    try:
+        return ip_address(str(host or "").strip().strip("[]")).is_private
+    except ValueError:
+        return False
+
+
 def _client_is_local(request: Request) -> bool:
     host = getattr(getattr(request, "client", None), "host", "") or ""
-    return host in ("127.0.0.1", "::1", "localhost")
+    if _is_loopback(host):
+        return True
+    if not _is_private(host):
+        return False
+    # 私网直连（Docker 里的 nginx）：信任它写入的 X-Real-IP
+    headers = getattr(request, "headers", None)
+    forwarded = headers.get("x-real-ip", "") if headers is not None else ""
+    return _is_loopback(forwarded)
+
+
+def require_local_or_token(request: Request | None) -> None:
+    """高敏管理写操作守卫：未开启全局 API Token 时，仅允许本机请求修改宿主目录/命令配置。"""
+    if request is None:
+        return
+    from ..config import get_settings
+
+    if get_settings().api_token:
+        return
+    host = getattr(getattr(request, "client", None), "host", "") or ""
+    if host == "testclient" or _client_is_local(request):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="未配置 ZHIWEN_API_TOKEN 时，该高敏操作仅允许本机（127.0.0.1 / ::1）访问",
+    )
 
 
 def _list_dirs(raw: str) -> dict:

@@ -6,7 +6,7 @@
   并调用后端 /api/agent/cancel/{run_id} 让模型立刻收尾；
 - 流式 Markdown 渲染：标题 / 列表 / 引用 / 代码块 / 行内代码 / 粗体 / 链接 / 表格；
 - 工具调用渲染成卡片（⏺ 调用 … / ⎿ 结果 … 耗时），执行中显示 spinner 与已耗时；
-- 权限审批用带边框的数字选项弹窗（1/2/3/4，回车=批准）；
+- 权限审批用带边框的数字选项弹窗（1/2/3/4，回车=批准，a=全部批准，s=停止本轮）；
 - 状态栏：会话 / 模式 / 模型 / 耗时 / tokens；
 - 键盘：↑/↓ 历史，Ctrl+C/Esc 打断，Ctrl+L 清屏，Ctrl+R 重发上一问，
   Ctrl+D 空输入退出，Tab 补全 / 命令，←/→ 光标；
@@ -20,16 +20,30 @@
 from __future__ import annotations
 
 from cli.term import (  # noqa: F401 —— 兼容层：旧代码/测试仍从 cli_agent 取这些名字
-    ANSI, USE_COLOR, _ANSI_RE, paint, strip_ansi, safe_text, strwidth, clip, pad_right, wrap_styled, term_width, visible_rows, Screen,
+    ANSI, USE_COLOR, _ANSI_RE, paint, strip_ansi, safe_text, strwidth, clip, pad_right, wrap_styled, term_width, visible_rows, Screen, notify, set_title,
 )
 from cli.format import (  # noqa: F401 —— 兼容层：旧代码/测试仍从 cli_agent 取这些名字
     _MD_HR_RE, _MD_HEAD_RE, _MD_QUOTE_RE, _MD_LIST_RE, _MD_FENCE_RE, fmt_dur, fmt_num, fmt_tokens, inline_md, MarkdownStream,
 )
 from cli.input import (  # noqa: F401 —— 兼容层：旧代码/测试仍从 cli_agent 取这些名字
-    COMMANDS, _INPUT_ROWS, Key, KeyReader, _common_prefix, input_layout, complete, _render_input, _toolbar_text, make_prompt_session, read_line, _read_line_legacy, Interrupted, QuitRequested, RetryRequested, OutputRequested,
+    COMMANDS, _INPUT_ROWS, _CURSOR_ROW, Key, KeyReader, _common_prefix, input_layout, complete, _render_input, _toolbar_text, make_prompt_session, read_line, _read_line_legacy, Interrupted, QuitRequested, RetryRequested, OutputRequested,
 )
 from cli.http import (  # noqa: F401 —— 兼容层：旧代码/测试仍从 cli_agent 取这些名字
-    LAST_CONTEXT, SESSION_FILE, HISTORY_FILE, http_json, fetch_conversation_titles, fetch_conversation_messages, fetch_model_label, fetch_todos, fetch_usage, show_cost, fetch_context_stats, ctx_meter, context_pct, save_session, load_session_history, load_history, save_history, _cancel_run,
+    LAST_CONTEXT, SESSION_FILE, HISTORY_FILE, http_json, http_error_detail, check_backend, fetch_conversation_titles, fetch_conversation_messages, fetch_model_label, fetch_pending, fetch_todos, fetch_usage, fetch_run_metrics, show_cost, fetch_context_stats, ctx_meter, context_pct, save_session, load_session_history, load_history, save_history, _cancel_run,
+)
+from cli.pending import collect_suspended_decisions
+from cli.render import (  # noqa: F401 —— 兼容层：旧代码/测试仍从 cli_agent 取这些名字
+    ask_permission_decision, ask_plan_decision, ask_question_answer,
+    boxed as _boxed, permission_rows as _permission_rows, source_lines,
+)
+from cli.commands import (
+    doctor, expand_file_mentions, export_conversation, pick_conversation,
+    run_shell, show_mcp, show_skills, switch_model, timeline,
+)
+from cli.pager import page_text
+from cli.stream import (  # noqa: F401 —— 兼容层：旧代码/测试仍从 cli_agent 取这些名字
+    SPINNER, GenerationInterrupted, TOOL_OUTPUTS, record_tool_output,
+    render_tool_args, show_tool_output, stream_question,
 )
 
 import argparse
@@ -42,6 +56,7 @@ import sys
 import threading
 import time
 import unicodedata
+import urllib.error
 import urllib.request
 
 try:
@@ -65,6 +80,7 @@ def _clear_screen() -> None:
         sys.stdout.write("\033[2J\033[H")
         sys.stdout.flush()
     _INPUT_ROWS[0] = 1
+    _CURSOR_ROW[0] = 0
 
 
 # ------------------------------------------------------------------ 会话/历史
@@ -89,34 +105,6 @@ def build_status_line(
     return " · ".join(bits)
 
 
-# 本会话的工具完整输出（供 Ctrl+O / /output 展开查看）：最新在前访问
-TOOL_OUTPUTS: collections.deque = collections.deque(maxlen=30)
-
-
-def record_tool_output(name: str, summary: str, detail: str) -> None:
-    TOOL_OUTPUTS.append({"name": name, "summary": summary, "detail": detail or summary or ""})
-
-
-def show_tool_output(n: int = 1) -> None:
-    """展开最近第 n 次（默认 1）工具调用的完整输出。"""
-    if not TOOL_OUTPUTS:
-        print(paint("本会话还没有工具输出。", "yellow"))
-        return
-    if not 1 <= n <= len(TOOL_OUTPUTS):
-        print(paint(f"只有 {len(TOOL_OUTPUTS)} 条工具输出，序号需在 1~{len(TOOL_OUTPUTS)} 之间。", "yellow"))
-        return
-    item = list(TOOL_OUTPUTS)[-n]
-    idx = len(TOOL_OUTPUTS) - n + 1
-    print(
-        paint(f"⏺ {item['name']}（第 {idx}/{len(TOOL_OUTPUTS)} 条）", "cyan", bold=True)
-        + paint(f"  {clip(item['summary'] or '', term_width() - 20)}", "dim")
-    )
-    width = term_width()
-    for line in item["detail"].splitlines()[:200]:
-        print(paint(clip(safe_text(line), width), "dim"))
-    total = len(item["detail"].splitlines())
-    if total > 200:
-        print(paint(f"…（共 {total} 行，已截断）", "dim"))
 
 
 def show_context(base_url: str, conversation_id: int | None) -> None:
@@ -134,12 +122,20 @@ def show_context(base_url: str, conversation_id: int | None) -> None:
         return "█" * filled + "░" * (width - filled)
 
     count = int(stats.get("message_count") or 0)
-    effective = int(stats.get("effective_history_messages") or count)
+    effective_raw = stats.get("effective_history_messages")
+    effective = int(effective_raw) if effective_raw is not None else count
     max_msgs = int(stats.get("history_max_messages") or 1)
     high = int(stats.get("history_high_water_messages") or max_msgs)
-    tokens = int(stats.get("estimated_tokens") or 0)
+    window_tokens = int(stats.get("estimated_tokens") or 0)
+    sent = stats.get("sent_estimate_tokens")
+    tokens = int(sent if sent is not None else window_tokens)
     budget = int(stats.get("token_budget") or 1)
+    trimmed_msgs = int(stats.get("trimmed_messages") or 0)
+    trimmed_tokens = int(stats.get("trimmed_tokens") or 0)
+    window_msgs = effective + trimmed_msgs
     suffix = f"，会话累计 {count} 条" if count != effective else ""
+    if trimmed_msgs:
+        suffix += f"，窗口 {window_msgs} 条已裁 {trimmed_msgs}"
     print(paint("上下文占用", "cyan", bold=True))
     print(
         paint(
@@ -148,7 +144,19 @@ def show_context(base_url: str, conversation_id: int | None) -> None:
             "dim",
         )
     )
-    print(paint(f"   tokens {_bar(tokens, budget)} {fmt_num(tokens)}/{fmt_num(budget)}（估算）", "dim"))
+    tok_extra = f"，窗口估算 {fmt_num(window_tokens)}" if window_tokens != tokens else ""
+    if trimmed_tokens:
+        tok_extra += f"，已裁 {fmt_num(trimmed_tokens)}"
+    print(
+        paint(
+            f"   tokens {_bar(tokens, budget)} {fmt_num(tokens)}/{fmt_num(budget)}"
+            f"（下一轮发送估算{tok_extra}）",
+            "dim",
+        )
+    )
+    source = stats.get("budget_source")
+    if source:
+        print(paint(f"   预算   {fmt_num(budget)} tokens（{source}）", "dim"))
     if stats.get("summary_chars"):
         print(
             paint(
@@ -310,484 +318,7 @@ def show_project_memory(cwd: str) -> None:
 
 
 # ------------------------------------------------------------------ 权限审批
-
-
-def _boxed(rows: list[str], title: str, color: str) -> None:
-    """圆角面板：边框弱化（dim）、标题高亮、内容保持自身着色。
-
-    欢迎横幅 / 审批卡 / 计划确认卡共用，保证三处视觉一致。
-    """
-    inner = max([strwidth(r) for r in rows] + [strwidth(title) + 4] + [0])
-    width = min(term_width() - 2, inner + 2)
-    head_pad = max(0, width - strwidth(title) - 4)
-    print(
-        paint("╭─ ", "dim")
-        + paint(title, color, bold=True)
-        + paint(" " + "─" * head_pad + "╮", "dim")
-    )
-    for row in rows:
-        pad = " " * max(0, width - strwidth(row) - 1)
-        print(paint("│", "dim") + " " + row + pad + paint("│", "dim"))
-    print(paint("╰" + "─" * max(0, width - 1) + "╯", "dim"))
-
-
-def _permission_rows(data: dict) -> list[str]:
-    """按工具类型构造审批弹窗内容：edit_file 渲染行级 diff（红删绿增），
-    write_file 渲染内容预览，其余原样展示参数。"""
-    args = data.get("arguments") or {}
-    if not isinstance(args, dict):
-        args = {}
-    name = data.get("name")
-    rows: list[str] = []
-    width = term_width()
-    if name == "edit_file" and args.get("diff_lines"):
-        rows.append(clip(f"文件：{safe_text(args.get('path') or '')}", width - 6))
-        if args.get("replace_all"):
-            rows.append(paint("替换全部匹配处", "yellow"))
-        rows.append(paint("──── 变更预览 ────", "dim"))
-        for d in args["diff_lines"][:60]:
-            op = str(d.get("op") or "")
-            text = clip(safe_text(str(d.get("text") or "")), width - 6)
-            if op == "-":
-                rows.append(paint(f"− {text}", "red"))
-            elif op == "+":
-                rows.append(paint(f"+ {text}", "green"))
-            else:
-                rows.append(paint(f"  {text}", "dim"))
-        if len(args["diff_lines"]) > 60:
-            rows.append(paint(f"  …（共 {len(args['diff_lines'])} 行 diff，已截断）", "dim"))
-        return rows
-    if name == "write_file":
-        rows.append(clip(f"文件：{safe_text(args.get('path') or '')}", width - 6))
-        preview = str(args.get("content_preview") or "")
-        if preview:
-            rows.append(paint("──── 内容预览 ────", "dim"))
-            for line in preview.splitlines()[:12]:
-                rows.append(paint(clip(safe_text(line), width - 6), "dim"))
-            if len(preview.splitlines()) > 12:
-                rows.append(paint("  …（预览截断）", "dim"))
-        return rows
-    # 其余工具（bash 等）：逐参数展示
-    for k, v in args.items():
-        rows.append(clip(f"{k}: {safe_text(json.dumps(v, ensure_ascii=False))}", width - 6))
-    return rows
-
-
-def ask_permission_decision(reader: KeyReader, data: dict) -> dict:
-    """渲染审批弹窗并等待数字键决定（回车=批准，Esc=拒绝）；只收集不提交。
-
-    返回 /agent/resume 的一条决定（call_id 兼容 run_suspended 的 ops 与旧
-    permission_request 的 id）。
-    """
-    print()
-    rows = _permission_rows(data)
-    is_command = data.get("name") in ("bash", "command_tool")
-    opts = ["1) 批准", "2) 拒绝"]
-    if is_command:
-        opts += ["3) 批准(本会话)", "4) 批准(永久)"]
-    rows += [paint("  ".join(opts), "cyan")]
-    _boxed(rows, safe_text(data.get("summary", "等待人工确认")), "yellow")
-    print(paint("选择 [1-4] / 回车=批准 / Esc=拒绝：", "yellow"), end="", flush=True)
-    while True:
-        key = reader.get(timeout=300)
-        if key is None:
-            answer = "2"
-        elif key.name == "enter":
-            answer = "1"
-        elif key.name == "esc":
-            answer = "2"
-        elif key.name == "char" and key.data in ("1", "2", "3", "4"):
-            answer = str(key.data)
-        else:
-            continue
-        break  # 数字键/回车/Esc 立即生效，不再等待 reason 输入
-    print()
-    approve = answer in ("1", "3", "4")
-    return {
-        "call_id": str(data.get("call_id") or data.get("id") or ""),
-        "approve": approve,
-        "reason": "" if approve else "用户拒绝了该操作",
-        "remember_session": answer == "3" and is_command,
-        "remember_forever": answer == "4" and is_command,
-    }
-
-
-def ask_plan_decision(reader: KeyReader, plan: dict) -> dict:
-    """渲染计划确认框并等待决定（回车/1=确认执行，Esc/2=拒绝）；只收集不提交。"""
-    print()
-    rows = [
-        clip(f"{i}. {safe_text(s)}", term_width() - 6)
-        for i, s in enumerate(plan.get("steps") or [], 1)
-    ]
-    rows += [paint("  1) 确认执行    2) 拒绝", "cyan")]
-    rows += [paint("  确认后同一轮直接开始执行；拒绝则模型可调整后重新提交", "dim")]
-    _boxed(rows, safe_text(plan.get("summary") or "执行计划待确认"), "cyan")
-    print(paint("选择 [1-2] / 回车=确认 / Esc=拒绝：", "cyan"), end="", flush=True)
-    while True:
-        key = reader.get(timeout=300)
-        if key is None or key.name == "esc":
-            answer = "2"
-        elif key.name == "enter":
-            answer = "1"
-        elif key.name == "char" and key.data in ("1", "2"):
-            answer = str(key.data)
-        else:
-            continue
-        break
-    print()
-    return {
-        "approved": answer == "1",
-        "steps": list(plan.get("steps") or []),
-        "reason": "" if answer == "1" else "用户拒绝了该计划",
-    }
-
-
-# ------------------------------------------------------------------ 流式问答
-
-SPINNER = "|/-\\"
-
-
-class GenerationInterrupted(Exception):
-    pass
-
-
-def render_tool_args(arguments: object) -> str:
-    if not arguments:
-        return ""
-    if isinstance(arguments, str):
-        return clip(safe_text(arguments), 100)
-    try:
-        parts = []
-        for k, v in dict(arguments).items():
-            parts.append(f"{k}={clip(safe_text(json.dumps(v, ensure_ascii=False)), 40)}")
-        return clip(", ".join(parts), 100)
-    except Exception:
-        return clip(safe_text(str(arguments)), 100)
-
-
-def stream_question(
-    base_url: str,
-    question: str,
-    tool_mode: str,
-    conversation_id: int | None,
-    reader: KeyReader,
-    screen: Screen,
-    sandbox: str | None = None,
-    continue_run: bool = False,
-) -> int:
-    """发送问题并渲染 SSE 事件；Ctrl+C/Esc 即时打断并通知后端取消。
-
-    continue_run=True：不发问题，改为续跑该会话被中断的一轮（/agent/continue）。
-    """
-    if continue_run and conversation_id:
-        first_url = f"{base_url}/api/agent/continue/{conversation_id}"
-        body = None
-    else:
-        first_url = f"{base_url}/api/agent/stream"
-        body = json.dumps(
-            {
-                "question": question,
-                "conversation_id": conversation_id,
-                "tool_mode": tool_mode,
-                "template_id": None,
-                "project_dir": os.getcwd(),
-                "command_sandbox": sandbox,
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
-    lines_q: collections.deque = collections.deque()
-    lines_cond = threading.Condition()
-    resp_holder: list = []
-    done_flag = threading.Event()
-
-    def _start_reader(url: str, payload: bytes | None) -> None:
-        """开一条 SSE 连接，把逐行数据泵进 lines_q（挂起恢复/续跑要开第二条流）。"""
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-
-        def reader_thread() -> None:
-            try:
-                with urllib.request.urlopen(req, timeout=300) as resp:
-                    resp_holder.append(resp)
-                    for raw in resp:
-                        if done_flag.is_set():
-                            break
-                        with lines_cond:
-                            lines_q.append(raw.decode("utf-8", errors="replace"))
-                            lines_cond.notify()
-            except Exception as exc:
-                with lines_cond:
-                    lines_q.append(("__error__", str(exc)))
-                    lines_cond.notify()
-            finally:
-                with lines_cond:
-                    lines_q.append(("__end__", None))
-                    lines_cond.notify()
-
-        threading.Thread(target=reader_thread, daemon=True).start()
-
-    _start_reader(first_url, body)
-
-    md = MarkdownStream(term_width())
-    round_printed = ""  # 本轮已打印到终端的文本（含 ANSI），供整轮撤回
-    skip_next_token = False  # 正文轮的增量已展示：随后的全文 token 跳过
-    run_id: str | None = None
-    conv_id: int | None = conversation_id
-    suspended: dict | None = None  # run_suspended 载荷：流尾收齐决定后走 /agent/resume
-    t0 = time.time()
-    active_tools: dict[str, tuple[str, float]] = {}
-    busy_text: str | None = None
-    interrupted = False
-    frame = 0
-    last_partial = time.time()
-
-    def _next_item():
-        with lines_cond:
-            lines_cond.wait_for(lambda: bool(lines_q), 0.12)
-            if lines_q:
-                return lines_q.popleft()
-            return None
-
-    try:
-        while True:
-            for key in reader.drain():
-                if key.name in ("ctrl-c", "esc", "ctrl-d"):
-                    raise GenerationInterrupted()
-                reader.unget(key)  # 打字先行：留给下一轮输入
-            item = _next_item()
-            now = time.time()
-            if item is None:
-                if now - last_partial > 0.15 and md.has_partial():
-                    screen.write_stream(md.partial())
-                    last_partial = now
-                elif busy_text or active_tools:
-                    if active_tools:
-                        label = " · ".join(
-                            f"{name} {fmt_dur(now - start)}"
-                            for _tid, (name, start) in active_tools.items()
-                        )
-                    else:
-                        label = busy_text or ""
-                    screen.busy_line(paint(SPINNER[frame % 4] + " " + label, "yellow"))
-                    frame += 1
-                continue
-            if isinstance(item, tuple):
-                if item[0] == "__error__":
-                    screen.newline()
-                    screen.write(paint(f"✖ 流式连接出错：{item[1]}", "red"))
-                    break
-                if suspended:
-                    # 挂起（敏感操作 / 计划确认）：逐项询问 → 一次提交 → 开第二条流续跑
-                    ops = suspended.get("ops") or []
-                    plan = suspended.get("plan") or None
-                    screen.newline()
-                    if plan and ops:
-                        label = f"{len(ops)} 项敏感操作 + 执行计划"
-                    elif plan:
-                        label = "执行计划"
-                    else:
-                        label = f"{len(ops)} 项敏感操作"
-                    screen.write(paint(f"⏸ 等待确认：{label}", "yellow"))
-                    decisions = [ask_permission_decision(reader, op) for op in ops]
-                    resume_body: dict = {
-                        "conversation_id": suspended.get("conversation_id")
-                        or conv_id,
-                        "decisions": decisions,
-                        "stopped": False,
-                    }
-                    if plan:
-                        resume_body["plan"] = ask_plan_decision(reader, plan)
-                    suspended = None
-                    _start_reader(
-                        f"{base_url}/api/agent/resume",
-                        json.dumps(resume_body, ensure_ascii=False).encode("utf-8"),
-                    )
-                    continue
-                break
-            line = item.rstrip("\n")
-            if not line.startswith("data: "):
-                continue
-            try:
-                event = json.loads(line[6:])
-            except Exception:
-                continue
-            name, data = event.get("event"), event.get("data") or {}
-            if name == "session":
-                run_id = data.get("run_id")
-                conv_id = data.get("conversation_id") or conv_id
-                if conv_id:
-                    save_session(os.getcwd(), int(conv_id))
-            elif name == "status":
-                busy_text = safe_text(data.get("text") or "")
-            elif name == "plan":
-                screen.write(paint("📋 执行计划", "cyan", bold=True))
-                for i, step in enumerate(data.get("steps") or [], 1):
-                    screen.write(paint(f"   {i}. {safe_text(step)}", "cyan"))
-            elif name == "plan_progress":
-                done = int(data.get("done") or 0)
-                total = int(data.get("total") or 0)
-                if total > 0:
-                    width = max(10, term_width() - 24)
-                    filled = int(width * done / total)
-                    bar = "█" * filled + "░" * (width - filled)
-                    screen.write(paint(f"   {bar} {done}/{total}", "dim"))
-            elif name == "todos":
-                screen.write(paint("任务清单", "cyan", bold=True))
-                for t in data.get("todos") or []:
-                    mark = "[x]" if t.get("done") else "[ ]"
-                    color = "green" if t.get("done") else "dim"
-                    screen.write(paint(f"   {mark} {safe_text(t.get('text', ''))}", color))
-            elif name == "reasoning":
-                screen.write(paint("💭 已深度思考（摘要）", "cyan", bold=True))
-                screen.write(paint(f"   {clip(safe_text(data.get('summary', '')), term_width() - 3)}", "cyan"))
-            elif name == "tool_start":
-                tid = data.get("id") or data.get("name")
-                active_tools[str(tid)] = (safe_text(data.get("name", "tool")), time.time())
-                screen.write(
-                    paint("⏺ ", "cyan")
-                    + paint(safe_text(data.get("name", "tool")), "cyan", bold=True)
-                    + paint(f"({render_tool_args(data.get('arguments'))})", "dim")
-                )
-            elif name == "tool_result":
-                tid = str(data.get("id") or "")
-                started = active_tools.pop(tid, None)
-                dur_ms = data.get("duration_ms")
-                if started is None:
-                    dur = fmt_dur(float(dur_ms) / 1000) if isinstance(dur_ms, (int, float)) else ""
-                else:
-                    dur = fmt_dur(time.time() - started[1])
-                summary = clip(safe_text(data.get("summary") or ""), term_width() - 8)
-                suffix = f"  ({dur})" if dur else ""
-                color = "red" if data.get("error") else "green"
-                # 完整输出留档：Ctrl+O / /output n 可展开查看
-                record_tool_output(
-                    safe_text(data.get("name", "tool")),
-                    safe_text(data.get("summary") or ""),
-                    safe_text(data.get("detail") or ""),
-                )
-                screen.write(paint(f"⎿ {summary}{suffix}", color))
-                if not active_tools:
-                    busy_text = None
-            elif name == "permission_resolved":
-                if data.get("approved"):
-                    screen.write(paint("   ▶ 已批准", "green"))
-                else:
-                    screen.write(paint(f"   ▶ 已拒绝：{safe_text(data.get('reason', ''))}", "red"))
-            elif name == "run_suspended":
-                # 图在敏感操作处挂起：本流即将结束，决定收集在流尾统一做
-                suspended = data
-            elif name == "stream_delta":
-                # 正文增量：边生成边渲染（与 Web 端一致）。工具轮的过渡思考
-                # 文本随后会被 stream_end{keep:false} 整轮撤回。
-                busy_text = None
-                chunk = md.feed(
-                    safe_text(data if isinstance(data, str) else str(data))
-                )
-                chunk += md.partial()
-                if chunk:
-                    screen.write_stream(chunk)
-                    round_printed += chunk
-                last_partial = time.time()
-            elif name == "stream_end":
-                if data.get("keep"):
-                    # 增量即正文：把末行收尾（避免与后续轮次输出拼在同一行，
-                    # 那会让"只撤回本轮"的清屏范围算错），全文 token 跳过
-                    tail = md.flush()
-                    if tail:
-                        screen.write_stream(tail)
-                    screen.newline()
-                    skip_next_token = True
-                    round_printed = ""
-                else:
-                    # 工具轮过渡文本 / 卡死 / 停止生成：整轮撤回
-                    if round_printed:
-                        rows = visible_rows(round_printed, md.width)
-                        height = shutil.get_terminal_size((80, 24)).lines
-                        if rows < height - 1:
-                            screen.erase_block(rows)
-                    md.reset()
-                    round_printed = ""
-            elif name == "token":
-                if skip_next_token:
-                    # 正文已按增量展示；这条全文 token 服务 CLI 之外的消费方
-                    skip_next_token = False
-                else:
-                    token = safe_text(data if isinstance(data, str) else str(data))
-                    busy_text = None
-                    screen.write_stream(md.feed(token))
-                    last_partial = time.time()
-            elif name == "title":
-                screen.write(paint(f"[标题：{safe_text(data.get('title', ''))}]", "dim"))
-            elif name == "hook":
-                screen.write(
-                    paint(
-                        f"🪝 {safe_text(data.get('event', 'hook'))} {safe_text(data.get('name', ''))}",
-                        "dim",
-                    )
-                )
-            elif name == "done":
-                rest = md.flush()
-                screen.write_stream(rest)
-                screen.newline()
-                usage = fetch_usage(base_url, conv_id)
-                # 回答完成后刷新上下文占用（输入区状态行的 meter 数据源）
-                stats = fetch_context_stats(base_url, conv_id)
-                elapsed = fmt_dur(time.time() - t0)
-                bits = [f"会话 {conv_id}", tool_mode, f"耗时 {elapsed}"]
-                tok = fmt_tokens(usage)
-                if tok:
-                    bits.append(tok)
-                if stats:
-                    bits.append(f"上下文 {context_pct(stats)}%")
-                screen.write(paint("─ " + " · ".join(bits) + " ─", "dim"))
-                # 长任务完成提示音（>10s）：切走窗口也能知道回答完了
-                if time.time() - t0 > 10:
-                    try:
-                        sys.stdout.write("\a")
-                        sys.stdout.flush()
-                    except Exception:
-                        pass
-                break
-            elif name == "error":
-                screen.newline()
-                message = safe_text(data.get("message", "未知错误"))
-                hint = (
-                    "（后端与模型供应商的连接失败，请检查后端日志/网络后重试）"
-                    if "connection" in message.lower() or "10013" in message
-                    else ""
-                )
-                screen.write(paint(f"✖ {message}{hint}", "red"))
-    except (GenerationInterrupted, KeyboardInterrupt):
-        interrupted = True
-    finally:
-        done_flag.set()
-        if interrupted:
-            try:
-                cancelled = _cancel_run(base_url, run_id)
-            except KeyboardInterrupt:
-                # 打断清理期间再按 Ctrl+C：不再逃逸，视为已打断即可
-                cancelled = False
-            # 立即关闭连接，让后端 SSE 生成器尽快感知断开
-            try:
-                for resp in resp_holder:
-                    resp.close()
-            except Exception:
-                pass
-            # 打断时本轮正文不落库（与 Web 端一致）：撤回已打印的半截内容
-            if round_printed:
-                rows = visible_rows(round_printed, md.width)
-                height = shutil.get_terminal_size((80, 24)).lines
-                if rows < height - 1:
-                    screen.erase_block(rows)
-                round_printed = ""
-            screen.newline()
-            screen.write(paint("⏹ 已打断生成" + ("（后端已停止）" if cancelled else "（已断开连接）"), "yellow"))
-            screen.write(paint("   按 ↑ 可找回刚才的问题，回车继续对话。", "dim"))
-    return conv_id  # type: ignore[return-value]
+# 渲染与等待逻辑在 cli/render.py（批次 1 拆出，主入口保持行数棘轮内）。
 
 
 # ------------------------------------------------------------------ 主流程
@@ -806,6 +337,9 @@ def run_headless(
     text 输出回答正文；json 输出 {answer, conversation_id, sources,
     tool_trace, token_usage, timings}；出错时错误进 stderr 并返回 1。
     """
+    question, attachment_ids, images = expand_file_mentions(
+        base_url, question, os.getcwd(), quiet=True
+    )
     body = json.dumps(
         {
             "question": question,
@@ -814,6 +348,8 @@ def run_headless(
             "template_id": None,
             "project_dir": os.getcwd(),
             "command_sandbox": sandbox,
+            "attachment_ids": attachment_ids,
+            "images": images,
         },
         ensure_ascii=False,
     ).encode("utf-8")
@@ -826,10 +362,12 @@ def run_headless(
     def _consume(url: str, payload: bytes) -> dict | None:
         """消费一条 SSE 流；返回 run_suspended 载荷（无挂起则 None）。"""
         nonlocal conv_id, error
+        from cli.http import auth_headers
+
         suspended = None
-        sreq = urllib.request.Request(
-            url, data=payload, headers={"Content-Type": "application/json"}
-        )
+        sreq_headers = {"Content-Type": "application/json"}
+        sreq_headers.update(auth_headers())
+        sreq = urllib.request.Request(url, data=payload, headers=sreq_headers)
         with urllib.request.urlopen(sreq, timeout=600) as resp:
             for raw in resp:
                 line = raw.decode("utf-8", errors="replace").rstrip("\n")
@@ -929,24 +467,34 @@ def print_banner(model: str | None, tool_mode: str, has_agents: bool) -> None:
         paint("记忆 ", "dim")
         + ("已加载 AGENTS.md" if has_agents else paint("未创建（/init 可建）", "dim")),
     ]
-    _boxed(rows, "知问 ZhiWen · 终端版", "cyan")
+    _boxed(rows, "知问 ZhiWen - 终端版", "cyan")
     groups = [
-        ("会话", "/new 新会话 · /resume 恢复 · /continue 续跑中断轮 · /clear 清屏 · /exit 退出"),
+        ("会话", "/new 新会话 · /resume [序号|关键词] 恢复 · /continue 续跑 · /abandon 丢弃 · /clear 清屏 · /exit 退出"),
         ("上下文", "/context 占用 · /compact 压缩 · /rewind 回退 · /todos 任务"),
         ("查看", "/output [n] 展开输出 · /cost 用量 · /status 状态 · /tools 模式"),
+        ("模型", "/model [序号|名称] 切换供应商 · /export [md|json] 导出会话"),
+        ("诊断", "/timeline 快照回滚 · /doctor 环境诊断 · /mcp · /skills"),
+        ("输入", "@路径 附加文件/图片 · !命令 直接执行 · Ctrl+J 换行"),
         ("记忆", "/init 创建 AGENTS.md · /memory 项目记忆"),
     ]
     wname = max(strwidth(name) for name, _ in groups)
     for name, cmds in groups:
         pad = " " * (wname - strwidth(name) + 1)
-        print(paint("  " + name + pad, "cyan") + paint(cmds, "dim"))
-    print(
-        paint("  快捷 ", "cyan")
-        + paint(
-            "? 帮助 · Ctrl+O 展开输出 · Ctrl+R 重发 · Ctrl+L 清屏 · ↑/↓ 历史 · Ctrl+C 打断",
-            "dim",
-        )
+        prefix = "  " + name + pad
+        body = wrap_styled(cmds, max(20, term_width() - strwidth(prefix)))
+        for i, line in enumerate(body or [""]):
+            head = paint(prefix, "cyan") if i == 0 else " " * strwidth(prefix)
+            print(head + paint(line, "dim"))
+    quick_prefix = "  快捷 "
+    quick = (
+        "? 帮助 · Ctrl+J 换行 · Ctrl+O 分页 · Ctrl+R 搜索 · Ctrl+Y 重发 · "
+        "Ctrl+L 清屏 · ↑/↓ 历史 · Ctrl+C 打断"
     )
+    for i, line in enumerate(
+        wrap_styled(quick, max(20, term_width() - strwidth(quick_prefix))) or [""]
+    ):
+        head = paint(quick_prefix, "cyan") if i == 0 else " " * strwidth(quick_prefix)
+        print(head + paint(line, "dim"))
 
 
 def main() -> None:
@@ -987,6 +535,15 @@ def main() -> None:
     args = parser.parse_args()
 
     base = f"http://{args.host}:{args.port}"
+    if check_backend(base) is None:
+        print()
+        print(paint("✖ 后端未启动或不可达：" + base, "red"))
+        print("  请先启动依赖服务（MySQL / OpenSearch / 后端）：")
+        print("    - 一键启动：仓库根目录运行 start_all.bat（会检查并拉起所需服务）")
+        print("    - 只重启后端：backend\\restart_backend.ps1")
+        print("    - 启动失败先看 backend\\uvicorn.err.log")
+        print()
+        raise SystemExit(1)
     tool_mode = args.tool
     sandbox_mode: str | None = args.sandbox
     conversation_id = args.conversation
@@ -1023,6 +580,7 @@ def main() -> None:
                     history,
                     default=pending_prefill,
                     status=build_status_line(model, tool_mode, conversation_id, sandbox_mode),
+                    submit_empty=False,
                 )
                 pending_prefill = ""
             except Interrupted as exc:
@@ -1043,7 +601,7 @@ def main() -> None:
                 break
             except OutputRequested:
                 # Ctrl+O：展开最近一次工具调用的完整输出
-                show_tool_output(1)
+                show_tool_output(1, reader)
                 continue
             except RetryRequested:
                 if not last_question:
@@ -1056,6 +614,9 @@ def main() -> None:
             if not question:
                 continue
             save_history(cwd, history)
+            if question.startswith("!"):
+                run_shell(question[1:], reader)
+                continue
             if question.startswith("/"):
                 cmd, _, arg = question.partition(" ")
                 arg = arg.strip()
@@ -1075,38 +636,10 @@ def main() -> None:
                     print(paint("已开启新会话。", "dim"))
                     continue
                 if cmd == "/resume":
-                    session_history = load_session_history(cwd)
-                    if not session_history:
-                        print(paint("本目录还没有可恢复的会话。", "yellow"))
+                    selected = pick_conversation(base, reader, arg)
+                    if selected is None:
                         continue
-                    index = 0
-                    if arg.isdigit() and 1 <= int(arg) <= len(session_history):
-                        index = int(arg) - 1
-                    elif len(session_history) > 1:
-                        titles = fetch_conversation_titles(base)
-                        print(paint("最近会话（输入序号恢复）：", "cyan", bold=True))
-                        for i, h in enumerate(session_history, 1):
-                            cid = h.get("conversation_id")
-                            title = titles.get(int(cid), "")
-                            # 有标题优先显示标题；无标题（新会话未生成）显示会话号
-                            label = title if title and title != "新对话" else f"会话 {cid}"
-                            print(
-                                paint(
-                                    f"  {i}. {label}"
-                                    + (f" · #{cid}" if title and title != "新对话" else ""),
-                                    "dim",
-                                )
-                            )
-                        try:
-                            sel = read_line(reader, []).strip()
-                        except Interrupted:
-                            sel = ""
-                        index = (
-                            int(sel) - 1
-                            if sel.isdigit() and 1 <= int(sel) <= len(session_history)
-                            else 0
-                        )
-                    conversation_id = int(session_history[index].get("conversation_id"))
+                    conversation_id = selected
                     titles = fetch_conversation_titles(base)
                     title = titles.get(conversation_id, "")
                     label = title if title and title != "新对话" else f"会话 {conversation_id}"
@@ -1128,6 +661,16 @@ def main() -> None:
                                     snippet = "（工具调用步骤）"
                                 print(paint(f"  AI：{snippet}", "dim"))
                     continue
+                if cmd == "/model":
+                    new_model, message = switch_model(base, arg, reader)
+                    if message:
+                        print(paint(message, "green" if new_model else "yellow"))
+                    if new_model:
+                        model = new_model
+                    continue
+                if cmd == "/export":
+                    export_conversation(base, conversation_id, cwd, arg or "md")
+                    continue
                 if cmd == "/init":
                     init_project_memory(cwd)
                     has_agents = True
@@ -1142,13 +685,41 @@ def main() -> None:
                     else:
                         print(paint("用法：/tools auto|knowledge|web|none", "yellow"))
                     continue
+                if cmd == "/doctor":
+                    doctor(base)
+                    continue
+                if cmd == "/mcp":
+                    show_mcp(base, arg)
+                    continue
+                if cmd == "/skills":
+                    show_skills(base, arg)
+                    continue
+                if cmd == "/timeline":
+                    if timeline(base, conversation_id, reader, arg):
+                        fetch_context_stats(base, conversation_id)  # 消息已重建
+                    continue
                 if cmd == "/continue":
                     if not conversation_id:
                         print(paint("当前没有会话（先提问，或 /resume 恢复）。", "yellow"))
                         continue
-                    st = http_json(
-                        base, "GET", f"/agent/pending/{conversation_id}", timeout=8
-                    ) or {}
+                    try:
+                        st = http_json(
+                            base,
+                            "GET",
+                            f"/api/agent/pending/{conversation_id}",
+                            timeout=8,
+                        ) or {}
+                    except urllib.error.HTTPError as exc:
+                        print(
+                            paint(
+                                f"读取会话状态失败：{http_error_detail(exc)}",
+                                "red",
+                            )
+                        )
+                        continue
+                    except Exception as exc:
+                        print(paint(f"读取会话状态失败：{exc}", "red"))
+                        continue
                     if not st.get("interrupted"):
                         hint = (
                             "有挂起确认（在对话里直接批准/拒绝即可）"
@@ -1167,6 +738,30 @@ def main() -> None:
                         sandbox_mode,
                         continue_run=True,
                     )
+                    continue
+                if cmd == "/abandon":
+                    if not conversation_id:
+                        print(paint("当前没有会话。", "yellow"))
+                        continue
+                    try:
+                        res = http_json(
+                            base,
+                            "POST",
+                            f"/api/agent/abandon/{conversation_id}",
+                            timeout=10,
+                        ) or {}
+                    except Exception as exc:
+                        print(paint(f"丢弃失败：{exc}", "red"))
+                        continue
+                    if res.get("ok"):
+                        print(
+                            paint(
+                                "已丢弃未完成的一轮（保留历史回答），可以继续提问。",
+                                "green",
+                            )
+                        )
+                    else:
+                        print(paint("没有可丢弃的未完成运行。", "yellow"))
                     continue
                 if cmd == "/todos":
                     fetch_todos(base, conversation_id)
@@ -1188,7 +783,7 @@ def main() -> None:
                     continue
                 if cmd == "/output":
                     n = int(arg) if arg.isdigit() else 1
-                    show_tool_output(n)
+                    show_tool_output(n, reader)
                     continue
                 if cmd == "/sandbox":
                     if arg in ("docker", "subprocess"):
@@ -1219,10 +814,17 @@ def main() -> None:
                             "/exit /quit 退出 · /new 新会话 · /tools auto|knowledge|web|none\n"
                             "/todos 任务清单 · /status 状态 · /cost 用量 · /clear 清屏\n"
                             "/context 上下文占用 · /compact 手动压缩 · /rewind 消息回退\n"
-                            "/output [n] 展开工具输出 · /sandbox docker|subprocess|off 命令沙箱\n"
-                            "/init 创建 AGENTS.md · /memory 项目记忆 · /resume 恢复会话\n"
+                            "/output [n] 分页查看工具输出 · /sandbox docker|subprocess|off 命令沙箱\n"
+                            "/init 创建 AGENTS.md · /memory 项目记忆 · /resume [序号|关键词] 恢复会话\n"
+                            "/model [序号|名称] 切换供应商 · /export [md|json] 导出会话\n"
+                            "/timeline [序号] 检查点回滚 · /doctor 环境诊断 · /mcp · /skills\n"
                             "/continue 续跑被中断的一轮（进程被杀/异常退出后）\n"
-                            "Ctrl+C/Esc 打断 · Ctrl+L 清屏 · Ctrl+R 重发 · Ctrl+O 展开输出 · ↑/↓ 历史",
+                            "!命令 直接执行 shell · @路径 附加文件/图片 · Ctrl+J 换行\n"
+                            "Ctrl+C/Esc 打断 · Ctrl+L 清屏 · Ctrl+R 历史搜索 · Ctrl+Y 重发 · Ctrl+O 分页\n"
+                            "↑/↓ 历史\n"
+                            "分页内：/ 搜索 · n/N 下一处 · g/G 首尾 · q 返回\n"
+                            "环境变量：NO_COLOR=1 关色 · ZHIWEN_THEME=dark|light · ZHIWEN_ASCII=1\n"
+                            "          ZHIWEN_PAGER=0 关分页 · ZHIWEN_INPUT=legacy 强制旧输入（排查终端兼容）",
                             "dim",
                         )
                     )
@@ -1230,8 +832,19 @@ def main() -> None:
                 print(paint(f"未知命令：{cmd}（/help 查看）", "yellow"))
                 continue
             last_question = question
+            question, attachment_ids, images = expand_file_mentions(
+                base, question, cwd
+            )
             conversation_id = stream_question(
-                base, question, tool_mode, conversation_id, reader, screen, sandbox_mode
+                base,
+                question,
+                tool_mode,
+                conversation_id,
+                reader,
+                screen,
+                sandbox_mode,
+                attachment_ids=attachment_ids,
+                images=images,
             )
     except KeyboardInterrupt:
         print()

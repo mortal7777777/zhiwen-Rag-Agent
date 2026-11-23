@@ -147,6 +147,25 @@ def test_sse_tool_result_carries_source_objects_not_indices():
     ]
 
 
+def test_merge_persists_subagent_summary_entries():
+    """合并时给每个子任务落一条运行级摘要轨迹，历史消息可重建子代理页签。"""
+    st = _state([_result("任务A", "c1"), _result("任务B", "c1")], merged=0)
+    _merge_node(st, runtime_from_state(st))
+
+    entries = [t for t in st["tool_trace"] if t.get("name") == "subagent"]
+    assert [e["arguments"]["task"] for e in entries] == ["任务A", "任务B"]
+    assert all(e["summary"].endswith("的结论") for e in entries)
+    assert len({e["id"] for e in entries}) == 2, "同轮多个子任务 id 必须唯一"
+    assert entries[0]["id"].startswith("subtask_c1_")
+    detail = json.loads(entries[0]["detail"])
+    assert detail["artifacts"][0]["path"] == "a.html"
+    assert detail["commands"][0]["exit_code"] == 0
+
+    events = [e for e in _drain_events(st) if e["event"] == "tool_result"]
+    assert events[0]["data"]["id"] == entries[0]["id"]
+    assert events[0]["data"]["detail"] == entries[0]["detail"]
+
+
 def test_merge_skips_already_consumed_results():
     """第二轮：本轮累积 3 条，前 2 条上轮已合并，本轮只应出现任务C。"""
     results = [_result("任务A", "c1"), _result("任务B", "c2"), _result("任务C", "c3")]

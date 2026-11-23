@@ -53,6 +53,55 @@ def test_restore_masked_rejects_unknown_id():
     assert err is not None
 
 
+def test_probe_rejects_cloud_metadata_and_non_http_urls():
+    out1 = pp.probe_models(_cfg(base_url="http://169.254.169.254/latest/meta-data"))
+    assert out1["ok"] is False and "禁止访问" in out1["error"]
+    out2 = pp.probe_chat(_cfg(base_url="file:///etc/passwd"))
+    assert out2["ok"] is False and "http" in out2["error"]
+
+
+
+# ---------------- probe_models 真实调用链 ----------------
+
+
+def test_probe_models_calls_candidate_endpoints(monkeypatch):
+    """不 mock probe_models 本身：确保候选端点函数名与调用点一致。"""
+    from app import network, provider_candidates
+
+    calls: list[str] = []
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"id": "m1"}, {"name": "m2"}]}
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url, headers):
+            calls.append(url)
+            return _Resp()
+
+    monkeypatch.setattr(
+        network, "make_httpx_client", lambda **kw: _Client()
+    )
+    monkeypatch.setattr(
+        provider_candidates,
+        "models_candidates",
+        lambda cfg: [("https://api.example.com/models", {"Authorization": "Bearer x"})],
+    )
+    out = pp.probe_models(_cfg())
+    assert out["ok"] is True
+    assert [m["id"] for m in out["models"]] == ["m1", "m2"]
+    assert calls == ["https://api.example.com/models"]
+
+
 # ---------------- probe_provider 编排 ----------------
 
 

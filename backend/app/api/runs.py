@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -149,7 +149,9 @@ def runs_stats(
             rate,
         )
         total_cost += run_cost
-        day = (row.created_at or datetime.now()).strftime("%m-%d")
+        # 按完整日期分桶：只取 %m-%d 会让跨年数据合并，且字符串排序把
+        # 次年 01-01 排到 12-31 前面。"全部"周期可能跨年。
+        day = (row.created_at or datetime.now()).strftime("%Y-%m-%d")
         slot = daily.setdefault(
             day,
             {
@@ -183,7 +185,10 @@ def runs_stats(
         "cost_unit_note": (
             f"估算（按模型单价与峰谷时段，USD→CNY {rate:g}，非账单）"
         ),
-        "daily": [{"date": day, **stats} for day, stats in sorted(daily.items())],
+        "daily": [
+            {"date": day, "label": day[5:], **stats}
+            for day, stats in sorted(daily.items())
+        ],
     }
 
 
@@ -221,18 +226,58 @@ def _to_int(usage: dict, keys: tuple[str, ...]) -> int:
     return 0
 
 
+def _enrich_run_row(row: dict) -> dict:
+    """附缓存命中率与估算成本（与 /runs/stats 同一套单价/峰谷口径）。"""
+    usage = row.get("token_usage")
+    usage = usage if isinstance(usage, dict) else _safe_json(usage)
+    hit = _to_int(usage, ("cache_hit_tokens", "prompt_cache_hit_tokens"))
+    miss = _to_int(usage, ("cache_miss_tokens", "prompt_cache_miss_tokens"))
+    inp = _to_int(usage, ("input_tokens", "prompt_tokens"))
+    out = _to_int(usage, ("output_tokens", "completion_tokens"))
+    if hit == 0 and miss == 0 and inp:
+        miss = inp
+    total = hit + miss
+    row["cache_hit_rate"] = round(hit / total, 3) if total else None
+    row["estimated_cost_yuan"] = round(
+        _estimate_cost(
+            miss,
+            hit,
+            out,
+            usage.get("model"),
+            row.get("created_at"),
+            float(getattr(get_settings(), "usd_cny_rate", 7.2) or 7.2),
+        ),
+        4,
+    )
+    return row
+
+
 @router.get("/runs")
 def list_runs(
     limit: int = Query(default=50, ge=1, le=200),
     conversation_id: int | None = None,
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    """查看最近的 Agent 运行记录（最近的在最前）。"""
-    return repo.list_agent_runs(
+    """查看最近的 Agent 运行记录（最近的在最前）。
+
+    附每次运行的缓存命中率与估算成本（与 /runs/stats 同一套单价/峰谷口径），
+    供 TUI 逐回答展示；成本是估算值，不是账单。
+    """
+    rows = repo.list_agent_runs(
         db,
         limit=limit,
         conversation_id=conversation_id,
     )
+    return [_enrich_run_row(row) for row in rows]
+
+
+@router.get("/runs/{run_id}")
+def get_run(run_id: int, db: Session = Depends(get_db)) -> dict:
+    """单次运行的完整记录（回放面板用；trace 另走 /runs/{id}/trace）。"""
+    row = repo.get_agent_run(db, run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="运行记录不存在")
+    return _enrich_run_row(row)
 
 
 @router.get("/runs/{run_id}/trace")

@@ -770,7 +770,7 @@ def test_search_bing_raises_on_unparseable_page(monkeypatch):
 # ---------------- execute_web_search 降级链 ----------------
 
 def test_execute_web_search_falls_back_to_bing(monkeypatch):
-    from app.agent import tools as tools_mod
+    from app.agent.tools import web_search as tools_mod
 
     monkeypatch.setattr("app.network.proxy_reachable", lambda: True)
     monkeypatch.setattr(
@@ -797,7 +797,7 @@ def test_execute_web_search_falls_back_to_bing(monkeypatch):
 
 
 def test_execute_web_search_falls_back_to_baidu_when_bing_fails(monkeypatch):
-    from app.agent import tools as tools_mod
+    from app.agent.tools import web_search as tools_mod
 
     monkeypatch.setattr("app.network.proxy_reachable", lambda: True)
     monkeypatch.setattr(tools_mod, "_search_duckduckgo", lambda q, n: [])
@@ -819,7 +819,7 @@ def test_execute_web_search_falls_back_to_baidu_when_bing_fails(monkeypatch):
 
 
 def test_execute_web_search_ddgs_success_skips_fallbacks(monkeypatch):
-    from app.agent import tools as tools_mod
+    from app.agent.tools import web_search as tools_mod
 
     monkeypatch.setattr("app.network.proxy_reachable", lambda: True)
     monkeypatch.setattr(
@@ -842,7 +842,7 @@ def test_execute_web_search_ddgs_success_skips_fallbacks(monkeypatch):
 
 
 def test_execute_web_search_all_fallbacks_fail_returns_error(monkeypatch):
-    from app.agent import tools as tools_mod
+    from app.agent.tools import web_search as tools_mod
 
     monkeypatch.setattr("app.network.proxy_reachable", lambda: True)
     boom = lambda q, n: (_ for _ in ()).throw(RuntimeError("down"))  # noqa: E731
@@ -856,7 +856,7 @@ def test_execute_web_search_all_fallbacks_fail_returns_error(monkeypatch):
 
 def test_execute_web_search_skips_ddgs_when_proxy_dead(monkeypatch):
     """系统代理不可达：DDGS 整个跳过（省十几秒白等），直接走 Bing。"""
-    from app.agent import tools as tools_mod
+    from app.agent.tools import web_search as tools_mod
 
     monkeypatch.setattr("app.network.proxy_reachable", lambda: False)
     monkeypatch.setattr(

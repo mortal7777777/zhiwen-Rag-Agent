@@ -1,4 +1,8 @@
-"""问答接口：普通 JSON 模式 + SSE 流式模式。"""
+"""问答接口：普通 JSON 模式 + SSE 流式模式。
+
+已弃用：前端产品链路已完全迁到 `/api/agent/stream`；本模块仅保留给
+`backend/scripts/dev/` 下的开发脚本（chat_demo / http_smoke / stability_test）。
+"""
 
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ from .deps import get_service
 router = APIRouter(tags=["chat"])
 
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse, deprecated=True)
 def chat(request: ChatRequest, service: RAGService = Depends(get_service)) -> ChatResponse:
     """RAG 问答：检索知识库 -> 本地重排序 -> 生成回答。
 
@@ -43,7 +47,7 @@ def _sse(payload: dict) -> str:
     return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
 
-@router.post("/chat/stream")
+@router.post("/chat/stream", deprecated=True)
 async def chat_stream(
     request: ChatRequest,
     service: RAGService = Depends(get_service),

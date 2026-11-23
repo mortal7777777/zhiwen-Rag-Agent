@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -54,6 +55,27 @@ def _server_signature(cfg: dict) -> str:
 def _truncate(text: str, limit: int = 900) -> str:
     text = text.strip()
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+_SLUG_RE = re.compile(r"[^0-9A-Za-z_-]+")
+
+
+def _server_slug(cfg: dict) -> str:
+    """工具名前缀用的服务器标识：优先展示名，取不到 ASCII 时退回 id。
+
+    不同服务器可能暴露同名工具（如 search），工具名带前缀才不会在
+    tools_by_name 字典里互相覆盖。中文后缀会被截掉（"GitHub 工具" → "GitHub"）。
+    """
+    for candidate in (cfg.get("name"), cfg.get("id")):
+        slug = _SLUG_RE.sub("_", str(candidate or "")).strip("_-")
+        slug = re.sub(r"_{2,}", "_", slug).strip("_-")
+        if slug:
+            return slug[:24].strip("_-")
+    return "server"
+
+
+def _tool_name(cfg: dict, tool_name: str) -> str:
+    return f"mcp_{_server_slug(cfg)}_{tool_name}"
 
 
 # 已知的 MCP 侧失败 → 可执行的替代做法。实测（traces 里 119 次 MCP 调用、14 次失败）
@@ -337,7 +359,10 @@ class MCPServerSession:
             self.error = str(exc)
             logger.warning("MCP 初始化 %s 失败：%s", self.name, exc)
 
-    def call_tool(self, name: str, arguments: dict, timeout: float = 90.0) -> str:
+    def call_tool(
+        self, name: str, arguments: dict, timeout: float = 90.0
+    ) -> tuple[str, bool]:
+        """同步调用工具，返回 (输出文本, 是否服务端报错)。"""
         if not self.connected or self._session is None or self._loop is None:
             raise RuntimeError(f"MCP 服务器 {self.name} 未连接：{self.error or '未知'}")
         fut = asyncio.run_coroutine_threadsafe(
@@ -346,16 +371,20 @@ class MCPServerSession:
         )
         return fut.result(timeout=timeout)
 
-    async def _call_tool(self, name: str, arguments: dict) -> str:
+    async def _call_tool(self, name: str, arguments: dict) -> tuple[str, bool]:
         result = await self._session.call_tool(name, arguments)
+        is_error = bool(getattr(result, "is_error", False))
         parts = []
         for content in result.content or []:
             text = getattr(content, "text", None)
             if text:
                 parts.append(str(text))
         if parts:
-            return "\n".join(parts)
-        return json.dumps(result.model_dump(), ensure_ascii=False)[:2000]
+            return "\n".join(parts), is_error
+        return (
+            json.dumps(result.model_dump(), ensure_ascii=False)[:2000],
+            is_error,
+        )
 
     def close(self) -> None:
         if self._loop and self._thread and self._loop.is_running():
@@ -423,6 +452,7 @@ class MCPManager:
                         pass
                     self._servers.pop(sid, None)
             tools: list[BaseTool] = []
+            used_names: set[str] = set()
             for cfg in servers:
                 sid = str(cfg.get("id") or "")
                 if sid not in enabled:
@@ -442,8 +472,23 @@ class MCPManager:
                 if server.should_connect():
                     server.start_background(timeout=self.connect_timeout)
                 for t in server.available_tools():
+                    # 服务器前缀解决跨服务器同名；sanitize 后仍同名时按顺序加 _2/_3
+                    base = _tool_name(cfg, t["name"])
+                    name = base
+                    n = 2
+                    while name in used_names:
+                        name = f"{base}_{n}"
+                        n += 1
+                    used_names.add(name)
                     tools.append(
-                        make_mcp_tool(server, cfg, t["name"], t["description"], t["inputSchema"])
+                        make_mcp_tool(
+                            server,
+                            cfg,
+                            t["name"],
+                            t["description"],
+                            t["inputSchema"],
+                            lc_name=name,
+                        )
                     )
             return tools
 
@@ -548,6 +593,8 @@ def make_mcp_tool(
     tool_name: str,
     description: str,
     input_schema: dict | None,
+    *,
+    lc_name: str | None = None,
 ) -> BaseTool:
     """把 MCP 工具包装成 LangChain StructuredTool（同步调用）。"""
 
@@ -565,10 +612,18 @@ def make_mcp_tool(
         try:
             # 补默认参数：Playwright MCP 部分工具 schema 声明可选但服务端必填
             call_args = _mcp_default_args(tool_name, kwargs)
-            output = server.call_tool(tool_name, call_args or {})
+            output, is_error = server.call_tool(tool_name, call_args or {})
+            text = _append_error_hint(_truncate(output, 1500))
+            if is_error:
+                # 服务端 isError=true：让工具结果按失败处理（不进缓存、状态标红），
+                # 不要把错误文本当成功输出喂给模型
+                return {
+                    "summary": f"MCP[{server.name}] {tool_name} 调用失败",
+                    "error": text or "MCP 工具返回错误（无错误详情）",
+                }
             return {
                 "summary": f"MCP[{server.name}] {tool_name} 调用完成",
-                "output": _append_error_hint(_truncate(output, 1500)),
+                "output": text,
             }
         except Exception as exc:
             return {
@@ -586,7 +641,7 @@ def make_mcp_tool(
     )
     return StructuredTool.from_function(
         func=_invoke,
-        name=f"mcp_{tool_name}",
+        name=lc_name or _tool_name(server_cfg, tool_name),
         description=(
             f"MCP 工具（服务器：{server.name}）：{description or tool_name}。"
             "当用户要求使用该能力、或任务需要该工具时调用。"

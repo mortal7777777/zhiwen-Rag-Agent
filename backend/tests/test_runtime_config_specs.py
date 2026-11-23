@@ -14,10 +14,19 @@ import pytest
 from app import runtime_config as rc
 
 # 2026-10-08 重构前的键集合快照（65 个）——只能增，不能减
+# 2026-11-17：新增 PP-StructureV3 混合解析 7 项（pdf_parse_backend / paddle_ocr_* / url）
 EXPECTED_EDITABLE_KEYS = {
     # 模型 / 供应商（旧的 deepseek_*/sensenova_* 键为兼容保留）
     "deepseek_api_key", "deepseek_base_url", "deepseek_model", "agent_title_model",
     "chat_temperature", "main_model_vision", "data_dir",
+    "paddle_ocr_url",
+    # 文档解析（2026-11-17 / 2026-11-18 懒生命周期）
+    "pdf_parse_backend", "paddle_ocr_device", "paddle_ocr_lazy_start",
+    "paddle_ocr_idle_timeout_s", "paddle_ocr_pages_per_process",
+    "paddle_ocr_dpi", "paddle_ocr_timeout",
+    "paddle_ocr_max_image_ocr", "paddle_ocr_confidence_min",
+    "paddle_ocr_vlm_fallback", "gpu_model_idle_unload_minutes",
+    "kb_vision_image_answer", "kb_vision_max_images",
     "sensenova_api_key", "sensenova_base_url", "sensenova_model",
     "providers", "active_chat_provider", "active_vision_provider",
     # 联网搜索
@@ -42,7 +51,8 @@ EXPECTED_EDITABLE_KEYS = {
     "verify_command", "verify_auto_detect", "verify_max_retries",
     # 受控执行与审批
     "tool_workspace", "command_allowlist", "command_timeout", "command_sandbox",
-    "sandbox_image", "sandbox_workspace_readonly", "tool_permission_mode",
+    "sandbox_image", "sandbox_workspace_readonly", "sandbox_auto_allow",
+    "tool_permission_mode",
     "permission_timeout", "skill_sandbox_enabled", "reasoning_summary_enabled",
     "project_memory_file", "mcp_enabled", "trajectory_compress_enabled",
     # 嵌入 / 重排
@@ -51,6 +61,24 @@ EXPECTED_EDITABLE_KEYS = {
     "reranker_provider", "reranker_api_base_url", "reranker_api_key",
     "reranker_api_model",
 }
+
+
+def test_provider_vision_capability():
+    from app.runtime_config import provider_vision_capability
+
+    # 明确不支持：即使声明模型也 false
+    assert provider_vision_capability({"supports_vision": False, "vision_models": ["*-vl-*"]}) is False
+    # 模型列表优先：匹配/不匹配
+    assert provider_vision_capability(
+        {"supports_vision": True, "model": "deepseek-v4.1-flash", "vision_models": ["*-vl-*"]}
+    ) is False
+    assert provider_vision_capability(
+        {"supports_vision": True, "model": "qwen2-vl-7b", "vision_models": ["*-vl-*"]}
+    ) is True
+    # 供应商声明支持且未限定模型
+    assert provider_vision_capability({"supports_vision": True}) is True
+    # 未声明：None（由调用方回退旧全局）
+    assert provider_vision_capability({"model": "text-model"}) is None
 
 
 def test_editable_keys_snapshot():
@@ -113,6 +141,13 @@ def _save(updates: dict) -> dict:
     return rc.save_overrides(db=None, updates=updates, settings=None)
 
 
+def test_history_budget_spec_allows_400k():
+    """1M 窗口模型下历史预算默认/上限支持 400K（2026-11-09 调整）。"""
+    spec = rc._SPECS["history_max_tokens"]
+    assert spec.default == 400000
+    assert spec.lo <= 400000 <= spec.hi
+
+
 def test_save_overrides_clamps_numbers(clean_overrides):
     merged = _save(
         {
@@ -120,7 +155,7 @@ def test_save_overrides_clamps_numbers(clean_overrides):
             "agent_max_failures": 0,
             "kb_chat_min_score": 5.0,
             "command_timeout": 99999,
-            "permission_timeout": 1,
+            "permission_timeout": -5,
             "history_max_tokens": "not-a-number",
         }
     )
@@ -128,7 +163,7 @@ def test_save_overrides_clamps_numbers(clean_overrides):
     assert merged["agent_max_failures"] == 1
     assert merged["kb_chat_min_score"] == 1.0
     assert merged["command_timeout"] == 300
-    assert merged["permission_timeout"] == 30
+    assert merged["permission_timeout"] == 0, "0=无限等待，必须允许保存（不能被夹到 30）"
     assert "history_max_tokens" not in merged, "非数值应跳过该键，不影响其它键"
 
 

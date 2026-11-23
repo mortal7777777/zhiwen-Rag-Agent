@@ -56,6 +56,9 @@ class Deps:
     stop_event: threading.Event | None = None
     # prepare 构建、agent/tools 节点使用（同一 run 内共享，靠 context 对象引用传递）
     tools: list = field(default_factory=list)
+    # 请求级工具契约快照（mutating/回读/答复字段）。与 tools 同源但独立拷贝，
+    # 避免并发请求共享可变注册表；不进检查点。
+    tool_contracts: dict = field(default_factory=dict)
     # 新会话标题：后台线程生成，写入 title_holder，finalize 读取后发 title 事件
     title_holder: list[str] = field(default_factory=list)
     title_thread: threading.Thread | None = None
@@ -63,6 +66,15 @@ class Deps:
     # 计数器/锁不能放 state（要进检查点，锁不可序列化）。
     subagent_llm_calls: int = 0
     subagent_lock: threading.Lock = field(default_factory=threading.Lock)
+    # 本段执行的起点与历史累计耗时（毫秒）。request-scoped、不进检查点：
+    # 挂起时把本段耗时累计到 service 的内存注册表，恢复后从新段起点重新计时，
+    # 避免把人工审批等待算进 latency_ms，也避免跨进程 perf_counter 基准失效。
+    started: float = 0.0
+    elapsed_ms: int = 0
+    # 历史前缀（只读 DB 窗口）：不进检查点。state["messages"] 只保留
+    # [静态核心, 静态动态块, D 块, 问题, 工具轮]，模型调用时按
+    # state["history_insert_at"] 插入这段历史。
+    prefix_messages: list = field(default_factory=list)
 
 
 def runtime_of(deps: "Deps") -> SimpleNamespace:
@@ -80,6 +92,7 @@ class AgentState(TypedDict, total=False):
 
     question: str
     images: list[str]
+    attachments: list[dict]
     use_web_search: bool
     use_knowledge_base: bool
     conversation_id: int | None
@@ -99,12 +112,18 @@ class AgentState(TypedDict, total=False):
     forced_final: bool
     last_call_warned: bool
     verify_fail_count: int
+    verify_env_warned: bool
     early_created: bool
     task_mode: bool
     project_dir: str | None
 
     plan_steps: list[str]
     plan_map: list[dict]
+    # 本轮限定的知识库检索范围（相对路径）；空 = 全库
+    kb_scope_paths: list[str]
+    kb_scope_label: str
+    # 查看器划选的原文 {text, context, source, page}（直接进上下文）；空 = 无引用
+    quote: dict
     kb_documents: list[str]
     memory_hits: list[str]
     xml_retry_count: int
@@ -128,6 +147,11 @@ class AgentState(TypedDict, total=False):
 
     # 本轮"问题之后"消息在链中的起点：finalize 据此落库（纯数据，续跑时要能读到）
     persist_start: int
+    # 历史前缀在模型消息里的插入位置（= 静态核心+静态动态块条数）；
+    # state["messages"] 不含历史，续跑时按它插回 Deps.prefix_messages。
+    history_insert_at: int
+    # 历史窗口对应的 DB 行 id：时间线展示/回滚时据此重建历史前缀。
+    history_row_ids: list[int]
 
     # D 块版本账本（键 → 最后一次注入的内容哈希）：区分"A 就是最新版本"与
     # "A 之上还注入过更新的 B"（A→B→A 状态回退时靠它决定重新注入）。
@@ -136,12 +160,22 @@ class AgentState(TypedDict, total=False):
 
 
 class EventBus:
-    """节点向调用方推送 SSE 事件的中转。"""
+    """节点向调用方推送 SSE 事件的中转。
 
-    def __init__(self, queue: Queue) -> None:
+    queue：CLI/生成器模式的阻塞队列；
+    sink：SSE 直连模式的回调（通常是 loop.call_soon_threadsafe 包装的
+    asyncio.Queue 投递），省掉一层桥接线程与队列拷贝。
+    """
+
+    def __init__(self, queue: Queue | None = None, sink=None) -> None:
         self._queue = queue
+        self._sink = sink
 
     def emit(self, event: str, data) -> None:
-        self._queue.put({"event": event, "data": data})
+        item = {"event": event, "data": data}
+        if self._sink is not None:
+            self._sink(item)
+        elif self._queue is not None:
+            self._queue.put(item)
 
 

@@ -14,8 +14,11 @@ from app.rag.retriever import (
     merge_query_results,
     merge_scoped_children,
     select_contexts_with_book_quota,
+    set_dynamic_title_aliases,
+    title_in_text,
     title_matches_source,
 )
+from app.rag.service.retrieve import RetrieveMixin
 
 
 def _doc(content: str, source: str) -> Document:
@@ -57,6 +60,58 @@ def test_multi_source_round_robin_guarantees_each_source():
     # epub 的 3 个候选全部保留（轮流保证小源不丢失）
     epub_contents = [d.page_content for d in docs if d.metadata["source"] == "epub"]
     assert len(epub_contents) == 3
+
+
+def test_query_time_title_resolution_requires_title_in_text():
+    """篇名解析只接受“命中文本确实出现该篇名”的来源，正文顺带提及不算。"""
+
+    class _Store:
+        def search_bm25(self, _query: str, _k: int) -> list[Document]:
+            return [
+                Document(
+                    page_content="这本书顺带提到了另一部作品，但没有正文。",
+                    metadata={"relative_path": "其他书.pdf"},
+                ),
+                Document(
+                    page_content="《阿Q正传》是鲁迅的代表作之一。",
+                    metadata={"relative_path": "books/鲁迅全集.pdf"},
+                ),
+            ]
+
+    resolved = RetrieveMixin._resolve_title_sources(
+        _Store(), ["阿Q正传"], ["其他书.pdf"]
+    )
+
+    assert resolved == {"阿Q正传": ("鲁迅全集.pdf",)}
+
+
+def test_dynamic_title_alias_is_request_scoped():
+    set_dynamic_title_aliases({"阿Q正传": ("鲁迅全集.pdf",)})
+    try:
+        assert title_matches_source("阿Q正传", "鲁迅全集.pdf")
+        assert title_in_text("阿Q正传", "《阿Q正传》是鲁迅的代表作。")
+    finally:
+        set_dynamic_title_aliases(None)
+
+    assert not title_matches_source("阿Q正传", "鲁迅全集.pdf")
+
+
+def test_same_content_from_different_books_not_merged():
+    """回归：RRF 去重键按 _id 而非 page_content，跨书相同引文不能互相吞噬。"""
+    quote = "这是一段在两本书中都出现的相同引文。"
+    book_a = Document(
+        page_content=quote,
+        metadata={"_id": "chunk-a", "source": "book_a", "relative_path": "book_a.pdf"},
+    )
+    book_b = Document(
+        page_content=quote,
+        metadata={"_id": "chunk-b", "source": "book_b", "relative_path": "book_b.pdf"},
+    )
+
+    docs = merge_query_results([[book_a], [book_b]], limit=5)
+
+    assert len(docs) == 2
+    assert {d.metadata["source"] for d in docs} == {"book_a", "book_b"}
 
 
 def test_fusion_score_preserved_across_queries():

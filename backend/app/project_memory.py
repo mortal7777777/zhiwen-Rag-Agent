@@ -76,7 +76,7 @@ def _manual_section(existing: str | None) -> str:
 
 
 def project_memory_path(settings) -> Path:
-    root = (settings.project_memory_file or "").strip()
+    root = (effective(settings, "project_memory_file") or "").strip()
     if root:
         return Path(root).expanduser().resolve()
     return Path(__file__).resolve().parents[2] / "AGENTS.md"  # rag_knowledge_base/AGENTS.md

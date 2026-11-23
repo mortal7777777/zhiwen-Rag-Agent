@@ -127,13 +127,16 @@ class DocsMixin:
         conflict_policy: str = "ask",
         archive_version_no: str | None = None,
         archive_note: str = "",
+        defer_index: bool = False,
     ) -> UploadOutcome:
         """保存上传文件到 data/ 并增量更新索引（带查重与同名归档）。
 
         - dry_run：只做查重、不落盘；
         - conflict_policy="ask" 且检出冲突：返回 conflict（API 层转 409）；
         - conflict_policy="proceed"：仅警告档直接放行；同名档要求 archive_version_no，
-          旧文件移到 data_versions/ 归档（archived 元数据交 API 层落库）。
+          旧文件移到 data_versions/ 归档（archived 元数据交 API 层落库）；
+        - defer_index=True：只落盘不做增量索引（大 PDF 解析+嵌入可达分钟级，
+          HTTP 请求不该挂住；调用方随后调 start_background_ingest 后台执行）。
         """
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
         # 先读字节 + 校验（路径穿越/格式）
@@ -202,11 +205,14 @@ class DocsMixin:
                     logger.info("同名重传：旧文件已归档为 %s", path)
                 target.write_bytes(raw)
                 logger.info("已保存文件：%s", filename)
-            self.ensure_index()
+            if not defer_index:
+                self.ensure_index()
             return UploadOutcome(
                 mode="committed",
                 documents=self.list_documents(),
                 archived=archived,
+                index_pending=self.parse_upgrade_pending(),
+                index_deferred=defer_index,
             )
 
 
@@ -218,9 +224,11 @@ class DocsMixin:
             raise ValueError("非法的文件路径")
         if not target.exists():
             raise FileNotFoundError(f"文件不存在：{relative_path}")
-        target.unlink()
-        logger.info("已删除文件：%s", relative_path)
-        self.ensure_index()
+        # 与索引维护共用锁：重建期间快速失败，避免删除的文件被重建读到一半
+        with self.index_lock():
+            target.unlink()
+            logger.info("已删除文件：%s", relative_path)
+            self.ensure_index()
 
 
     def rebuild_index(self) -> dict:
@@ -249,4 +257,67 @@ class DocsMixin:
             "parent_count": manifest.get("parent_count", 0),
             "data_dir": str(self.settings.data_dir),
             "error": error,
+        }
+
+
+    def index_health(self) -> dict:
+        """索引健康：账本指纹 vs 当前数据目录，给出待增量/缺失文件。
+
+        manifest 只记文件指纹（大小+修改时间），因此这里不做内容级校验；
+        它回答的是"下次 ensure_index 会重嵌哪些文件 / 哪些文件已从磁盘消失"。
+        """
+        from ..loader import PARSE_SCHEMA_VERSION
+
+        manifest = self._read_manifest() or {}
+        old = manifest.get("files") or {}
+        current = self._compute_file_fingerprints()
+        added = sorted(k for k in current if k not in old)
+        changed = sorted(
+            k for k in old if k in current and old[k] != current[k]
+        )
+        missing = sorted(k for k in old if k not in current)
+        parse_version = manifest.get("parse_version") or ""
+        parse_upgrade_required = bool(manifest) and (
+            parse_version != PARSE_SCHEMA_VERSION
+        )
+        manifest_path = self._manifest_file()
+        last_built = None
+        if manifest_path.exists():
+            try:
+                last_built = datetime.fromtimestamp(
+                    manifest_path.stat().st_mtime
+                ).isoformat(timespec="seconds")
+            except OSError:
+                last_built = None
+        paddle_status: dict = {}
+        paddle = getattr(self, "paddle_ocr", None)
+        if paddle is not None:
+            try:
+                available = paddle.available()
+                paddle_status = {
+                    "url": paddle.base_url,
+                    "available": available,
+                    "error": "" if available else paddle.last_error,
+                }
+            except Exception as exc:  # 健康检查失败不能拖垮索引面板
+                paddle_status = {"available": False, "error": str(exc)[:200]}
+        return {
+            **self.index_status(),
+            "tracked_files": len(old),
+            "current_files": len(current),
+            "added_count": len(added),
+            "changed_count": len(changed),
+            "missing_count": len(missing),
+            # 列表截断：面板只需要定位问题文件，不做全量传输
+            "added_files": added[:50],
+            "changed_files": changed[:50],
+            "missing_files": missing[:50],
+            "stale": bool(added or changed or missing) or parse_upgrade_required,
+            "last_built_at": last_built,
+            "parse_version": parse_version,
+            "parse_upgrade_required": parse_upgrade_required,
+            "parse_reports": manifest.get("parse_reports") or {},
+            "rebuild": self.rebuild_state(),
+            "ingest": self.ingest_state(),
+            "paddle_ocr": paddle_status,
         }

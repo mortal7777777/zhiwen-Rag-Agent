@@ -1,0 +1,34 @@
+# 数据库迁移（Alembic）
+
+基线 revision：`6018474f2912_baseline_schema.py`（对应 2026-11 当前 schema）。
+数据库地址解析顺序（`env.py`）：`ALEMBIC_DATABASE_URL` > `MYSQL_URL` > `sqlite:///./alembic_dev.db`。
+
+## 已有数据库（一次性）
+
+启动一次后端，让旧版 `_migrate()` 把历史列补齐，然后把当前 schema 标记为基线：
+
+```powershell
+cd rag_knowledge_base\backend
+python -m alembic stamp head
+```
+
+之后新变更不再手写 `ALTER TABLE`。
+
+## 新增变更
+
+```powershell
+cd rag_knowledge_base\backend
+python -m alembic revision --autogenerate -m "add xxx column"
+# 人工 review 生成的 versions/*.py（autogenerate 不会识别所有语义变更）
+python -m alembic upgrade head
+```
+
+## CI
+
+`.github/workflows/ci.yml` 的后端 job 会在空 SQLite 库上执行 `alembic upgrade head`，
+确保基线可从零重建（不依赖 MySQL/OpenSearch）。
+
+## 约定
+
+- `app/db/database.py:_migrate()` 仅保留旧库补列兼容；失败会以 ERROR 汇总，不再静默。
+- 新列/索引/约束必须进 revision；改完记得在本地和测试库各跑一次 `upgrade head`。

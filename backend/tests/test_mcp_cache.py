@@ -14,6 +14,7 @@ from app.mcp_manager import (
     MCPManager,
     MCPServerSession,
     _server_signature,
+    _tool_name,
     make_mcp_tool,
 )
 
@@ -106,7 +107,7 @@ def test_configure_uses_cache_without_blocking(tmp_path, monkeypatch):
     tools = mgr.configure([CFG])
     assert time.time() - t0 < 1.0  # 不等待连接
     assert spawned == ["demo"]
-    assert [t.name for t in tools] == ["mcp_browser_navigate", "mcp_browser_snapshot"]
+    assert [t.name for t in tools] == ["mcp_demo_browser_navigate", "mcp_demo_browser_snapshot"]
 
     # 冷却期内不重复触发连接
     mgr._servers["demo"]._last_attempt = time.time()
@@ -180,6 +181,60 @@ def test_manager_status_reports_sessions():
     assert st["demo2"]["connected"] is False
     assert st["demo2"]["cached"] is True
     assert st["demo2"]["tool_count"] == 1
+
+
+def test_tool_names_carry_server_prefix_and_dedupe(tmp_path, monkeypatch):
+    """跨服务器同名工具不能互相覆盖：前缀取自服务器名，冲突再按顺序加后缀。"""
+    monkeypatch.setattr(
+        MCPServerSession, "start_background", lambda self, timeout=120.0: True
+    )
+    cfg_a = dict(CFG, id="a", name="GitHub")
+    cfg_b = dict(CFG, id="b", name="GitHub")  # 同名服务器：sanitize 后仍会撞
+    for cfg in (cfg_a, cfg_b):
+        cached = MCPServerSession(cfg, cache_dir=tmp_path)
+        cached.tools = SCHEMA
+        cached._save_cached_tools()
+
+    mgr = MCPManager(cache_dir=tmp_path)
+    names = [t.name for t in mgr.configure([cfg_a, cfg_b])]
+    assert names == [
+        "mcp_GitHub_browser_navigate",
+        "mcp_GitHub_browser_snapshot",
+        "mcp_GitHub_browser_navigate_2",
+        "mcp_GitHub_browser_snapshot_2",
+    ]
+
+
+def test_server_slug_prefers_ascii_brand_then_id():
+    cfg = dict(CFG, id="demo", name="Firecrawl 抓取")
+    assert _tool_name(cfg, "scrape") == "mcp_Firecrawl_scrape"
+    # 纯中文名 → 回退 id，仍能生成合法工具名
+    assert _tool_name(dict(CFG, id="demo", name="演示服务"), "scrape") == "mcp_demo_scrape"
+
+
+def test_mcp_tool_surfaces_is_error_as_error():
+    """服务端 isError=true 时必须走错误分支（不进工具缓存、状态标红）。"""
+
+    class _FakeServer:
+        name = "演示"
+
+        def __init__(self, is_error: bool) -> None:
+            self.connected = True
+            self._is_error = is_error
+
+        def call_tool(self, name, arguments):
+            return "服务端报错", self._is_error
+
+    cfg = {"id": "demo", "name": "演示"}
+    failed = make_mcp_tool(_FakeServer(True), cfg, "demo_tool", "", None)
+    result = failed.invoke({})
+    assert result["summary"].endswith("调用失败")
+    assert "服务端报错" in result["error"]
+
+    ok = make_mcp_tool(_FakeServer(False), cfg, "demo_tool", "", None)
+    result = ok.invoke({})
+    assert "error" not in result
+    assert result["output"] == "服务端报错"
 
 
 def test_manager_warm_starts_disconnected_only(tmp_path, monkeypatch):

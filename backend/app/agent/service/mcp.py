@@ -6,12 +6,17 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from sqlalchemy.orm import Session
 from ...db import repository as repo
 from ...runtime_config import effective_or
 
 
 logger = logging.getLogger(__name__)
+
+# 服务实例被多个请求线程共用：并发首请求可能同时看到 _mcp is None，
+# 各建一个 MCPManager（旧实例的服务器子进程无人回收）。
+_MCP_INIT_LOCK = threading.Lock()
 
 
 class McpMixin:
@@ -24,9 +29,11 @@ class McpMixin:
         if not effective_or(self.settings, "mcp_enabled", True):
             return []
         if self._mcp is None:
-            from ...mcp_manager import MCPManager
+            with _MCP_INIT_LOCK:
+                if self._mcp is None:
+                    from ...mcp_manager import MCPManager
 
-            self._mcp = MCPManager(cache_dir=self._mcp_cache_dir())
+                    self._mcp = MCPManager(cache_dir=self._mcp_cache_dir())
         servers = self._load_mcp_servers(db)
         if not servers:
             return []
@@ -55,9 +62,11 @@ class McpMixin:
         if db is None:
             return {"ok": False, "error": "数据库不可用", "status": {}}
         if self._mcp is None:
-            from ...mcp_manager import MCPManager
+            with _MCP_INIT_LOCK:
+                if self._mcp is None:
+                    from ...mcp_manager import MCPManager
 
-            self._mcp = MCPManager(cache_dir=self._mcp_cache_dir())
+                    self._mcp = MCPManager(cache_dir=self._mcp_cache_dir())
         servers = self._load_mcp_servers(db)
         try:
             self._mcp.configure(servers)
@@ -66,6 +75,16 @@ class McpMixin:
             logger.warning("MCP 手动连接失败：%s", exc)
             return {"ok": False, "error": str(exc), "status": {}}
         return {"ok": True, "started": started, "status": self._mcp.status()}
+
+    def shutdown(self) -> None:
+        """进程退出前关闭 MCP 会话：stdio 子进程不会随父进程自动回收。"""
+        mcp = getattr(self, "_mcp", None)
+        if mcp is None:
+            return
+        try:
+            mcp.shutdown()
+        except Exception as exc:  # noqa: BLE001 - 退出清理失败不阻断关闭
+            logger.warning("关闭 MCP 会话失败：%s", exc)
 
     @staticmethod
     def _load_mcp_servers(db: Session | None) -> list[dict]:

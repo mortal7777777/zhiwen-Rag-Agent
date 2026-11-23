@@ -69,6 +69,39 @@ def usage_summary() -> dict:
     return get_usage_collector().summary()
 
 
+def cache_tokens_from_usage(usage: dict | None) -> tuple[int, int]:
+    """从各家 usage 结构提取 (缓存命中, 未命中) token。
+
+    字段差异：
+    - DeepSeek 官方: prompt_cache_hit_tokens / prompt_cache_miss_tokens
+    - OpenAI 官方: prompt_tokens_details.cached_tokens（只有命中数）
+    - LangChain usage_metadata: input_token_details.cache_read（input_tokens 含命中）
+    - Anthropic: cache_read_input_tokens / cache_creation_input_tokens
+    只有命中数时用输入总量反推未命中，否则成本会漏掉全部未缓存输入
+    （命中率也会虚高到 100%）。
+    """
+    if not usage:
+        return 0, 0
+    hit = usage.get("prompt_cache_hit_tokens")
+    miss = usage.get("prompt_cache_miss_tokens")
+    if hit is None and isinstance(usage.get("prompt_tokens_details"), dict):
+        hit = usage["prompt_tokens_details"].get("cached_tokens")
+    if hit is None and isinstance(usage.get("input_token_details"), dict):
+        hit = usage["input_token_details"].get("cache_read")
+    if hit is None:
+        read_tok = usage.get("cache_read_input_tokens")
+        create_tok = usage.get("cache_creation_input_tokens")
+        if read_tok is not None or create_tok is not None:
+            hit = int(read_tok or 0) + int(create_tok or 0)
+    if hit is None and miss is None:
+        return 0, 0
+    hit = int(hit or 0)
+    if miss is None:
+        total_in = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        miss = max(0, total_in - hit)
+    return hit, int(miss or 0)
+
+
 class UsageCollector(BaseCallbackHandler):
     """LangChain Callback：on_llm_end 时累加 token 用量。"""
 
@@ -134,39 +167,9 @@ class UsageCollector(BaseCallbackHandler):
             self._cache_miss_tokens += max(0, miss_tokens)
 
     def add_cache_usage(self, usage: dict) -> None:
-        """从 usage_metadata 提取缓存命中/未命中 token（兼容多家字段名）。
-
-        各 provider 的字段名差异：
-        - DeepSeek 官方: prompt_tokens_details.cached_tokens
-        - LangChain usage_metadata: input_token_details.cache_read
-        - OpenAI 官方: prompt_tokens_details.cached_tokens
-        - Anthropic: cache_creation_input_tokens / cache_read_input_tokens
-        """
-        if not usage:
-            return
-        hit = usage.get("prompt_cache_hit_tokens")
-        miss = usage.get("prompt_cache_miss_tokens")
-        if hit is None and isinstance(usage.get("prompt_tokens_details"), dict):
-            details = usage["prompt_tokens_details"]
-            hit = details.get("cached_tokens")
-        # LangChain usage_metadata 结构：input_token_details.cache_read
-        if hit is None and isinstance(usage.get("input_token_details"), dict):
-            details = usage["input_token_details"]
-            hit = details.get("cache_read")
-            if hit is not None:
-                total_in = int(usage.get("input_tokens") or 0)
-                miss = max(0, total_in - int(hit))
-        # Anthropic 风格：cache_read_input_tokens / cache_creation_input_tokens
-        if hit is None:
-            read_tok = usage.get("cache_read_input_tokens")
-            create_tok = usage.get("cache_creation_input_tokens")
-            if read_tok is not None or create_tok is not None:
-                hit = int(read_tok or 0) + int(create_tok or 0)
-                total_in = int(usage.get("input_tokens") or 0)
-                miss = max(0, total_in - int(hit))
-        if miss is None and hit is None:
-            return
-        self.add_cache(int(hit or 0), int(miss or 0))
+        """从 usage_metadata 提取缓存命中/未命中 token（兼容多家字段名）。"""
+        hit, miss = cache_tokens_from_usage(usage)
+        self.add_cache(hit, miss)
 
     def summary(self) -> dict:
         with self._lock:

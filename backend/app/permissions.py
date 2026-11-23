@@ -6,11 +6,14 @@ POST /agent/resume 续跑），本模块不再持有待审批请求，只剩两�
 - 会话级"不再询问"命令白名单（进程内单例，随会话生命周期）。
 
 策略（tool_permission_mode）：
-- ask   （默认）：敏感操作必须人工确认（对应 Claude Code 默认行为）；
-- allow        ：自动批准所有敏感操作（对应 Claude Code --dangerously-skip-permissions）。
+- ask        （默认）：敏感操作必须人工确认（对应 Claude Code 默认行为）；
+- acceptedits       ：工作区内的文件写/改/删自动批准（高危文件路径仍确认），
+                       命令、技能、知识库写入照常确认（对应 Claude Code acceptEdits）；
+- allow             ：自动批准所有敏感操作（对应 Claude Code --dangerously-skip-permissions）。
 
 命令白名单是"自动放行前缀"：命中白名单的命令无需确认直接执行，
 未命中的命令在 ask 模式下仍需人工确认——白名单不是唯一通行证，确认才是兜底。
+Docker 沙箱内命令可在设置页选择免确认（sandbox_auto_allow），高危命令除外。
 """
 
 from __future__ import annotations
@@ -29,10 +32,18 @@ SENSITIVE_TOOLS = {
     "edit_file",
     "delete_file",
     "bash",
+    "bash_background",
     "command_tool",
     "add_document",
     "write_skill",
 }
+
+# acceptEdits 模式自动批准的文件工具（只覆盖工作区内的写/改/删；
+# high_risk_file_operation 命中的路径仍在 tools 节点强制确认）
+FILE_EDIT_TOOLS = {"write_file", "edit_file", "delete_file"}
+
+# 命令类工具：沙箱免确认与命令白名单只对它们生效
+COMMAND_TOOLS = {"bash", "command_tool", "bash_background"}
 
 # 旧版 file_tool 中需要确认的操作（兼容保留）
 SENSITIVE_FILE_OPS = {"write", "append", "edit", "delete", "move", "mkdir"}
@@ -89,7 +100,7 @@ def is_sensitive_tool(name: str, args: dict | None = None) -> bool:
 def display_args(name: str, args: dict | None = None) -> dict:
     """把工具参数转成适合展示的形态（大段内容只留预览，避免刷屏）。"""
     args = args or {}
-    if name in ("bash", "command_tool"):
+    if name in ("bash", "command_tool", "bash_background"):
         return {
             "command": str(args.get("command") or ""),
             "cwd": str(args.get("cwd") or ""),
@@ -155,11 +166,12 @@ def describe_tool_call(name: str, args: dict | None = None) -> str:
     """生成一句话操作描述，用于审批卡片与状态栏。"""
     args = args or {}
     path = str(args.get("path") or "")
-    if name in ("bash", "command_tool"):
+    if name in ("bash", "command_tool", "bash_background"):
         command = str(args.get("command") or "")
         first = command.strip().split()[0].lower() if command.strip() else ""
         hint = _BASH_HINTS.get(first, "执行命令")
-        return f"{hint}（{first or '?'}）"
+        prefix = "后台" if name == "bash_background" else ""
+        return f"{prefix}{hint}（{first or '?'}）"
     if name == "write_file":
         return f"写入文件 {path}（{len(str(args.get('content') or ''))} 字符）"
     if name == "edit_file":
@@ -191,6 +203,12 @@ class PermissionManager:
 
     def mark_session_allowed(self, conversation_id: int | None, command: str) -> None:
         if not conversation_id or not command.strip():
+            return
+        from .command_risk import high_risk_command
+
+        if high_risk_command(command):
+            # 高危命令不进入会话白名单：每次都必须重新确认
+            logger.warning("忽略高危命令的会话记忆请求：%s", command.strip()[:120])
             return
         with self._lock:
             self._session_allowed.setdefault(conversation_id, set()).add(command.strip())

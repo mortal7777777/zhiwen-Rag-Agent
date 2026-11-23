@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from app.api.agent import (
     agent_chat,
     agent_stream,
+    _reject_if_busy,
     is_conversation_active,
     request_cancel,
     try_register_active_run,
@@ -105,5 +106,34 @@ def test_chat_endpoint_rejected_when_conversation_active():
                 _ChatService(),
             )
         assert exc.value.status_code == 409
+        # 2026-11-19：闸门 409 带结构化错误码（前端按码恢复 UI，不再匹配中文文案）
+        assert exc.value.headers["X-Zhiwen-Code"] == "conversation_busy"
+    finally:
+        unregister_active_run(rid)
+
+
+def test_reject_if_busy_codes():
+    """挂起 / 中断 / 运行中三种闸门各自携带 X-Zhiwen-Code。"""
+
+    class _StateService:
+        def pending_state(self, conversation_id):
+            if conversation_id == 1:
+                return {"pending": True}
+            if conversation_id == 2:
+                return {"interrupted": True}
+            return {}
+
+    for cid, expected in ((1, "pending_approval"), (2, "run_interrupted")):
+        with pytest.raises(HTTPException) as exc:
+            _reject_if_busy(cid, _StateService())
+        assert exc.value.status_code == 409
+        assert exc.value.headers["X-Zhiwen-Code"] == expected
+
+    rid = try_register_active_run(threading.Event(), conversation_id=3)
+    assert rid is not None
+    try:
+        with pytest.raises(HTTPException) as exc:
+            _reject_if_busy(3, _StateService())
+        assert exc.value.headers["X-Zhiwen-Code"] == "conversation_busy"
     finally:
         unregister_active_run(rid)

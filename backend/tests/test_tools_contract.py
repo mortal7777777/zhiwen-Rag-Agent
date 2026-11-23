@@ -20,7 +20,9 @@ from app.agent.utils import _tools_prefix_hash, _tools_prefix_size
 from app.config import Settings
 
 # 工具面预算（字符）：2026-10-08 压缩前 5,747（含技能/视觉时约 7.3k），
-# 压缩后 5,155 → 上限 5,400（约 4.5% 余量）。要加工具请先压缩或改按需注册。
+# 压缩后 5,155 → 上限 5,400。2026-11-09 新增 ask_user_question 时把
+# @tool docstring 在 args schema 里的重复文本去掉（知识库检索/联网/写文档
+# 三处），净增 130 → 当前 5,285。要加工具请先压缩或改按需注册。
 TOOLS_CHARS_BUDGET = 5400
 
 
@@ -77,6 +79,8 @@ def test_subagent_and_advanced_tools_switches(monkeypatch):
     base = {t.name for t in _build(_service(monkeypatch))}
     assert "dispatch_subtasks" in base
     assert "write_file" in base
+    # 提问工具无条件注册：tools 数组参与前缀缓存键，会话内不得变化
+    assert "ask_user_question" in base
 
     no_sub = {
         t.name
@@ -99,6 +103,33 @@ def test_tool_surface_stays_within_char_budget(monkeypatch):
         f"工具面 {size} 字符，超过预算 {TOOLS_CHARS_BUDGET}："
         "请压缩描述/schema，或按需注册低频工具后再调高预算（并在提交说明里写明原因）"
     )
+
+
+def test_background_tools_registered_for_conversation(monkeypatch):
+    """已有会话时追加后台任务三件套；工具面有单独预算。"""
+    svc = _service(monkeypatch)
+    tools = svc.build_tool_list(
+        None,
+        use_web_search=True,
+        use_knowledge_base=True,
+        conv_id=1,
+        project_dir=None,
+        command_sandbox=None,
+    )
+    names = {t.name for t in tools}
+    assert {"bash_background", "bash_output", "bash_kill"} <= names
+    size = _tools_prefix_size(tools)
+    assert size <= 6400, f"会话内工具面 {size} 字符，超过后台任务预算 6400"
+    # 同一会话重复构建仍字节稳定
+    again = svc.build_tool_list(
+        None,
+        use_web_search=True,
+        use_knowledge_base=True,
+        conv_id=1,
+        project_dir=None,
+        command_sandbox=None,
+    )
+    assert _tools_prefix_hash(tools) == _tools_prefix_hash(again)
 
 
 def test_tools_breakdown_splits_mcp():

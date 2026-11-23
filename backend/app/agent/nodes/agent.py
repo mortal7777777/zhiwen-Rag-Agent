@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import queue as _queue
+import re
 import threading as _threading
 import time
 
 
 from ...config import Settings
 from ...llm_text import extract_thinking_blocks, extract_thinking_text, message_text
-from ...runtime_config import effective, effective_or
+from ...runtime_config import chat_model_supports_vision, effective, effective_or
 
 logger = logging.getLogger(__name__)
 from ..state import AgentState, EventBus
@@ -37,14 +39,32 @@ from ..utils import (
     _strip_xml_tool_tags,
 )
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..langgraph_agent import LangGraphAgentService  # 仅类型注解
-from ...tracing import get_usage_collector
+from ...tracing import cache_tokens_from_usage, get_usage_collector
 
 # ==== 函数体（原文）====
 _STREAM_DONE = object()
+
+
+def _elapsed_ms(rt: dict, deps) -> int:
+    """本轮已执行的纯耗时（毫秒），跨挂起累计但不含人工审批等待。
+
+    优先用 Deps 的本段起点：挂起/崩溃续跑时 state.runtime 里的 `started`
+    是上一段（甚至上次开机）的 perf_counter 基准，直接相减会把审批等待和
+    停机时间算进去（实测回放里出现 8 小时的首 token 与相对时刻）。
+    图外直调（测试/兜底）没有 Deps.started 时退回状态时钟。
+    """
+    started = float(getattr(deps, "started", 0.0) or 0.0)
+    if started:
+        base = int(getattr(deps, "elapsed_ms", 0) or 0)
+        return base + max(0, round((time.perf_counter() - started) * 1000))
+    state_started = float((rt or {}).get("started") or 0.0)
+    if state_started:
+        return max(0, round((time.perf_counter() - state_started) * 1000))
+    return 0
 _DEFAULT_STALL_TIMEOUT_S = 150.0
 # 空正文重试上限：思考模式下一次 32000 输出预算全被 reasoning 吃光并不罕见
 # （2026-09-24 实测），只给一次机会太紧；重试轮本身已改用无思考模型。
@@ -167,6 +187,83 @@ def _stall_timeout(settings: Settings) -> float:
     return value if value > 0 else _DEFAULT_STALL_TIMEOUT_S
 
 
+def _compose_model_messages(
+    state_messages: list, prefix: list, insert_at: int
+) -> list:
+    """把 Deps 里的历史前缀插回静态前缀之后，组成实际发给模型的消息链。"""
+    if not prefix:
+        return list(state_messages)
+    return (
+        list(state_messages[:insert_at])
+        + list(prefix)
+        + list(state_messages[insert_at:])
+    )
+
+
+def _strip_model_prefix(
+    messages: list, prefix_len: int, insert_at: int
+) -> list:
+    """模型消息落回 state 前剔除只用于本次调用的历史前缀。"""
+    if not prefix_len:
+        return messages
+    return messages[:insert_at] + messages[insert_at + prefix_len:]
+
+
+_VISUAL_QUESTION_RE = re.compile(
+    r"图|形状|推理|选项|如图|折线|柱状|表格|图表|例\s*\d+|"
+    r"第\s*\d+\s*题|第[一二三四五六七八九十]+\s*题"
+)
+
+
+def _kb_image_paths_from_state(state_messages: list, limit: int) -> list[str]:
+    """从本轮（最后一条 HumanMessage 之后）的 ToolMessage 中提取 KB 图片路径。"""
+    start = 0
+    for index, message in enumerate(state_messages):
+        if isinstance(message, HumanMessage):
+            start = index
+    paths: list[str] = []
+    seen: set[str] = set()
+    for message in state_messages[start:]:
+        if not isinstance(message, ToolMessage):
+            continue
+        content = getattr(message, "content", None)
+        if not isinstance(content, str):
+            continue
+        try:
+            data = json.loads(content)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for item in data.get("results") or []:
+            if not isinstance(item, dict):
+                continue
+            for image in item.get("images") or []:
+                path = str(image.get("path") or "")
+                if path and path not in seen:
+                    seen.add(path)
+                    paths.append(path)
+                    if len(paths) >= limit:
+                        return paths
+    return paths
+
+
+def _vision_message(data_urls: list[str]) -> HumanMessage:
+    content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                "以下是本轮知识库检索命中的图片（题目图形/表格/选项）。"
+                "请结合这些图片与上面的检索文本作答，图片内容优先。"
+            ),
+        }
+    ]
+    content.extend(
+        {"type": "image_url", "image_url": {"url": url}} for url in data_urls
+    )
+    return HumanMessage(content=content)
+
+
 def _agent_node(state: AgentState, runtime) -> dict:
     """第二参数是 LangGraph 按名注入的 Runtime；请求级依赖取 `runtime.context`。"""
     deps = runtime.context
@@ -174,7 +271,25 @@ def _agent_node(state: AgentState, runtime) -> dict:
     bus: EventBus = deps.bus
     settings: Settings = service.settings
     rt: dict = state["runtime"]
-    messages = state["messages"]
+    # 历史前缀在 Deps（不进检查点）：调用模型时插回静态前缀之后；
+    # state["messages"] 本身不持有历史，避免每个 superstep 重复序列化。
+    state_messages = state["messages"]
+    history_prefix = list(getattr(deps, "prefix_messages", None) or [])
+    history_insert_at = int(state.get("history_insert_at") or 0)
+    messages = _compose_model_messages(
+        state_messages, history_prefix, history_insert_at
+    )
+    model_messages = messages
+    if chat_model_supports_vision(settings) and _VISUAL_QUESTION_RE.search(
+        str(state.get("question") or "")
+    ):
+        image_limit = int(effective(settings, "kb_vision_max_images") or 3)
+        image_paths = _kb_image_paths_from_state(state_messages, image_limit)
+        if image_paths:
+            image_urls = service.rag.load_image_data_urls(image_paths, image_limit)
+            if image_urls:
+                logger.info("主模型视觉：注入 %d 张知识库图片", len(image_urls))
+                model_messages = list(messages) + [_vision_message(image_urls)]
     tools = deps.tools
     stop_event = deps.stop_event
 
@@ -219,7 +334,7 @@ def _agent_node(state: AgentState, runtime) -> dict:
         )
         chunks: list = []
         stream = chat.stream(
-            messages,
+            model_messages,
             config={"callbacks": [get_usage_collector()]},
         )
         # deepseek 等推理模型在工具调用轮次会先输出大量过渡思考文本
@@ -326,9 +441,7 @@ def _agent_node(state: AgentState, runtime) -> dict:
                 # TTFT 打点：首个内容 chunk 到达（含工具轮过渡文本，即 API 首字）
                 timings = rt.setdefault("timings", {})
                 if "first_token_ms" not in timings:
-                    timings["first_token_ms"] = round(
-                        (time.perf_counter() - rt["started"]) * 1000
-                    )
+                    timings["first_token_ms"] = _elapsed_ms(rt, deps)
                 buf_parts.append(delta)
                 # 增量推送正文：用户不必等整段生成完才见到第一个字。
                 # 工具轮的过渡思考文本也已推送，由下面的 stream_end 撤回。
@@ -346,7 +459,7 @@ def _agent_node(state: AgentState, runtime) -> dict:
     if stalled:
         if buf_parts:
             # 已推送的文本属于未完成轮（不落库），整轮撤回保持前后端一致
-            bus.emit("stream_end", {"keep": False})
+            bus.emit("stream_end", {"keep": False, "reason": "stalled"})
         rt["status"] = "error"
         rt["error"] = (
             f"模型响应卡死：连续 {stall_s:.0f} 秒未收到任何输出，已中断本轮。"
@@ -369,7 +482,7 @@ def _agent_node(state: AgentState, runtime) -> dict:
         }
     if stream_error is not None:
         if buf_parts:
-            bus.emit("stream_end", {"keep": False})
+            bus.emit("stream_end", {"keep": False, "reason": "stream_error"})
         rt["status"] = "error"
         rt["error"] = (
             f"模型调用中断：{type(stream_error).__name__}: {stream_error}"
@@ -397,7 +510,7 @@ def _agent_node(state: AgentState, runtime) -> dict:
     if stopped():
         if buf_parts:
             # 停止生成：本轮的文本不落库，前端也撤回，避免"看到了但刷新就没了"
-            bus.emit("stream_end", {"keep": False})
+            bus.emit("stream_end", {"keep": False, "reason": "stopped"})
         return {}
     if not chunks:
         # 模型没有输出（如空响应）：直接收尾，避免死循环
@@ -423,16 +536,14 @@ def _agent_node(state: AgentState, runtime) -> dict:
             int(usage.get("output_tokens") or 0),
         )
         get_usage_collector().add_cache_usage(dict(usage))
-        # 逐调用遥测（P2）：定位轮内断链——哪次调用、命中多少 token
+        # 逐调用遥测（P2）：定位轮内断链——哪次调用、命中多少 token。
+        # read 与聚合口径共用 cache_tokens_from_usage（各家字段名不同）。
         rt.setdefault("calls", []).append(
             {
                 "in": int(usage.get("input_tokens") or 0),
                 "out": int(usage.get("output_tokens") or 0),
-                "read": int(
-                    ((usage.get("input_token_details") or {}).get("cache_read"))
-                    or 0
-                ),
-                "t_ms": round((time.perf_counter() - rt["started"]) * 1000),
+                "read": cache_tokens_from_usage(dict(usage))[0],
+                "t_ms": _elapsed_ms(rt, deps),
             }
         )
 
@@ -487,6 +598,11 @@ def _agent_node(state: AgentState, runtime) -> dict:
                 messages.append(
                     SystemMessage(content=downgraded_notice(downgraded))
                 )
+                rt = state.get("runtime")
+                if isinstance(rt, dict):
+                    rt["dispatch_downgraded"] = (
+                        int(rt.get("dispatch_downgraded") or 0) + downgraded
+                    )
     # 工具轮：content 是过渡思考文本，不写入消息历史（避免下一轮
     # 重复发送 + 污染上下文）；只保留 tool_calls 供 tools 节点执行
     if tool_calls:
@@ -541,8 +657,9 @@ def _agent_node(state: AgentState, runtime) -> dict:
         bus.emit("reasoning_delta", "".join(think_buf))
         think_buf.clear()
     if buf_parts and is_tool_round:
-        # 工具轮的过渡思考文本已随流增量推送：整轮撤回（不展示、不入历史）
-        bus.emit("stream_end", {"keep": False})
+        # 工具轮的过渡思考文本已随流增量推送：整轮撤回（不入历史）。
+        # reason 让前端把这段文本归档为「过程说明」，而不是直接丢掉。
+        bus.emit("stream_end", {"keep": False, "reason": "tool_round"})
     if not is_tool_round and buf_parts:
         # 逐片清理 XML 工具调用标记：sensenova 等模型偶尔把
         # <tool_calls> 写进正文，直接展示会泄漏
@@ -565,6 +682,7 @@ def _agent_node(state: AgentState, runtime) -> dict:
     ):
         state["xml_retry_count"] = int(state.get("xml_retry_count") or 0) + 1
         _bump_patch(rt, "xml_retry")
+        bus.emit("status", {"phase": "retry", "text": "输出格式异常，正在重试…"})
         messages.append(SystemMessage(content=XML_RETRY_HINT))
         xml_force = True
 
@@ -582,6 +700,10 @@ def _agent_node(state: AgentState, runtime) -> dict:
     ):
         state["empty_retry_count"] = int(state.get("empty_retry_count") or 0) + 1
         _bump_patch(rt, "empty_retry")
+        bus.emit(
+            "status",
+            {"phase": "retry", "text": "本轮没有产出正文，正在重试…"},
+        )
         # 下一轮用无思考模型：只有一次机会，不能再被 reasoning 吃光
         state["empty_retry_pending"] = True
         messages.append(SystemMessage(content=EMPTY_RETRY_HINT))
@@ -618,6 +740,10 @@ def _agent_node(state: AgentState, runtime) -> dict:
                     int(state.get("plan_push_count") or 0) + 1
                 )
                 _bump_patch(rt, "plan_push")
+                bus.emit(
+                    "status",
+                    {"phase": "plan", "text": "计划还有未完成步骤，继续执行…"},
+                )
                 messages.append(
                     SystemMessage(content=plan_remaining_notice(remaining))
                 )
@@ -649,7 +775,10 @@ def _agent_node(state: AgentState, runtime) -> dict:
         plan_submit_force = True
 
     return {
-        "messages": messages,
+        # 落回 state 的消息必须剔除临时插入的历史前缀（它只用于本次模型调用）
+        "messages": _strip_model_prefix(
+            messages, len(history_prefix), history_insert_at
+        ),
         "pending_tool_calls": exec_calls,
         "tool_calls_used": state["tool_calls_used"],
         "forced_final": state["forced_final"],

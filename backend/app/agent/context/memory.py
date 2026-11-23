@@ -89,6 +89,17 @@ _memory_vec_cache: dict[int, tuple[str, list[float]]] = {}
 _memory_vec_lock = threading.Lock()
 
 
+# 缓存上限：单机长跑时记忆条数可能持续增长，不设上限会让进程内存单调上涨。
+_MEMORY_VEC_CACHE_MAX = 2048
+
+
+def _cache_memory_vector(memory_id: int, updated_at, vector: list[float]) -> None:
+    """写入记忆向量缓存并按插入序淘汰最旧条目（调用方需持锁）。"""
+    _memory_vec_cache[int(memory_id)] = (str(updated_at or ""), list(vector))
+    while len(_memory_vec_cache) > _MEMORY_VEC_CACHE_MAX:
+        _memory_vec_cache.pop(next(iter(_memory_vec_cache)), None)
+
+
 def _cosine(a, b) -> float:
     """余弦相似度（显式归一，不假设向量已单位化）。"""
     try:
@@ -287,8 +298,9 @@ class MemoryMixin:
             for i, vec in zip(missing, fresh):
                 vec_list = list(vec)
                 vectors[i] = vec_list
-                _memory_vec_cache[int(memories[i]["id"])] = (
-                    str(memories[i].get("updated_at") or ""),
+                _cache_memory_vector(
+                    memories[i]["id"],
+                    memories[i].get("updated_at"),
                     vec_list,
                 )
         return vectors
@@ -411,26 +423,36 @@ class MemoryMixin:
         """
         existing = repo.list_memories(db, limit=1000)
         existing_texts = [m["content"] for m in existing]
-        existing_vecs: list = []
-        try:
-            if existing_texts:
-                existing_vecs = list(
-                    embeddings.embed_documents(existing_texts, batch_size=64)
-                )
-        except Exception as exc:
-            logger.warning("既有记忆向量化失败，降级为纯文本去重：%s", exc)
+        # 复用按 (id, updated_at) 失效的向量缓存：只有新写入/改过的记忆才重算，
+        # 不再每轮把全库最多 1000 条重新送进 BGE/API。
+        existing_vecs: list = [
+            vec
+            for vec in self._memory_vectors(embeddings, existing)
+            if vec is not None
+        ]
         added = 0
         for fact in facts:
             content = fact["content"]
             category = fact.get("category", "other")
             if self._is_duplicate(content, existing_texts, existing_vecs, embeddings):
                 continue
-            repo.add_memory(db, content, category=category, source_conversation_id=source_conversation_id)
+            memory = repo.add_memory(
+                db,
+                content,
+                category=category,
+                source_conversation_id=source_conversation_id,
+            )
             existing_texts.append(content)
             try:
-                existing_vecs.append(embeddings.embed_query(content))
+                new_vec = embeddings.embed_query(content)
             except Exception:
-                pass
+                new_vec = None
+            if new_vec is not None:
+                existing_vecs.append(new_vec)
+                with _memory_vec_lock:
+                    _cache_memory_vector(
+                        memory.id, getattr(memory, "updated_at", None), new_vec
+                    )
             added += 1
         return added
 
@@ -687,6 +709,12 @@ class MemoryMixin:
                     "before": before_snapshot,
                 },
             )
+            if actually_archived:
+                # 归档/合并后这些 id 不再参与召回，缓存条目直接丢弃；
+                # 合并后的主记录 updated_at 已变，下次读取会自动重算。
+                with _memory_vec_lock:
+                    for mid in actually_archived:
+                        _memory_vec_cache.pop(int(mid), None)
             # 只归档"非合并项"= 删除而非去重：给一个可观测的告警
             # （历史事故：46 条压成 2 条，其中 33 条曾被召回）
             deleted_like = actually_archived - merged_sources

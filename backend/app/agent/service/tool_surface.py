@@ -24,6 +24,8 @@ class ToolSurfaceMixin:
         conv_id: int | None,
         project_dir: str | None,
         command_sandbox: str | None,
+        kb_scope_paths: list[str] | None = None,
+        counter: list[int] | None = None,
     ) -> list:
         """按开关组装本轮工具集。
 
@@ -34,6 +36,7 @@ class ToolSurfaceMixin:
         settings = self.settings
         from ..tools import (
             build_tools,
+            make_ask_user_question_tool,
             make_enter_plan_mode_tool,
             make_exit_plan_mode_tool,
         )
@@ -53,7 +56,7 @@ class ToolSurfaceMixin:
             use_web_search,
             use_knowledge_base,
             effective(settings, "web_search_provider"),
-            settings.tavily_api_key,
+            effective(settings, "tavily_api_key") or "",
             effective(settings, "web_search_max_results"),
             crag_enabled=bool(effective(settings, "crag_fallback_enabled")),
             crag_min_score=float(effective(settings, "crag_min_score") or 0.45),
@@ -63,11 +66,15 @@ class ToolSurfaceMixin:
             searxng_base_url=effective(settings, "searxng_base_url") or "",
             searxng_engines=effective(settings, "searxng_engines") or "",
             conv_id=conv_id,
+            kb_scope_paths=kb_scope_paths,
+            counter=counter,
         )
         # 扩展工具：MCP + 受控执行（文件/命令，敏感操作走人工确认）
         tools.extend(self.mcp_tools(db))
         tools.extend(
-            self.extra_tools(project_dir=project_dir, sandbox=command_sandbox)
+            self.extra_tools(
+                project_dir=project_dir, sandbox=command_sandbox, conv_id=conv_id
+            )
         )
         # 用户自写工具（动态目录）：每次重建自动加载（新工具下一个请求即生效）
         try:
@@ -101,6 +108,12 @@ class ToolSurfaceMixin:
                 tools.append(make_exit_plan_mode_tool())
             except Exception as exc:
                 logger.warning("计划模式工具加载失败：%s", exc)
+        # 向用户提问（结构化选项）：必须无条件注册——工具数组参与前缀缓存键，
+        # 会话内变化会整链断缓存。是否提问由模型与工具描述决定，无副作用。
+        try:
+            tools.append(make_ask_user_question_tool())
+        except Exception as exc:
+            logger.warning("提问工具加载失败：%s", exc)
         # 基准实例：只暴露指定工具（避免 todo/文件/派发等工具干扰 τ²/CRAG 评测）。
         # 未设置环境变量时行为与原来完全一致。
         allow = os.environ.get("ZHIWEN_BENCH_TOOL_ALLOWLIST", "").strip()
@@ -110,18 +123,22 @@ class ToolSurfaceMixin:
         return tools
 
     def extra_tools(
-        self, project_dir: str | None = None, sandbox: str | None = None
+        self,
+        project_dir: str | None = None,
+        sandbox: str | None = None,
+        conv_id: int | None = None,
     ) -> list:
         """受控执行工具：类 Claude Code 文件/命令工具集（需在设置中开启总开关）。
 
         sandbox：请求级沙箱覆盖（subprocess|docker），空则跟随设置页。
+        conv_id：已有会话时追加后台任务工具。
         """
         if not effective_or(self.settings, "advanced_tools_enabled", True):
             return []
         try:
             from ...tools_extra import make_agent_tools
 
-            return make_agent_tools(self.settings, project_dir, sandbox)
+            return make_agent_tools(self.settings, project_dir, sandbox, conv_id)
         except Exception as exc:
             logger.warning("受控执行工具加载失败：%s", exc)
             return []

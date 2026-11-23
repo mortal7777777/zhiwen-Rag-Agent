@@ -54,7 +54,7 @@ class Settings:
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash"
-    main_model_vision: bool = False  # 主对话模型是否原生支持视觉（DeepSeek V4 Flash 不支持）
+    main_model_vision: bool = False  # 旧全局兜底；优先按供应商 supports_vision + vision_models 判定
 
     # ---- 视觉模型：日日新 SenseNova（多模态，用于识图 / OCR / 图片理解）----
     sensenova_api_key: str = ""
@@ -63,6 +63,9 @@ class Settings:
     vision_timeout: int = 120
     vision_auto_describe: bool = True   # 用户上传图片时自动用视觉模型生成描述并注入上下文
     vision_max_images: int = 6          # 单次最多识别图片数
+    # 知识库检索命中图片块时，是否用视觉模型识图并注入回答上下文
+    kb_vision_image_answer: bool = True
+    kb_vision_max_images: int = 3       # 单次检索最多送几张知识库图片给视觉模型
 
     # ---- MySQL（对话记忆 / 会话 / 提示词模板）----
     mysql_url: str = (
@@ -96,14 +99,21 @@ class Settings:
     chat_temperature: float = 0.5       # 普通回答温度
     history_max_messages: int = 400     # 历史窗口行数上限：超 1.5× 才压缩到该条数（粘滞窗口，见 compact_conversation）
     agent_title_model: str = "deepseek-v4-flash"
+    # 写后回读 / 答复核对 / 变更前预校验 / 转人工授权检查。
+    # env-only 开关（不进设置页）：默认开启，A/B 或排障时用 0 关闭。
+    agent_tool_readback: bool = True
+    agent_answer_lint: bool = True
+    agent_tool_preflight: bool = True
+    agent_transfer_consent: bool = True
 
     # ---- 记忆与上下文工程 ----
     summary_enabled: bool = True        # 会话滚动摘要（压缩早期对话）
     summary_max_chars: int = 800        # 摘要最大字符数
-    history_max_tokens: int = 128000    # 历史 token 预算兜底（未绑定模板/未知类别时；按模板类别见 history_budget_*）
-    # 历史窗口 token 预算（按提示词模板类别取用，检索型可小、编码/写作需要更长原始上下文）
-    history_budget_general: int = 128000
-    history_budget_knowledge: int = 128000
+    history_max_tokens: int = 400000    # 历史 token 预算兜底（未绑定模板/未知类别时；按模板类别见 history_budget_*）
+    # 历史窗口 token 预算（按提示词模板类别取用；1M 窗口模型下统一给 400K，
+    # 非长窗口模型会被 _clamp_to_context_window 自动夹回 窗口−预留）
+    history_budget_general: int = 400000
+    history_budget_knowledge: int = 400000
     # 编码/写作给足长上下文（配合 [1m] 长窗口模型；非长窗口模型会被
     # _clamp_to_context_window 自动夹回 窗口−预留，不会超窗报错）
     history_budget_coding: int = 400000
@@ -146,6 +156,22 @@ class Settings:
     pdf_vision_ocr_enabled: bool = False  # 扫描件/图片页是否用视觉模型做 OCR（需配置 SenseNova key）
     pdf_vision_ocr_max_pages: int = 20    # 单文件最多 OCR 页数（防止烧额度）
     pdf_parse_workers: int = 0            # 大 PDF 布局解析并行进程数（实测本机并行无增益，默认串行）
+    # 2026-11-17 混合解析：auto=按画像路由；pymupdf=只用原生；paddle=复杂文档全走 Worker
+    pdf_parse_backend: str = "auto"
+    paddle_ocr_url: str = "http://127.0.0.1:8090"
+    paddle_ocr_device: str = "cpu"        # cpu|gpu（GPU Worker 会与后端争显存）
+    paddle_ocr_lazy_start: bool = True    # Worker 未启动时按需拉起
+    paddle_ocr_idle_timeout_s: int = 600  # Worker 空闲多久自动退出（0=不退出）
+    paddle_ocr_pages_per_process: int = 300  # 单进程最多 OCR 页数，到点退出由客户端重启（0=不限）
+    paddle_ocr_dpi: int = 200
+    paddle_ocr_timeout: int = 120
+    paddle_ocr_max_image_ocr: int = 6      # 单页最多对几张图片块做文字识别（0=关闭）
+    paddle_ocr_confidence_min: float = 0.8  # 低于该平均置信度标记待复核（VLM 兜底预留）
+    paddle_ocr_vlm_fallback: bool = False   # 图片块/近空页是否调用 VLM 兜底（默认关，本地为主）
+
+    # ---- GPU 模型生命周期（2026-11-18）----
+    # 空闲 N 分钟后释放本地 BGE/reranker（0=常驻）；释放后下次使用自动重载
+    gpu_model_idle_unload_minutes: int = 30
 
     # ---- 嵌入性能 ----
     embedding_fp16: bool = True           # CUDA 下用 fp16 嵌入（实测约 3 倍提速）
@@ -189,6 +215,7 @@ class Settings:
     max_concurrency: int = 4              # 同时处理的问答请求数（GPU/检索保护）
     llm_max_concurrency: int = 8          # LLM API 调用并发上限（生成阶段不占 GPU 锁）
     tracing_enabled: bool = True          # 结构化 trace（JSONL，本地可观测性）
+    prompt_versioning_enabled: bool = True  # 系统提示词按会话锁版本（紧急回滚开关）
     usd_cny_rate: float = 7.2             # 用量面板 USD→CNY 汇率（成本估算用）
 
     # ---- 高级工具（P0：受控执行 / MCP / checkpoint / 记忆文件）----
@@ -217,6 +244,7 @@ class Settings:
     command_allowlist: str = ""           # 命令白名单（逗号分隔的命令前缀，空=禁止执行）
     command_timeout: int = 60             # 命令执行超时（秒）
     command_sandbox: str = "subprocess"   # subprocess | docker（docker=容器沙箱）
+    command_shell: str = "auto"           # auto|gitbash|wsl|default；auto=优先 Git Bash，绝不静默选 WSL
     sandbox_image: str = "python:3.11-slim"  # docker 沙箱镜像
     sandbox_workspace_readonly: bool = False  # 沙箱内工作目录只读（写入走内存 /scratch）
     tool_permission_mode: str = "ask"     # ask=敏感操作人工确认；allow=自动批准（跳过确认）
@@ -229,13 +257,31 @@ class Settings:
     project_memory_max_chars: int = 2600
     mcp_enabled: bool = True              # MCP 工具接入总开关
     trajectory_compress_enabled: bool = False  # 长任务轨迹摘要压缩（每次多一轮 LLM，默认关闭）
+    # 输入框「下一步建议」：每轮回答后生成 3 条追问（小模型一次调用；可环境变量关闭）
+    next_suggestions_enabled: bool = True
+    next_suggestions_cache_minutes: int = 30
     checkpoint_keep_per_thread: int = 20  # finalize 收尾时每线程保留的原生快照数
+
+    # ---- 对话附件（输入框粘贴/拖拽/上传的文件）----
+    attachment_max_files: int = 5         # 单轮最多附件数
+    attachment_max_mb: int = 20           # 单文件大小上限（MB）
+    attachment_max_chars: int = 30000     # 单文件注入上下文的字符上限
+    attachment_total_chars: int = 60000   # 单轮全部附件注入的总字符上限
+    attachment_retention_hours: int = 24  # 临时附件保留时长（小时）
 
     # ---- CORS（前端开发服务器地址）----
     cors_origins: tuple[str, ...] = (
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     )
+
+    # ---- 接口文档暴露（公开演示保持开启；对外部署置 EXPOSE_DOCS=0）----
+    expose_docs: bool = True
+
+    # ---- 全局 API Token（可选鉴权）----
+    # 设置后所有 /api/* 请求需携带 Authorization: Bearer <token>（存活/就绪
+    # 探针除外）。本机单用户可不设；对外/局域网部署务必配置（见 README 安全段）。
+    api_token: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -281,6 +327,8 @@ class Settings:
             vision_timeout=int(_env("VISION_TIMEOUT", "120")),
             vision_auto_describe=_env("VISION_AUTO_DESCRIBE", "1") == "1",
             vision_max_images=int(_env("VISION_MAX_IMAGES", "6")),
+            kb_vision_image_answer=_env("KB_VISION_IMAGE_ANSWER", "1") == "1",
+            kb_vision_max_images=int(_env("KB_VISION_MAX_IMAGES", "3")),
             mysql_url=_env(
                 "MYSQL_URL",
                 "mysql+pymysql://root:@127.0.0.1:3306/rag_assistant?charset=utf8mb4",
@@ -299,11 +347,15 @@ class Settings:
             chat_temperature=float(_env("CHAT_TEMPERATURE", "0.5")),
             history_max_messages=int(_env("HISTORY_MAX_MESSAGES", "400")),
             agent_title_model=_env("AGENT_TITLE_MODEL", "deepseek-v4-flash"),
+            agent_tool_readback=_env("AGENT_TOOL_READBACK", "1") == "1",
+            agent_answer_lint=_env("AGENT_ANSWER_LINT", "1") == "1",
+            agent_tool_preflight=_env("AGENT_TOOL_PREFLIGHT", "1") == "1",
+            agent_transfer_consent=_env("AGENT_TRANSFER_CONSENT", "1") == "1",
             summary_enabled=_env("SUMMARY_ENABLED", "1") == "1",
             summary_max_chars=int(_env("SUMMARY_MAX_CHARS", "800")),
-            history_max_tokens=int(_env("HISTORY_MAX_TOKENS", "128000")),
-            history_budget_general=int(_env("HISTORY_BUDGET_GENERAL", "128000")),
-            history_budget_knowledge=int(_env("HISTORY_BUDGET_KNOWLEDGE", "128000")),
+            history_max_tokens=int(_env("HISTORY_MAX_TOKENS", "400000")),
+            history_budget_general=int(_env("HISTORY_BUDGET_GENERAL", "400000")),
+            history_budget_knowledge=int(_env("HISTORY_BUDGET_KNOWLEDGE", "400000")),
             history_budget_coding=int(_env("HISTORY_BUDGET_CODING", "400000")),
             history_budget_writing=int(_env("HISTORY_BUDGET_WRITING", "400000")),
             history_budget_translate=int(_env("HISTORY_BUDGET_TRANSLATE", "64000")),
@@ -332,6 +384,26 @@ class Settings:
             pdf_vision_ocr_enabled=_env("PDF_VISION_OCR_ENABLED", "0") == "1",
             pdf_vision_ocr_max_pages=int(_env("PDF_VISION_OCR_MAX_PAGES", "20")),
             pdf_parse_workers=int(_env("PDF_PARSE_WORKERS", "0")),
+            pdf_parse_backend=_env("PDF_PARSE_BACKEND", "auto"),
+            paddle_ocr_url=_env("PADDLE_OCR_URL", "http://127.0.0.1:8090"),
+            paddle_ocr_device=_env("PADDLE_OCR_DEVICE", "cpu"),
+            paddle_ocr_lazy_start=_env("PADDLE_OCR_LAZY_START", "1") == "1",
+            paddle_ocr_idle_timeout_s=int(
+                _env("PADDLE_OCR_IDLE_TIMEOUT_S", "600")
+            ),
+            paddle_ocr_pages_per_process=int(
+                _env("PADDLE_OCR_PAGES_PER_PROCESS", "300")
+            ),
+            paddle_ocr_dpi=int(_env("PADDLE_OCR_DPI", "200")),
+            paddle_ocr_timeout=int(_env("PADDLE_OCR_TIMEOUT", "120")),
+            paddle_ocr_max_image_ocr=int(_env("PADDLE_OCR_MAX_IMAGE_OCR", "6")),
+            paddle_ocr_confidence_min=float(
+                _env("PADDLE_OCR_CONFIDENCE_MIN", "0.8")
+            ),
+            paddle_ocr_vlm_fallback=_env("PADDLE_OCR_VLM_FALLBACK", "0") == "1",
+            gpu_model_idle_unload_minutes=int(
+                _env("GPU_MODEL_IDLE_UNLOAD_MINUTES", "30")
+            ),
             embedding_fp16=_env("EMBEDDING_FP16", "1") == "1",
             embed_batch_size=int(_env("EMBED_BATCH_SIZE", "128")),
             parent_chunk_size=int(_env("PARENT_CHUNK_SIZE", "600")),
@@ -354,6 +426,7 @@ class Settings:
             max_concurrency=int(_env("MAX_CONCURRENCY", "4")),
             llm_max_concurrency=int(_env("LLM_MAX_CONCURRENCY", "8")),
             tracing_enabled=_env("TRACING_ENABLED", "1") == "1",
+            prompt_versioning_enabled=_env("PROMPT_VERSIONING_ENABLED", "1") == "1",
             usd_cny_rate=float(_env("USD_CNY_RATE", "7.2")),
             advanced_tools_enabled=_env("ADVANCED_TOOLS_ENABLED", "1") == "1",
             agent_subagents_enabled=_env("AGENT_SUBAGENTS_ENABLED", "1") == "1",
@@ -378,6 +451,7 @@ class Settings:
             command_allowlist=_env("COMMAND_ALLOWLIST", ""),
             command_timeout=int(_env("COMMAND_TIMEOUT", "60")),
             command_sandbox=_env("COMMAND_SANDBOX", "subprocess"),
+            command_shell=_env("COMMAND_SHELL", "auto"),
             sandbox_image=_env("SANDBOX_IMAGE", "python:3.11-slim"),
             sandbox_workspace_readonly=_env("SANDBOX_WORKSPACE_READONLY", "0") == "1",
             tool_permission_mode=_env("TOOL_PERMISSION_MODE", "ask"),
@@ -387,8 +461,19 @@ class Settings:
             project_memory_file=_env("PROJECT_MEMORY_FILE", ""),
             mcp_enabled=_env("MCP_ENABLED", "1") == "1",
             trajectory_compress_enabled=_env("TRAJECTORY_COMPRESS_ENABLED", "0") == "1",
+            next_suggestions_enabled=_env("NEXT_SUGGESTIONS_ENABLED", "1") == "1",
+            next_suggestions_cache_minutes=int(
+                _env("NEXT_SUGGESTIONS_CACHE_MINUTES", "30")
+            ),
             checkpoint_keep_per_thread=int(_env("CHECKPOINT_KEEP_PER_THREAD", "20")),
+            attachment_max_files=int(_env("ATTACHMENT_MAX_FILES", "5")),
+            attachment_max_mb=int(_env("ATTACHMENT_MAX_MB", "20")),
+            attachment_max_chars=int(_env("ATTACHMENT_MAX_CHARS", "30000")),
+            attachment_total_chars=int(_env("ATTACHMENT_TOTAL_CHARS", "60000")),
+            attachment_retention_hours=int(_env("ATTACHMENT_RETENTION_HOURS", "24")),
             cors_origins=origins,
+            expose_docs=_env("EXPOSE_DOCS", "1") == "1",
+            api_token=_env("ZHIWEN_API_TOKEN", "").strip(),
         )
 
     def ensure_dirs(self) -> None:

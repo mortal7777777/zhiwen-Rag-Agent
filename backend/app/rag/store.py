@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 # 索引 schema 版本：改块 ID 方案 / 元数据字段 / 命名语义时 +1（自动触发全量重建）
 # 1 = 单块；2 = parent-child + metadata_source；3 = 文档内寻址 + relative_path + 别名制
-IDX_SCHEMA_VERSION = 3
+IDX_SCHEMA_VERSION = 4
 
 
 def slugify(text: str) -> str:
@@ -71,6 +71,9 @@ class OpenSearchStore:
         self.client = httpx.Client(
             base_url=self.url,
             timeout=timeout,
+            # 本机 OpenSearch 必须绕过系统代理：FlClash 等代理接管后，
+            # 本地 9200 的 bulk 请求会经代理层超时（WinError 10060）。
+            trust_env=False,
             headers={"Accept-Encoding": "gzip, deflate"},
         )
 
@@ -211,6 +214,9 @@ class OpenSearchStore:
                     "metadata_source": {"type": "keyword"},
                     "metadata_relative_path": {"type": "keyword"},
                     "metadata_page": {"type": "integer"},
+                    "metadata_parse_backend": {"type": "keyword"},
+                    "metadata_ocr_conf": {"type": "float"},
+                    "metadata_image_count": {"type": "integer"},
                     "vector": {
                         "type": "knn_vector",
                         "dimension": dimension or self.dimension,
@@ -232,18 +238,30 @@ class OpenSearchStore:
         embeddings,
         batch_size: int = 64,
         target: str | None = None,
+        batch_guard=None,
     ) -> int:
-        """本地嵌入后，把原文、分词文本、元数据、向量批量写入 OpenSearch。"""
+        """本地嵌入后，把原文、分词文本、元数据、向量批量写入 OpenSearch。
+
+        batch_guard：可选的上下文管理器，仅包住每批 embedding 调用
+        （索引与检索共用 GPU 许可，不能整段重建持锁数分钟）。
+        """
         if not chunks:
             return 0
         index = target or self.index_name
         total = 0
         for start in range(0, len(chunks), batch_size):
             batch = chunks[start : start + batch_size]
-            vectors = embeddings.embed_documents(
-                [doc.page_content for doc in batch],
-                batch_size=batch_size,
-            )
+            texts = [doc.page_content for doc in batch]
+            if batch_guard is not None:
+                with batch_guard():
+                    vectors = embeddings.embed_documents(texts, batch_size=batch_size)
+            else:
+                vectors = embeddings.embed_documents(texts, batch_size=batch_size)
+            if len(vectors) != len(batch):
+                # zip 会静默截断/错位：宁可显式失败，也不写入错配的向量
+                raise RuntimeError(
+                    f"嵌入数量与文档数量不一致：{len(vectors)} != {len(batch)}"
+                )
             lines: list[str] = []
             for doc, vector in zip(batch, vectors):
                 rel_path = str(doc.metadata.get("relative_path") or "")
@@ -266,6 +284,11 @@ class OpenSearchStore:
                             "metadata_source": doc.metadata.get("source") or "",
                             "metadata_relative_path": rel_path,
                             "metadata_page": doc.metadata.get("page"),
+                            "metadata_parse_backend": doc.metadata.get("parse_backend") or "",
+                            "metadata_ocr_conf": doc.metadata.get("ocr_conf"),
+                            "metadata_image_count": len(
+                                doc.metadata.get("image_refs") or []
+                            ),
                             "vector": vector,
                         },
                         ensure_ascii=False,
@@ -320,13 +343,20 @@ class OpenSearchStore:
         query_vector: list[float],
         k: int = 40,
         filter_rel_path: str | None = None,
+        filter_rel_paths: list[str] | None = None,
     ) -> list[Document]:
         """稠密检索：kNN 向量相似度（OpenSearch 3.x 新版 knn 查询语法）。
 
-        filter_rel_path：按文档相对路径过滤（S3′ 书内检索用，过滤在 kNN
-        图搜索内生效，保证 k 条结果都来自该书）。"""
+        filter_rel_path：按单文档过滤（S3′ 书内检索用，过滤在 kNN 图搜索内
+        生效）；filter_rel_paths：按多文档过滤（用户选择的"限定范围"，
+        如整本书的多个文件）。
+        """
         knn = {"vector": query_vector, "k": k}
-        if filter_rel_path:
+        if filter_rel_paths:
+            knn["filter"] = {
+                "terms": {"metadata_relative_path": list(filter_rel_paths)}
+            }
+        elif filter_rel_path:
             knn["filter"] = {"term": {"metadata_relative_path": filter_rel_path}}
         body = {"query": {"knn": {"vector": knn}}, "size": k}
         data = self._request("POST", f"/{self.index_name}/_search", json=body)
@@ -337,11 +367,21 @@ class OpenSearchStore:
         query: str,
         k: int = 40,
         filter_rel_path: str | None = None,
+        filter_rel_paths: list[str] | None = None,
     ) -> list[Document]:
         """稀疏检索：BM25 关键词匹配（jieba 分词后查 content_seg）。"""
         seg_query = " ".join(jieba_tokenize(query))
         match = {"match": {"content_seg": seg_query}}
-        if filter_rel_path:
+        if filter_rel_paths:
+            query_body = {
+                "bool": {
+                    "must": [match],
+                    "filter": [
+                        {"terms": {"metadata_relative_path": list(filter_rel_paths)}}
+                    ],
+                }
+            }
+        elif filter_rel_path:
             query_body = {
                 "bool": {
                     "must": [match],
