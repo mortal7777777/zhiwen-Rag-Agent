@@ -71,6 +71,13 @@ class _BgJob:
     def status(self) -> str:
         rc = self.proc.poll()
         if rc is None:
+            # 终止信号已发出：立即对外报告 killed/timeout。SIGKILL 后到 wait 回收之间
+            # 存在短暂窗口，若这段时间仍报 running，bash_kill 的调用方会误以为没杀掉
+            # （CI Linux 上实测 race）：这里以标志位为准，exit_code 仍由 poll 提供。
+            if self.killed:
+                return "killed"
+            if self.timed_out:
+                return "timeout"
             return "running"
         if self.timed_out:
             return "timeout"
