@@ -4,6 +4,16 @@
 
 const { contextBridge, ipcRenderer } = require('electron')
 
+function markDesktop() {
+  try {
+    document.documentElement.dataset.desktop = '1'
+  } catch {
+    // 极早期 DOM 未就绪时忽略
+  }
+}
+if (document.documentElement) markDesktop()
+document.addEventListener('DOMContentLoaded', markDesktop, { once: true })
+
 contextBridge.exposeInMainWorld('zhiwenDesktop', {
   getState: () => ipcRenderer.invoke('boot:get-state'),
   saveConfig: (patch) => ipcRenderer.invoke('boot:save-config', patch),

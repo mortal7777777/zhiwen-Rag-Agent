@@ -16,6 +16,7 @@ const DEFAULTS = Object.freeze({
   globalHotkey: 'Control+Alt+Z',
   launchAtLogin: false,
   notifications: true,
+  autoCheckUpdates: true,
   projectRoot: '',
   window: { x: null, y: null, width: 1280, height: 800, maximized: false },
 })
@@ -51,6 +52,7 @@ function normalize(raw) {
         : DEFAULTS.globalHotkey,
     launchAtLogin: c.launchAtLogin === true,
     notifications: c.notifications !== false,
+    autoCheckUpdates: c.autoCheckUpdates !== false,
     projectRoot: typeof c.projectRoot === 'string' ? c.projectRoot.trim() : '',
     window: {
       x: Number.isFinite(win.x) ? win.x : null,

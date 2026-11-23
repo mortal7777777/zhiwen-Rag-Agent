@@ -1,12 +1,14 @@
 {
   "name": "zhiwen-desktop",
-  "version": "0.1.0",
+  "version": "0.3.3",
   "private": true,
   "description": "知问 ZhiWen 桌面客户端（Electron 薄壳原型）",
   "author": "ZhiWen",
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",
+    "check": "node scripts/check_updates.cjs",
+    "check:feed": "electron scripts/check_update_feed.cjs",
     "pack": "electron-builder --dir",
     "dist": "electron-builder --win nsis --publish never",
     "release": "electron-builder --win nsis --publish always"

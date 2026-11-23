@@ -95,7 +95,13 @@ html .knowledge-page.view-split .el-card {
   max-width: none;
 }
 
-@media (max-width: 1180px) {
+/* 双栏左列只有 340px：卡片头允许换行，标题不被视图切换器挤成两行 */
+html .knowledge-page.view-split .status-card .header-row {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@container page-content (max-width: 800px) {
   html .knowledge-page.view-split {
     grid-template-columns: 1fr;
   }
@@ -218,9 +224,9 @@ html .pw-page.view-preview .pw-list {
   font-size: var(--font-sm);
 }
 
-@media (max-width: 1280px) {
+@container page-content (max-width: 980px) {
   html .pw-page.view-preview .pw-grid {
-    grid-template-columns: 200px minmax(0, 1fr) 340px;
+    grid-template-columns: minmax(0, 1fr) 320px;
   }
 }
 
@@ -292,8 +298,8 @@ html[data-style="cyber"] .runs-page .header-actions .el-radio-button.is-active .
   text-shadow: 0 0 8px color-mix(in srgb, var(--primary) 45%, transparent);
 }
 
-/* 窄屏（<1180）：提示词三种变体统一退回单列，被隐藏的面板恢复，避免只看到半截 */
-@media (max-width: 1180px) {
+/* 内容区过窄（<760）：提示词三种变体统一退回单列，被隐藏的面板恢复，避免只看到半截 */
+@container page-content (max-width: 760px) {
   html .pw-page.view-three .pw-grid,
   html .pw-page.view-editor .pw-grid,
   html .pw-page.view-preview .pw-grid {

@@ -50,6 +50,12 @@ body {
   margin-bottom: 20px;
 }
 
+/* 隐藏式标题栏：boot 页没有独立拖动条，用标题区承担拖动 */
+html[data-desktop] .head {
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
 .logo {
   width: 46px;
   height: 46px;

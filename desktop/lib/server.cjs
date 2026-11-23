@@ -10,7 +10,9 @@ const fs = require('fs')
 const path = require('path')
 const http = require('http')
 
-const STATIC_PORT = 17800
+// 固定端口保证 localStorage 的 origin 稳定；ZHIWEN_STATIC_PORT 仅供开发/验证隔离第二实例
+const STATIC_PORT =
+  Number.parseInt(process.env.ZHIWEN_STATIC_PORT || '', 10) || 17800
 const BACKEND_PORT = 8000
 
 const HOP_BY_HOP = new Set([

@@ -1,6 +1,12 @@
 <template>
   <!-- locale 从全局 app.use(ElementPlus) 迁来（按需引入后组件级配置） -->
   <el-config-provider :locale="zhCn">
+    <div class="app-shell">
+    <!-- 桌面客户端：隐藏式标题栏下的品牌条（原生窗口按钮叠加在右侧） -->
+    <header v-if="isDesktopShell" class="desktop-titlebar" aria-label="应用标题栏">
+      <span class="dtb-mark">知</span>
+      <span class="dtb-name">知问 ZhiWen</span>
+    </header>
     <el-container class="app-container">
     <!-- 左侧全局导航（可折叠） -->
     <!-- 收起态的左边缘感应条：鼠标移上来把整列悬浮出来 -->
@@ -118,7 +124,7 @@
           </div>
           <nav class="settings-tabs">
             <button
-              v-for="item in navItems"
+              v-for="item in visibleNavItems"
               :key="item.key"
               type="button"
               :class="['settings-tab', { active: activeTab === item.key }]"
@@ -160,11 +166,15 @@
 
           <!-- ============ 上下文与记忆 ============ -->
           <MemoryPane v-show="activeTab === 'memory'" />
+
+          <!-- ============ 应用设置（桌面客户端） ============ -->
+          <DesktopPane v-show="activeTab === 'desktop'" />
         </main>
       </div>
     </el-dialog>
 
     </el-container>
+    </div>
   </el-config-provider>
 </template>
 
@@ -204,6 +214,7 @@ import {
   MagicStick,
   Management,
   Memo,
+  Monitor,
   MessageBox,
   Notebook,
   Operation,
@@ -215,10 +226,14 @@ import {
   Tickets,
   TrendCharts,
 } from '@element-plus/icons-vue'
+
+// 桌面客户端（preload-main 注入 window.zhiwenShell）：渲染品牌标题条
+const isDesktopShell = typeof window !== 'undefined' && !!window.zhiwenShell
 import { getSettings } from './api'
 import AppearancePane from './components/settings/AppearancePane.vue'
 import ApprovalPane from './components/settings/ApprovalPane.vue'
 import MemoryPane from './components/settings/MemoryPane.vue'
+import DesktopPane from './components/settings/DesktopPane.vue'
 import ToolsPane from './components/settings/ToolsPane.vue'
 import ModelSettingsPane from './components/settings/ModelSettingsPane.vue'
 import SearchPane from './components/settings/SearchPane.vue'
@@ -246,7 +261,13 @@ const navItems = [
   { key: 'approval', label: '审批', desc: '敏感操作确认 / 命令白名单 / 沙箱', icon: Lock },
   { key: 'search', label: '检索', desc: '联网搜索 / 知识库检索参数', icon: Search },
   { key: 'memory', label: '记忆', desc: '上下文窗口 / 长期记忆 / 项目记忆 / 检查点', icon: Memo },
+  { key: 'desktop', label: '应用设置', desc: '版本更新 / 启动项 / 通知与托盘 / 本机后端', icon: Monitor },
 ]
+
+// 浏览器环境隐藏"应用设置"（仅桌面客户端可用）
+const visibleNavItems = computed(() =>
+  isDesktopShell ? navItems : navItems.filter((item) => item.key !== 'desktop')
+)
 
 // ---------------- 外观 ----------------
 // 主题/内容宽度/界面风格的状态与即时应用抽到 composables/useAppearance.js
@@ -436,3 +457,4 @@ onMounted(() => {
 <style src="./styles/settings.css"></style>
 <style src="./styles/inspector.css"></style>
 <style src="./styles/style-signatures.css"></style>
+<style src="./styles/desktop-shell.css"></style>

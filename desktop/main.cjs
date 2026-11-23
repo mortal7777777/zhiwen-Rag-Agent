@@ -2,13 +2,14 @@
 
 /** 知问桌面端主进程：单实例、boot 窗口 → 主窗口、安全策略、IPC、退出时序。 */
 
-const { app, BrowserWindow, Menu, Notification, Tray, dialog, globalShortcut, ipcMain, nativeImage, powerSaveBlocker, shell } = require('electron')
+const { app, BrowserWindow, Menu, Notification, Tray, dialog, globalShortcut, ipcMain, nativeImage, net, powerSaveBlocker, session, shell } = require('electron')
 const { autoUpdater } = require('electron-updater')
 const fs = require('fs')
 const path = require('path')
 
 const config = require('./lib/config.cjs')
 const probe = require('./lib/probe.cjs')
+const updates = require('./lib/updates.cjs')
 const { BootFlow } = require('./lib/bootflow.cjs')
 
 const APP_ID = 'com.zhiwen.desktop'
@@ -18,8 +19,9 @@ const SHOT_DIR = process.env.ZHIWEN_SHOT_DIR || ''
 const ICON_256 = path.join(__dirname, 'assets', 'icon-256.png')
 const TRAY_ICON = path.join(__dirname, 'assets', 'tray-32.png')
 
-// 统一 dev/打包版本的 userData 路径（%APPDATA%\zhiwen-desktop），配置互通
-app.setName('zhiwen-desktop')
+// 统一 dev/打包版本的 userData 路径（%APPDATA%\zhiwen-desktop），配置互通；
+// ZHIWEN_APP_NAME 仅供开发/验证时隔离第二实例（独立 userData 与单实例锁）
+app.setName(process.env.ZHIWEN_APP_NAME || 'zhiwen-desktop')
 app.setAppUserModelId(APP_ID)
 
 let currentConfig = null
@@ -37,7 +39,23 @@ let suppressQuitOnClose = false
 let allowedShellOrigin = ''
 let activeHotkey = ''
 let pendingConvId = null
-let updateInfo = { checking: false, manual: false, version: '', progress: 0, downloaded: false }
+
+const UPDATE_REPO = 'mortal7777777/zhiwen-Rag-Agent'
+const UPDATE_RELEASES_PAGE = `https://github.com/${UPDATE_REPO}/releases`
+const UPDATE_RELEASES_API = `https://api.github.com/repos/${UPDATE_REPO}/releases?per_page=30`
+// idle | checking | up-to-date | available | downloading | downloaded | error
+let updateState = {
+  status: 'idle',
+  manual: false,
+  currentVersion: '',
+  version: '',
+  progress: 0,
+  message: '',
+  checkedAt: 0,
+}
+let updateCheckPhase = 'idle' // idle | checking | settled
+let updateCheckWatchdog = null
+let updateDialogOpen = false
 
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
@@ -163,6 +181,8 @@ function createBootWindow({ settings = false } = {}) {
     autoHideMenuBar: true,
     title: '知问 ZhiWen',
     icon: ICON_256,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#0f1115', symbolColor: '#98a2b3', height: 40 },
     backgroundColor: '#0f1115',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -222,6 +242,8 @@ function openMainWindow(url, token) {
     autoHideMenuBar: true,
     title: '知问 ZhiWen',
     icon: ICON_256,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#101318', symbolColor: '#cbd5e1', height: 40 },
     backgroundColor: '#ffffff',
     webPreferences: {
       preload: path.join(__dirname, 'preload-main.cjs'),
@@ -355,6 +377,11 @@ function openMainWindow(url, token) {
 
   mainWindow.loadURL(url)
 
+  // preload 极早期 documentElement 可能未就绪，标题栏高度用注入样式兜底
+  mainWindow.webContents
+    .insertCSS('html { --titlebar-h: 40px; }')
+    .catch(() => {})
+
   // 开发验证：确认主窗口薄桥可用，并走一遍通知/运行态链路
   if (process.env.ZHIWEN_VERIFY_BRIDGE === '1') {
     setTimeout(async () => {
@@ -391,6 +418,49 @@ function openMainWindow(url, token) {
         console.log('[verify] failed', err && err.message ? err.message : err)
       }
     }, 1200)
+  }
+
+  // 开发验证：应用设置面板（读取配置 + 打开设置 → 应用设置页并截图）
+  if (process.env.ZHIWEN_SHOW_DESKTOP_SETTINGS === '1') {
+    setTimeout(async () => {
+      try {
+        const cfg = await wc.executeJavaScript(
+          "window.zhiwenShell && window.zhiwenShell.getDesktopConfig ? window.zhiwenShell.getDesktopConfig() : null"
+        )
+        console.log('[verify] desktop config:', JSON.stringify(cfg))
+        await wc.executeJavaScript(`(function(){
+          const gear = document.querySelector('button[aria-label="打开设置"]')
+          if (gear) gear.click()
+          setTimeout(function(){
+            const tabs = Array.from(document.querySelectorAll('.settings-tab'))
+            const target = tabs.find(function(t){ return (t.textContent || '').includes('应用设置') })
+            if (target) target.click()
+          }, 400)
+          return true
+        })()`)
+        setTimeout(() => shot('settings-desktop', 0), 1400)
+        // 手动触发一次检查更新，验证打包版的 electron-updater + GitHub 兜底链路
+        if (process.env.ZHIWEN_CHECK_UPDATES === '1') {
+          setTimeout(async () => {
+            try {
+              const before = await wc.executeJavaScript('window.zhiwenShell.getUpdateState()')
+              console.log('[verify] update state before:', JSON.stringify(before))
+              const started = await wc.executeJavaScript('window.zhiwenShell.checkForUpdates()')
+              console.log('[verify] update check started:', JSON.stringify(started))
+              setTimeout(async () => {
+                const after = await wc.executeJavaScript('window.zhiwenShell.getUpdateState()')
+                console.log('[verify] update state settled:', JSON.stringify(after))
+                shot('update-check', 0)
+              }, 10000)
+            } catch (err) {
+              console.log('[verify] update check failed', err && err.message ? err.message : err)
+            }
+          }, 2200)
+        }
+      } catch (err) {
+        console.log('[verify] settings pane failed', err && err.message ? err.message : err)
+      }
+    }, 1500)
   }
 
   // 开发验证：设置窗口（settings 模式）+ 深链解析
@@ -638,7 +708,287 @@ function applyLoginItem(enabled) {
   }
 }
 
+function updateSnapshot() {
+  return { ...updateState, currentVersion: app.getVersion() }
+}
+
+function pushUpdateState(patch) {
+  updateState = { ...updateState, ...patch }
+  const snapshot = updateSnapshot()
+  updateTrayTooltip()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.webContents.send('shell:update-state', snapshot)
+    } catch {
+      // 窗口正在销毁时忽略
+    }
+  }
+  return snapshot
+}
+
+function clearUpdateWatchdog() {
+  if (updateCheckWatchdog) {
+    clearTimeout(updateCheckWatchdog)
+    updateCheckWatchdog = null
+  }
+}
+
+function showUpdateDialog({
+  type = 'info',
+  message,
+  detail = '',
+  buttons = ['知道了'],
+  openUrl = '',
+  onResponse,
+} = {}) {
+  if (updateDialogOpen) return false
+  updateDialogOpen = true
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+  const options = {
+    type,
+    title: '知问',
+    message: String(message || ''),
+    detail: String(detail || ''),
+    buttons,
+    defaultId: 0,
+    cancelId: buttons.length - 1,
+    noLink: true,
+  }
+  const promise = win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options)
+  promise
+    .then(({ response }) => {
+      if (openUrl && response === 0) safeOpenExternal(openUrl)
+      if (typeof onResponse === 'function') onResponse(response)
+    })
+    .catch(() => {})
+    .finally(() => {
+      updateDialogOpen = false
+    })
+  return true
+}
+
+function quitAndInstallUpdate() {
+  try {
+    autoUpdater.quitAndInstall(false, true)
+  } catch (err) {
+    console.log('[updater] quitAndInstall failed', err && err.message ? err.message : err)
+    app.quit()
+  }
+}
+
+function promptInstallUpdate(version) {
+  showUpdateDialog({
+    type: 'info',
+    message: `新版本${version ? ' v' + version : ''}已就绪`,
+    detail: '退出知问后会自动安装；也可以现在重启立即更新。',
+    buttons: ['立即重启并更新', '稍后'],
+    onResponse: (index) => {
+      if (index === 0) quitAndInstallUpdate()
+    },
+  })
+}
+
+function friendlyUpdateError(err) {
+  const message = err && err.message ? err.message : String(err || '')
+  if (/Cannot find latest\.yml|404|HttpError/i.test(message)) return '自动更新源暂无可用的版本信息'
+  if (/ENOTFOUND|ECONN|ETIMEDOUT|EAI_AGAIN|timeout|超时/i.test(message)) return '网络连接失败'
+  return message || '未知错误'
+}
+
+/** 用 Electron net 取 GitHub Releases；系统代理失败（403/限流/超时）后直连重试。 */
+function requestJson(url, sessionRef, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (fn, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fn(value)
+    }
+    const options = { url, method: 'GET' }
+    if (sessionRef) options.session = sessionRef
+    const request = net.request(options)
+    request.setHeader('User-Agent', 'zhiwen-desktop')
+    request.setHeader('Accept', 'application/vnd.github+json')
+    const timer = setTimeout(() => {
+      try {
+        request.abort()
+      } catch {
+        // 忽略
+      }
+      finish(reject, new Error('请求超时'))
+    }, timeoutMs)
+    request.on('response', (response) => {
+      const chunks = []
+      response.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+      response.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8')
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          try {
+            finish(resolve, JSON.parse(body))
+          } catch {
+            finish(reject, new Error('发布页返回格式异常'))
+          }
+        } else {
+          const err = new Error(`GitHub HTTP ${response.statusCode}`)
+          err.statusCode = response.statusCode
+          err.body = body.slice(0, 200)
+          finish(reject, err)
+        }
+      })
+    })
+    request.on('error', (err) => finish(reject, err))
+    request.end()
+  })
+}
+
+let updateDirectSession = null
+async function getUpdateDirectSession() {
+  if (updateDirectSession) return updateDirectSession
+  try {
+    const direct = session.fromPartition('zhiwen-update-direct')
+    await direct.setProxy({ mode: 'direct' })
+    updateDirectSession = direct
+  } catch (err) {
+    console.log('[updater] direct session unavailable', err && err.message ? err.message : err)
+  }
+  return updateDirectSession
+}
+
+async function fetchJson(url, timeoutMs = 9000) {
+  try {
+    return await requestJson(url, null, timeoutMs)
+  } catch (firstErr) {
+    console.log('[updater] proxy request failed', firstErr && firstErr.message ? firstErr.message : firstErr)
+    const direct = await getUpdateDirectSession()
+    if (!direct) throw firstErr
+    return requestJson(url, direct, timeoutMs)
+  }
+}
+
+function finishUpToDate() {
+  clearUpdateWatchdog()
+  updateCheckPhase = 'settled'
+  const manual = updateState.manual
+  pushUpdateState({
+    status: 'up-to-date',
+    manual: false,
+    progress: 0,
+    message: `已是最新版本 v${app.getVersion()}`,
+    checkedAt: Date.now(),
+  })
+  if (manual) {
+    showUpdateDialog({
+      message: '已是最新版本',
+      detail: `当前版本 v${app.getVersion()}，没有可用的更新。`,
+    })
+  }
+}
+
+async function runGithubFallback(manual) {
+  const manualCheck = !!manual
+  pushUpdateState({
+    status: 'checking',
+    manual: manualCheck,
+    progress: 0,
+    message: '自动更新源不可用，正在查询发布页…',
+  })
+  let releases
+  try {
+    releases = await fetchJson(UPDATE_RELEASES_API)
+  } catch (err) {
+    const detail = friendlyUpdateError(err)
+    console.log('[updater] fallback failed', detail)
+    pushUpdateState({
+      status: 'error',
+      manual: false,
+      message: `检查更新失败：${detail}`,
+      checkedAt: Date.now(),
+    })
+    if (manualCheck) {
+      showUpdateDialog({
+        type: 'error',
+        message: '检查更新失败',
+        detail: `${detail}\n\n可稍后重试，或打开发布页查看最新版本。`,
+        buttons: ['打开发布页', '关闭'],
+        openUrl: UPDATE_RELEASES_PAGE,
+      })
+    }
+    return
+  }
+  const newer = updates.pickNewerRelease(releases, app.getVersion())
+  if (newer && newer.version) {
+    const releaseUrl =
+      (newer.release && newer.release.html_url) ||
+      `${UPDATE_RELEASES_PAGE}/tag/v${newer.version}`
+    pushUpdateState({
+      status: 'available',
+      manual: false,
+      version: newer.version,
+      progress: 0,
+      message: `发现新版本 v${newer.version}，可前往发布页手动下载`,
+      checkedAt: Date.now(),
+    })
+    if (manualCheck) {
+      showUpdateDialog({
+        message: `发现新版本 v${newer.version}`,
+        detail: '自动更新源暂不可用，可前往 GitHub Releases 下载安装包。',
+        buttons: ['前往下载', '稍后'],
+        openUrl: releaseUrl,
+      })
+    } else {
+      notifyUser('发现新版本 ' + newer.version, '可打开知问发布页下载安装包。', { force: true })
+    }
+    return
+  }
+  pushUpdateState({
+    status: 'up-to-date',
+    manual: false,
+    progress: 0,
+    message: `已是最新版本 v${app.getVersion()}`,
+    checkedAt: Date.now(),
+  })
+  if (manualCheck) {
+    showUpdateDialog({
+      message: '已是最新版本',
+      detail: `当前版本 v${app.getVersion()}，发布页没有更新的桌面安装包。`,
+    })
+  }
+}
+
+function handleUpdateError(err) {
+  const message = err && err.message ? err.message : String(err || '')
+  console.log('[updater] error', message)
+  if (updateState.status === 'downloading' || updateState.status === 'available') {
+    clearUpdateWatchdog()
+    updateCheckPhase = 'settled'
+    const manual = updateState.manual
+    pushUpdateState({
+      status: 'available',
+      manual: false,
+      message: '自动下载失败，可前往发布页手动下载',
+    })
+    if (manual) {
+      showUpdateDialog({
+        type: 'warning',
+        message: '更新下载失败',
+        detail: message,
+        buttons: ['打开发布页', '稍后'],
+        openUrl: UPDATE_RELEASES_PAGE,
+      })
+    } else {
+      notifyUser('更新下载失败', '可打开发布页手动下载新版本。', { force: true })
+    }
+    return
+  }
+  if (updateCheckPhase !== 'checking') return
+  updateCheckPhase = 'settled'
+  clearUpdateWatchdog()
+  runGithubFallback(updateState.manual)
+}
+
 function setupAutoUpdater() {
+  updateState.currentVersion = app.getVersion()
   if (!app.isPackaged) {
     console.log('[updater] dev mode: auto update disabled')
     return
@@ -652,80 +1002,147 @@ function setupAutoUpdater() {
     debug: () => {},
   }
   autoUpdater.on('checking-for-update', () => {
-    updateInfo.checking = true
-    updateTrayTooltip()
+    pushUpdateState({ status: 'checking', progress: 0, message: '正在检查更新…' })
   })
   autoUpdater.on('update-available', (info) => {
-    updateInfo.version = info && info.version ? info.version : ''
-    notifyUser('发现新版本 ' + updateInfo.version, '正在后台下载更新…', { force: true })
-    updateTrayTooltip()
+    clearUpdateWatchdog()
+    updateCheckPhase = 'settled'
+    const version = info && info.version ? info.version : ''
+    pushUpdateState({
+      status: 'available',
+      version,
+      progress: 0,
+      message: `发现新版本 v${version}，正在后台下载…`,
+    })
+    notifyUser('发现新版本 ' + version, '正在后台下载更新…', { force: true })
   })
   autoUpdater.on('update-not-available', () => {
-    if (updateInfo.manual) {
-      notifyUser('已是最新版本', `当前 v${app.getVersion()}`, { force: true })
-    }
-    updateInfo = { ...updateInfo, checking: false, manual: false }
-    updateTrayTooltip()
+    finishUpToDate()
   })
   autoUpdater.on('download-progress', (progress) => {
-    updateInfo.progress = Math.round((progress && progress.percent) || 0)
+    const percent = Math.round((progress && progress.percent) || 0)
+    pushUpdateState({
+      status: 'downloading',
+      progress: percent,
+      message: `正在下载更新 ${percent}%`,
+    })
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.setProgressBar(Math.min(1, (progress && progress.percent ? progress.percent : 0) / 100))
+      mainWindow.setProgressBar(Math.min(1, percent / 100))
     }
-    updateTrayTooltip()
   })
   autoUpdater.on('update-downloaded', (info) => {
-    updateInfo.downloaded = true
-    updateInfo.progress = 100
+    clearUpdateWatchdog()
+    updateCheckPhase = 'settled'
+    const version = info && info.version ? info.version : updateState.version
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setProgressBar(-1)
-    updateTrayTooltip()
-    const choice = dialog.showMessageBoxSync({
-      type: 'info',
-      title: '知问',
-      message: '新版本已下载',
-      detail: `版本 ${info && info.version ? info.version : ''} 已就绪，重启后生效。`,
-      buttons: ['立即重启并更新', '稍后'],
-      defaultId: 0,
-      cancelId: 1,
+    pushUpdateState({
+      status: 'downloaded',
+      version,
+      progress: 100,
+      message: `新版本 v${version} 已下载，退出后自动安装`,
+      checkedAt: Date.now(),
     })
-    if (choice === 0) {
-      try {
-        autoUpdater.quitAndInstall(false, true)
-      } catch (err) {
-        console.log('[updater] quitAndInstall failed', err && err.message ? err.message : err)
-        app.quit()
-      }
+    if (updateState.manual) {
+      promptInstallUpdate(version)
+    } else {
+      notifyUser('更新已就绪', `v${version} 已下载，退出知问后自动安装。`, { force: true })
     }
   })
   autoUpdater.on('error', (err) => {
-    console.log('[updater] error', err && err.message ? err.message : err)
-    if (updateInfo.manual) {
-      notifyUser('检查更新失败', (err && err.message) || '网络或更新源不可用', { force: true })
-    }
-    updateInfo = { ...updateInfo, checking: false, manual: false }
-    updateTrayTooltip()
+    handleUpdateError(err)
   })
-  // 启动 15 秒后静默检查一次（不阻塞界面）
-  setTimeout(() => checkForUpdates(false), 15000)
+  // 启动 15 秒后静默检查一次（可在应用设置里关闭；不阻塞界面）
+  if (currentConfig.autoCheckUpdates !== false) {
+    setTimeout(() => checkForUpdates(false), 15000)
+  }
 }
 
 function checkForUpdates(manual) {
+  const isManual = !!manual
   if (!app.isPackaged) {
-    if (manual) {
-      dialog.showMessageBox({
-        type: 'info',
-        title: '检查更新',
+    const snapshot = pushUpdateState({
+      status: 'error',
+      manual: false,
+      currentVersion: app.getVersion(),
+      message: '开发模式不支持自动更新',
+      checkedAt: Date.now(),
+    })
+    if (isManual) {
+      showUpdateDialog({
         message: '开发模式不支持自动更新',
-        detail: '请使用安装后的打包版本（桌面快捷方式启动）。',
+        detail: '请使用安装后的打包版本（桌面快捷方式启动）检查更新。',
       })
     }
-    return
+    return snapshot
   }
-  updateInfo = { ...updateInfo, checking: true, manual: !!manual }
-  updateTrayTooltip()
-  autoUpdater.checkForUpdates().catch((err) => {
-    console.log('[updater] check failed', err && err.message ? err.message : err)
+  if (updateState.status === 'downloaded') {
+    if (isManual) promptInstallUpdate(updateState.version)
+    return updateSnapshot()
+  }
+  if (updateCheckPhase === 'checking' || updateState.status === 'downloading') {
+    if (isManual) {
+      showUpdateDialog({
+        message: updateState.status === 'downloading' ? '正在下载更新' : '正在检查更新',
+        detail: updateState.message || '请稍候…',
+      })
+    }
+    return updateSnapshot()
+  }
+  updateCheckPhase = 'checking'
+  clearUpdateWatchdog()
+  updateCheckWatchdog = setTimeout(() => {
+    if (updateCheckPhase === 'checking') handleUpdateError(new Error('检查更新超时'))
+  }, 20000)
+  pushUpdateState({
+    status: 'checking',
+    manual: isManual,
+    progress: 0,
+    version: '',
+    message: '正在检查更新…',
+    checkedAt: 0,
   })
+  try {
+    autoUpdater.checkForUpdates().catch((err) => handleUpdateError(err))
+  } catch (err) {
+    handleUpdateError(err)
+  }
+  return updateSnapshot()
+}
+
+
+function desktopConfigSnapshot() {
+  return {
+    launchAtLogin: currentConfig.launchAtLogin === true,
+    notifications: currentConfig.notifications !== false,
+    minimizeToTray: currentConfig.minimizeToTray !== false,
+    autoCheckUpdates: currentConfig.autoCheckUpdates !== false,
+    globalHotkey: currentConfig.globalHotkey || '',
+    projectRoot: currentConfig.projectRoot || '',
+  }
+}
+
+function applyDesktopConfigPatch(patch) {
+  const p = patch && typeof patch === 'object' ? patch : {}
+  const nextHotkey =
+    typeof p.globalHotkey === 'string' ? p.globalHotkey.trim() : currentConfig.globalHotkey
+  if (nextHotkey !== currentConfig.globalHotkey && !registerGlobalHotkey(nextHotkey)) {
+    return { ok: false, error: '全局快捷键无效或已被其他应用占用', config: desktopConfigSnapshot() }
+  }
+  currentConfig = config.save({
+    launchAtLogin:
+      typeof p.launchAtLogin === 'boolean' ? p.launchAtLogin : currentConfig.launchAtLogin,
+    notifications:
+      typeof p.notifications === 'boolean' ? p.notifications : currentConfig.notifications,
+    minimizeToTray:
+      typeof p.minimizeToTray === 'boolean' ? p.minimizeToTray : currentConfig.minimizeToTray,
+    autoCheckUpdates:
+      typeof p.autoCheckUpdates === 'boolean' ? p.autoCheckUpdates : currentConfig.autoCheckUpdates,
+    globalHotkey: nextHotkey,
+    projectRoot: typeof p.projectRoot === 'string' ? p.projectRoot.trim() : currentConfig.projectRoot,
+  })
+  applyLoginItem(currentConfig.launchAtLogin)
+  updateTrayTooltip()
+  return { ok: true, error: '', config: desktopConfigSnapshot() }
 }
 
 function registerProtocolClient() {
@@ -791,16 +1208,23 @@ function createTray() {
 }
 
 function buildTrayMenu() {
-  return Menu.buildFromTemplate([
+  const items = [
     { label: '打开知问', click: () => showAppWindow() },
     { label: '连接设置…', click: () => openSettingsWindow() },
     { label: '检查更新', click: () => checkForUpdates(true) },
+    { label: '打开发布页', click: () => safeOpenExternal(UPDATE_RELEASES_PAGE) },
+  ]
+  if (updateState.status === 'downloaded') {
+    items.push({ label: '重启并安装更新', click: () => quitAndInstallUpdate() })
+  }
+  items.push(
     { label: trayStatusText(), enabled: false },
     { type: 'separator' },
     { label: '打开日志目录', click: () => shell.openPath(config.logsDir()) },
     { type: 'separator' },
-    { label: '退出', click: () => app.quit() },
-  ])
+    { label: '退出', click: () => app.quit() }
+  )
+  return Menu.buildFromTemplate(items)
 }
 
 function trayStatusText() {
@@ -817,9 +1241,9 @@ function trayStatusText() {
   }
   const phase = phaseMap[lastFlowPhase] || lastFlowPhase
   let extra = busyActive ? ' · 生成中' : ''
-  if (updateInfo.downloaded) extra += ' · 更新就绪'
-  else if (updateInfo.progress > 0) extra += ` · 更新下载 ${updateInfo.progress}%`
-  else if (updateInfo.checking) extra += ' · 检查更新'
+  if (updateState.status === 'downloaded') extra += ' · 更新就绪'
+  else if (updateState.status === 'downloading') extra += ` · 更新下载 ${updateState.progress}%`
+  else if (updateState.status === 'checking') extra += ' · 检查更新'
   return `知问 ZhiWen · ${modeLabel} · ${phase}${extra}`
 }
 
@@ -888,6 +1312,8 @@ async function collectDetection() {
   if (live.ok) backend = 'running'
   else if (await probe.portInUse(8000)) backend = 'occupied'
   const token = probe.resolveEffectiveToken(currentConfig, paths.repoRoot)
+  const staticPort =
+    Number.parseInt(process.env.ZHIWEN_STATIC_PORT || '', 10) || 17800
   return {
     python: py,
     distExists,
@@ -895,8 +1321,8 @@ async function collectDetection() {
     tokenSource: token.source,
     projectRoot: paths.repoRoot,
     packaged: app.isPackaged,
-    // 主界面运行时 17800 是桌面端自己占用的，不算冲突
-    staticPortInUse: !(bootflow && bootflow.online) && (await probe.portInUse(17800)),
+    // 主界面运行时静态端口是桌面端自己占用的，不算冲突
+    staticPortInUse: !(bootflow && bootflow.online) && (await probe.portInUse(staticPort)),
   }
 }
 
@@ -1002,6 +1428,76 @@ function registerIpc() {
   ipcMain.on('shell:set-busy', (event, active) => {
     if (!fromMain(event)) return
     setBusyState(!!active)
+  })
+
+  // 隐藏式标题栏：按界面主题同步原生窗口按钮区的底色/符号色
+  ipcMain.on('shell:titlebar', (event, payload) => {
+    if (!fromMain(event)) return
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    const color = String((payload && payload.color) || '').trim()
+    const symbol = String((payload && payload.symbolColor) || '').trim()
+    if (!/^#[0-9a-fA-F]{6}$/.test(color)) return
+    try {
+      mainWindow.setTitleBarOverlay({
+        color,
+        symbolColor: /^#[0-9a-fA-F]{6}$/.test(symbol) ? symbol : color,
+        height: 40,
+      })
+      console.log('[titlebar]', color, symbol)
+    } catch (err) {
+      console.log('[titlebar] failed', err && err.message ? err.message : err)
+    }
+  })
+
+  // 应用设置面板（主设置页「应用设置」）
+  ipcMain.handle('shell:get-desktop-config', (event) => {
+    if (!fromMain(event)) throw new Error('forbidden')
+    return {
+      version: app.getVersion(),
+      packaged: app.isPackaged,
+      config: desktopConfigSnapshot(),
+      effectiveProjectRoot: resolveProjectPaths().repoRoot,
+    }
+  })
+  ipcMain.handle('shell:save-desktop-config', (event, patch) => {
+    if (!fromMain(event)) throw new Error('forbidden')
+    return applyDesktopConfigPatch(patch)
+  })
+  ipcMain.handle('shell:check-updates', async (event) => {
+    if (!fromMain(event)) throw new Error('forbidden')
+    return checkForUpdates(true)
+  })
+  ipcMain.handle('shell:get-update-state', (event) => {
+    if (!fromMain(event)) throw new Error('forbidden')
+    return updateSnapshot()
+  })
+  ipcMain.handle('shell:open-update-page', (event) => {
+    if (!fromMain(event)) throw new Error('forbidden')
+    safeOpenExternal(UPDATE_RELEASES_PAGE)
+    return { ok: true }
+  })
+  ipcMain.handle('shell:install-update', (event) => {
+    if (!fromMain(event)) throw new Error('forbidden')
+    if (updateState.status !== 'downloaded') {
+      return { ok: false, error: '更新尚未下载完成' }
+    }
+    quitAndInstallUpdate()
+    return { ok: true }
+  })
+  ipcMain.handle('shell:open-connection-settings', (event) => {
+    if (!fromMain(event)) throw new Error('forbidden')
+    openSettingsWindow()
+    return { ok: true }
+  })
+  ipcMain.handle('shell:open-logs', async (event) => {
+    if (!fromMain(event)) throw new Error('forbidden')
+    try {
+      fs.mkdirSync(config.logsDir(), { recursive: true })
+      await shell.openPath(config.logsDir())
+    } catch {
+      // 打开失败静默
+    }
+    return { ok: true }
   })
 }
 

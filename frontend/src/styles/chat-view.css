@@ -1,17 +1,17 @@
 .chat-page {
-  height: calc(100vh - 32px);
+  height: calc(100vh - var(--titlebar-h, 0px) - 32px);
   display: flex;
   gap: 16px;
 }
 
 /* ============ 对话主区 ============ */
+/* 主卡片始终吃满剩余空间；"内容宽度"作用于内部 .chat-column（见下），
+   否则 width:min(100%,70%) 会被 flex-shrink 抵消，各档位几乎无差别 */
 .chat-main {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  width: min(100%, var(--chat-content-width, 70%));
-  margin: 0 auto;
   background: var(--bg-chat);
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
@@ -26,7 +26,10 @@
 }
 
 .chat-column {
-  flex: 1;
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: var(--chat-content-width, 100%);
+  margin: 0 auto;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -280,39 +283,72 @@
   padding: 16px 20px;
   /* 防止浏览器滚动锚定与打字机滚动打架造成跳动 */
   overflow-anchor: none;
+  /* 主页磁贴按"聊天列宽"自适应，而不是按窗口宽（侧栏吃掉宽度后两者差很大） */
+  container-type: inline-size;
+  container-name: chat-col;
 }
 
 /* 欢迎页 */
 .welcome {
-  height: 100%;
+  position: relative;
+  min-height: 100%;
   width: 100%;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  text-align: center;
-  padding: 28px 12px;
+  padding: clamp(24px, 4vh, 48px) clamp(16px, 3vw, 36px);
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
+/* 柔光底：让大面积留白有层次，不抢内容 */
+.welcome::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    540px 320px at 50% 34%,
+    color-mix(in srgb, var(--primary) 9%, transparent),
+    transparent 72%
+  );
+}
+
+.welcome-inner {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 760px;
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.welcome-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  color: var(--text-3);
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.welcome-eyebrow-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
 .welcome-mark {
   flex-shrink: 0;
-  margin-top: auto;
-}
-
-.welcome-title,
-.welcome-sub {
-  flex-shrink: 0;
-}
-
-.welcome .suggestions {
-  flex-shrink: 0;
-}
-
-.welcome-mark {
-  width: 64px;
-  height: 64px;
+  width: 58px;
+  height: 58px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -320,97 +356,127 @@
   color: var(--text-on-brand);
   background: var(--primary-grad);
   /* 品牌光晕：外圈扩散光 + 下方柔影 */
-  box-shadow: 0 0 0 10px color-mix(in srgb, var(--primary) 7%, transparent),
-    0 10px 28px color-mix(in srgb, var(--primary) 32%, transparent);
-  margin-bottom: 20px;
+  box-shadow: 0 0 0 9px color-mix(in srgb, var(--primary) 7%, transparent),
+    0 10px 28px color-mix(in srgb, var(--primary) 30%, transparent);
+  margin-bottom: 18px;
 }
 
 .welcome-glyph {
   font-family: var(--font-display);
-  font-size: 30px;
+  font-size: 27px;
   font-weight: 700;
   line-height: 1;
   letter-spacing: 0.02em;
   transform: translateY(-1px);
 }
 
+.welcome-heading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  margin-bottom: 28px;
+}
+
 .welcome-title {
+  margin: 0;
   font-size: var(--font-3xl);
   font-weight: 700;
-  margin-bottom: 8px;
+  line-height: 1.22;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
 }
 
 .welcome-sub {
+  margin: 0;
   color: var(--text-3);
   font-size: var(--font-base);
-  margin-bottom: 32px;
-  max-width: 100%;
-  padding: 0 12px;
+  line-height: 1.65;
+  max-width: 46ch;
 }
 
 .suggestions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   width: 100%;
-  max-width: 640px;
+  max-width: 720px;
+  animation: fade-up var(--dur-slow) var(--ease-out) both;
 }
 
-/* 奇数张建议卡：最后一张通栏，避免半行空格 */
-.suggestions .suggestion:last-child:nth-child(odd) {
-  grid-column: 1 / -1;
+.suggestions[data-count='2'] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.suggestions[data-count='1'] {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .suggestion {
   display: flex;
   align-items: flex-start;
   gap: 12px;
+  min-width: 0;
   padding: 14px 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-card-2);
-  cursor: pointer;
+  color: inherit;
+  font: inherit;
   text-align: left;
+  cursor: pointer;
+  animation: fade-up var(--dur-slow) var(--ease-out) both;
+  animation-delay: calc(var(--suggestion-index, 0) * 50ms);
   transition: border-color var(--dur-base) var(--ease-out),
     background var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out),
     transform var(--dur-base) var(--ease-out);
 }
 
 .suggestion:hover {
-  border-color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
   background: var(--bg-active);
   transform: translateY(-2px);
-  box-shadow: 0 6px 16px color-mix(in srgb, var(--primary) 12%, transparent);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
+.suggestion:focus-visible {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: var(--focus-ring);
 }
 
 .suggestion-icon {
   flex-shrink: 0;
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-sm);
-  background: var(--bg-active);
-  color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .suggestion-body {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
+  flex: 1;
   min-width: 0;
 }
 
 .suggestion-text {
   color: var(--text-1);
   font-size: var(--font-base);
-  font-weight: 500;
-  line-height: 1.4;
+  font-weight: 600;
+  line-height: 1.45;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow-wrap: anywhere;
 }
 
 .suggestion:hover .suggestion-text {
@@ -420,15 +486,102 @@
 .suggestion-desc {
   color: var(--text-3);
   font-size: var(--font-xs);
-  line-height: 1.4;
+  line-height: 1.45;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+
+.suggestion-arrow {
+  flex-shrink: 0;
+  align-self: center;
+  color: var(--primary-text);
+  opacity: 0;
+  transform: translateX(-3px);
+  transition: opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.suggestion:hover .suggestion-arrow,
+.suggestion:focus-visible .suggestion-arrow {
+  opacity: 1;
+  transform: none;
+}
+
+/* 工作台样式的快捷入口 */
+.quick-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+  max-width: 720px;
+  margin-top: 14px;
+}
+
+.quick-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 11px 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.quick-action:hover {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+  background: var(--bg-active);
+}
+
+.quick-action-icon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--text-2);
+}
+
+.quick-action:hover .quick-action-icon {
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.quick-action-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.quick-action-label {
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--text-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 100%;
 }
 
-.suggestions {
-  animation: fade-up var(--dur-slow) var(--ease-out) both;
+.quick-action-desc {
+  font-size: var(--font-2xs);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 欢迎页能力标签行（静态展示） */
@@ -438,7 +591,6 @@
   justify-content: center;
   gap: var(--space-2);
   margin-top: var(--space-5);
-  margin-bottom: auto;
   padding: 0 12px;
   flex-shrink: 0;
 }
@@ -450,7 +602,7 @@
   padding: var(--space-1) var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
-  background: var(--bg-card-2);
+  background: color-mix(in srgb, var(--bg-card-2) 75%, transparent);
   color: var(--text-3);
   font-size: var(--font-xs);
 }
@@ -1874,66 +2026,172 @@ html[data-style="everforest"] .input-box {
 
 /* ============================================================================
    主页（空对话欢迎页）四种样式：html[data-home]
-   classic 经典问候 / minimal 极简无欢迎语 / hero 巨幅标题 + 推荐卡 /
-   studio 工作台入口（推荐问法做成三列磁贴）
+   classic 经典问候 / minimal 极简启动器 / hero 巨幅标题 / studio 工作台
+   四种样式共用 .welcome-inner 结构，只调整层级、排布与文案露出。
    ========================================================================= */
 
-/* ---- minimal：只留输入区，推荐问法压成一行胶囊 ---- */
+/* ---- classic：居中品牌问候，最克制的一档 ---- */
+html[data-home="classic"] .welcome::before {
+  background: radial-gradient(
+    560px 340px at 50% 32%,
+    color-mix(in srgb, var(--primary) 10%, transparent),
+    transparent 72%
+  );
+}
+
+/* ---- minimal：无品牌大标题，推荐问法收成一张纵向启动列表 ---- */
 html[data-home="minimal"] .welcome {
-  justify-content: flex-end;
-  padding-bottom: 18px;
+  padding: clamp(24px, 5vh, 56px) 16px;
+}
+
+html[data-home="minimal"] .welcome::before {
+  background: radial-gradient(
+    420px 240px at 50% 28%,
+    color-mix(in srgb, var(--primary) 6%, transparent),
+    transparent 74%
+  );
+}
+
+html[data-home="minimal"] .welcome-inner {
+  max-width: 580px;
 }
 
 html[data-home="minimal"] .welcome-mark,
 html[data-home="minimal"] .welcome-title,
-html[data-home="minimal"] .welcome-sub,
 html[data-home="minimal"] .capability-chips {
   display: none;
 }
 
+html[data-home="minimal"] .welcome-eyebrow {
+  margin-bottom: 12px;
+}
+
+html[data-home="minimal"] .welcome-heading {
+  margin-bottom: 18px;
+}
+
+html[data-home="minimal"] .welcome-sub {
+  font-size: var(--font-sm);
+}
+
 html[data-home="minimal"] .suggestions {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 8px;
-  max-width: 720px;
-  margin: 0 auto;
+  flex-direction: column;
+  gap: 0;
+  max-width: 580px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card-2);
+  overflow: hidden;
 }
 
 html[data-home="minimal"] .suggestion {
-  flex: 0 0 auto;
-  padding: 6px 12px;
-  border-radius: var(--radius-pill);
-  background: var(--bg-card-2);
-  border: 1px solid var(--border);
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  animation: none;
+}
+
+html[data-home="minimal"] .suggestion + .suggestion {
+  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+}
+
+html[data-home="minimal"] .suggestion:hover {
+  background: var(--bg-active);
+  border-color: transparent;
+  transform: none;
+  box-shadow: none;
+}
+
+html[data-home="minimal"] .suggestion-icon {
+  width: 28px;
+  height: 28px;
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+html[data-home="minimal"] .suggestion-body {
+  gap: 0;
+}
+
+html[data-home="minimal"] .suggestion-text {
+  -webkit-line-clamp: 1;
+  font-weight: 500;
 }
 
 html[data-home="minimal"] .suggestion-desc {
   display: none;
 }
 
-/* ---- hero：巨幅标题 + 大圆角推荐卡 ---- */
+html[data-home="minimal"] .suggestion-arrow {
+  opacity: 0.35;
+  transform: none;
+}
+
+html[data-home="minimal"] .suggestion:hover .suggestion-arrow {
+  opacity: 1;
+}
+
+/* ---- hero：左对齐的杂志式标题 + 水印字；推荐卡更大 ---- */
 html[data-home="hero"] .welcome {
+  padding-left: clamp(28px, 6vw, 72px);
+  padding-right: clamp(28px, 6vw, 72px);
+}
+
+html[data-home="hero"] .welcome::before {
+  background: radial-gradient(
+    680px 380px at 22% 30%,
+    color-mix(in srgb, var(--primary) 11%, transparent),
+    transparent 70%
+  );
+}
+
+html[data-home="hero"] .welcome::after {
+  content: '问';
+  position: absolute;
+  right: clamp(12px, 4vw, 56px);
+  top: 5%;
+  z-index: 0;
+  color: color-mix(in srgb, var(--primary) 6%, transparent);
+  font-family: var(--font-display);
+  font-size: clamp(160px, 20vw, 280px);
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+}
+
+html[data-home="hero"] .welcome-inner {
   align-items: flex-start;
   text-align: left;
-  max-width: 780px;
-  margin: 0 auto;
-  padding-top: 24px;
+  max-width: 800px;
 }
 
 html[data-home="hero"] .welcome-mark {
   display: none;
 }
 
+html[data-home="hero"] .welcome-eyebrow {
+  color: var(--primary-text);
+}
+
+html[data-home="hero"] .welcome-heading {
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 30px;
+}
+
 html[data-home="hero"] .welcome-title {
-  font-size: clamp(30px, 4vw, 44px);
-  line-height: 1.16;
-  letter-spacing: -0.02em;
-  font-weight: 700;
+  font-size: clamp(34px, 4.2vw, 52px);
+  line-height: 1.12;
+  letter-spacing: -0.03em;
   background: linear-gradient(
-    120deg,
-    var(--text-1) 0%,
-    color-mix(in srgb, var(--primary) 70%, var(--text-1)) 100%
+    115deg,
+    var(--text-1) 12%,
+    color-mix(in srgb, var(--primary) 72%, var(--text-1)) 100%
   );
   -webkit-background-clip: text;
   background-clip: text;
@@ -1941,104 +2199,311 @@ html[data-home="hero"] .welcome-title {
 }
 
 html[data-home="hero"] .welcome-sub {
-  font-size: var(--font-md);
-  max-width: 46ch;
+  color: var(--text-2);
+  font-size: var(--font-base);
+  max-width: 52ch;
 }
 
 html[data-home="hero"] .suggestions {
-  width: 100%;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  max-width: 800px;
 }
 
 html[data-home="hero"] .suggestion {
-  align-items: flex-start;
-  padding: 14px;
+  padding: 16px;
   border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
   background: linear-gradient(
     180deg,
     var(--bg-card-2),
-    color-mix(in srgb, var(--bg-card-2) 60%, var(--bg-card))
+    color-mix(in srgb, var(--bg-card-2) 55%, var(--bg-card))
   );
-}
-
-html[data-home="hero"] .suggestion:hover {
-  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-  transform: translateY(-1px);
 }
 
 html[data-home="hero"] .suggestion-text {
   font-weight: 600;
 }
 
-/* ---- studio：欢迎语收成一行，推荐问法三列磁贴，像工作台入口 ---- */
+html[data-home="hero"] .capability-chips {
+  justify-content: flex-start;
+  padding: 0;
+}
+
+/* ---- studio：工作台入口，推荐问法做成三列磁贴 + 快捷入口 ---- */
 html[data-home="studio"] .welcome {
-  align-items: stretch;
-  text-align: left;
-  max-width: 840px;
-  margin: 0 auto;
-  gap: 14px;
+  padding-top: clamp(20px, 3.5vh, 40px);
+}
+
+html[data-home="studio"] .welcome::before {
+  background: radial-gradient(
+    640px 300px at 50% 18%,
+    color-mix(in srgb, var(--primary) 8%, transparent),
+    transparent 72%
+  );
+}
+
+html[data-home="studio"] .welcome-inner {
+  max-width: 880px;
+}
+
+html[data-home="studio"] .welcome-eyebrow {
+  margin-bottom: 12px;
 }
 
 html[data-home="studio"] .welcome-mark {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  margin-bottom: 12px;
+  box-shadow: 0 0 0 7px color-mix(in srgb, var(--primary) 7%, transparent),
+    0 8px 20px color-mix(in srgb, var(--primary) 24%, transparent);
 }
 
 html[data-home="studio"] .welcome-glyph {
-  font-size: 17px;
+  font-size: 18px;
+}
+
+html[data-home="studio"] .welcome-heading {
+  gap: 4px;
+  margin-bottom: 20px;
 }
 
 html[data-home="studio"] .welcome-title {
-  font-size: var(--font-xl);
+  font-size: clamp(22px, 2.3vw, 28px);
   font-weight: 650;
+  letter-spacing: 0.01em;
 }
 
 html[data-home="studio"] .welcome-sub {
-  margin-top: -4px;
+  font-size: var(--font-sm);
 }
 
 html[data-home="studio"] .suggestions {
-  width: 100%;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  max-width: 880px;
+  gap: 12px;
 }
 
 html[data-home="studio"] .suggestion {
   flex-direction: column;
   align-items: flex-start;
-  gap: 8px;
-  padding: 14px;
-  min-height: 104px;
-  border-radius: var(--radius-md);
-  background: var(--bg-card);
-  border: 1px solid var(--border);
+  gap: 10px;
+  min-height: 116px;
+  padding: 15px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(
+    180deg,
+    var(--bg-card-2),
+    color-mix(in srgb, var(--bg-card-2) 65%, var(--bg-card))
+  );
 }
 
 html[data-home="studio"] .suggestion-icon {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
   background: var(--primary-soft);
   color: var(--primary-text);
 }
 
-html[data-home="studio"] .suggestion-desc {
-  -webkit-line-clamp: 2;
+html[data-home="studio"] .suggestion-body {
+  gap: 4px;
+}
+
+html[data-home="studio"] .suggestion-text {
+  font-weight: 600;
+}
+
+html[data-home="studio"] .suggestion-arrow {
+  display: none;
+}
+
+html[data-home="studio"] .quick-actions {
+  max-width: 880px;
 }
 
 html[data-home="studio"] .capability-chips {
-  margin-top: 2px;
+  display: none;
 }
 
-@media (max-width: 900px) {
-  html[data-home="hero"] .suggestions,
-  html[data-home="studio"] .suggestions {
+/* 窄聊天列（客户端标准/浮岛布局常见 ~600px）：
+   一律单列，绝不横向滚动裁切；工作台磁贴改为紧凑横排，尽量留在首屏 */
+@container chat-col (max-width: 640px) {
+  .suggestions,
+  .suggestions[data-count='2'] {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* 窄列 + 矮输入区：牺牲眉标/能力标签与品牌块尺寸，保证推荐卡完整可见 */
+  html:not([data-home="minimal"]) .welcome-eyebrow {
+    display: none;
+  }
+
+  .capability-chips {
+    display: none;
+  }
+
+  .welcome-mark {
+    width: 44px;
+    height: 44px;
+    margin-bottom: 12px;
+  }
+
+  .welcome-glyph {
+    font-size: 20px;
+  }
+
+  .welcome-heading {
+    margin-bottom: 18px;
+  }
+
+  .welcome-title {
+    font-size: var(--font-2xl);
+  }
+
+  html[data-home="studio"] .suggestion {
+    flex-direction: row;
+    align-items: flex-start;
+    min-height: 0;
+    padding: 10px 14px;
+  }
+
+  html[data-home="studio"] .suggestion-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+  }
+
+  html[data-home="studio"] .welcome-heading {
+    margin-bottom: 14px;
+  }
+
+  html[data-home="studio"] .quick-actions {
+    margin-top: 10px;
+  }
+
+  html[data-home="studio"] .quick-action {
+    padding: 9px 12px;
+  }
+
+  html[data-home="hero"] .welcome::after {
+    display: none;
+  }
+}
+
+@container chat-col (max-width: 520px) {
+  .quick-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 矮窗口（桌面客户端常见 640–760 高）：压缩层级，保证推荐卡完整可见 */
+@media (max-height: 760px) {
+  .welcome {
+    padding: 16px 12px;
+  }
+
+  /* 矮窗口 + 窄列：工作台/巨幅标题的磁贴改两列，避免第三张被输入区裁掉 */
+  @container chat-col (max-width: 640px) {
+    html[data-home="studio"] .suggestions,
+    html[data-home="hero"] .suggestions {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    html[data-home="studio"] .suggestions .suggestion:last-child:nth-child(odd),
+    html[data-home="hero"] .suggestions .suggestion:last-child:nth-child(odd) {
+      grid-column: 1 / -1;
+    }
+  }
+
+  /* 首屏高度不足时，工作台快捷入口让位给推荐卡 */
+  html[data-home="studio"] .quick-actions {
+    display: none;
+  }
+
+  .welcome-eyebrow {
+    margin-bottom: 10px;
+  }
+
+  .welcome-mark {
+    width: 48px;
+    height: 48px;
+    margin-bottom: 12px;
+    box-shadow: 0 0 0 7px color-mix(in srgb, var(--primary) 7%, transparent),
+      0 8px 20px color-mix(in srgb, var(--primary) 24%, transparent);
+  }
+
+  .welcome-glyph {
+    font-size: 23px;
+  }
+
+  .welcome-heading {
+    gap: 4px;
+    margin-bottom: 18px;
+  }
+
+  .welcome-title {
+    font-size: var(--font-2xl);
+  }
+
+  .welcome-sub {
+    font-size: var(--font-sm);
+  }
+
+  .suggestions {
+    gap: 8px;
+  }
+
+  .suggestion {
+    padding: 11px 13px;
+  }
+
+  .capability-chips {
+    margin-top: 16px;
+  }
+
+  html[data-home="studio"] .welcome {
+    padding-top: 10px;
+  }
+
+  html[data-home="studio"] .welcome-mark {
+    width: 34px;
+    height: 34px;
+    margin-bottom: 8px;
+  }
+
+  html[data-home="studio"] .welcome-glyph {
+    font-size: 16px;
+  }
+
+  html[data-home="studio"] .welcome-heading {
+    margin-bottom: 14px;
+  }
+
+  html[data-home="studio"] .suggestion {
+    min-height: 96px;
+    padding: 12px;
+  }
+
+  html[data-home="hero"] .welcome-title {
+    font-size: clamp(28px, 3.2vw, 38px);
+  }
+}
+
+@media (max-height: 700px) {
+  .welcome-sub {
+    display: none;
+  }
+
+  html:not([data-home="minimal"]) .welcome-eyebrow {
+    display: none;
+  }
+
+  html[data-home="hero"] .welcome-heading {
+    margin-bottom: 20px;
+  }
+}
+
+@media (max-height: 620px) {
+  .welcome-mark {
+    display: none;
   }
 }
 

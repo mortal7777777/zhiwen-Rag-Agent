@@ -1095,6 +1095,7 @@ onMounted(loadAll)
   padding: 18px;
   box-sizing: border-box;
   background: var(--el-bg-color-page);
+  overflow-y: auto;
 }
 .pw-header {
   display: flex;
@@ -1121,7 +1122,7 @@ onMounted(loadAll)
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr) 340px;
   gap: 12px;
-  height: calc(100vh - 150px);
+  height: calc(100vh - var(--titlebar-h, 0px) - 150px);
   min-height: 520px;
 }
 .pw-list,

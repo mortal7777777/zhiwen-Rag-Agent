@@ -1241,6 +1241,206 @@
   color: var(--primary-text);
 }
 
+/* ==================== 主页样式缩略图（外观面板） ==================== */
+.home-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 720px) {
+  .home-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.home-card {
+  padding: 8px;
+}
+
+.home-wire {
+  position: relative;
+  height: 64px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  overflow: hidden;
+}
+
+.home-wire span {
+  position: absolute;
+  display: block;
+}
+
+.hw-mark {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: var(--primary);
+  opacity: 0.9;
+}
+
+.hw-title {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--text-2);
+  opacity: 0.5;
+}
+
+.hw-input {
+  height: 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg-card-2);
+}
+
+.hw-chip {
+  height: 6px;
+  border-radius: 2px;
+  background: var(--primary);
+  opacity: 0.18;
+}
+
+/* classic：居中品牌块 + 双列推荐 + 底部输入 */
+.hw-classic .hw-mark {
+  left: 50%;
+  top: 9px;
+  transform: translateX(-50%);
+}
+
+.hw-classic .hw-title {
+  left: 30%;
+  top: 24px;
+  width: 40%;
+}
+
+.hw-classic .hw-chip:nth-of-type(4) {
+  left: 22%;
+  top: 34px;
+  width: 26%;
+  height: 12px;
+  opacity: 0.14;
+}
+
+.hw-classic .hw-chip:nth-of-type(5) {
+  left: 52%;
+  top: 34px;
+  width: 26%;
+  height: 12px;
+  opacity: 0.14;
+}
+
+.hw-classic .hw-input {
+  left: 12%;
+  right: 12%;
+  bottom: 6px;
+}
+
+/* minimal：无品牌块，纵向列表 + 输入 */
+.hw-minimal .hw-mark {
+  display: none;
+}
+
+.hw-minimal .hw-title {
+  left: 50%;
+  top: 9px;
+  width: 30%;
+  transform: translateX(-50%);
+}
+
+.hw-minimal .hw-chip:nth-of-type(4),
+.hw-minimal .hw-chip:nth-of-type(5) {
+  left: 16%;
+  right: 16%;
+  height: 9px;
+  width: auto;
+  opacity: 0.12;
+}
+
+.hw-minimal .hw-chip:nth-of-type(4) {
+  top: 22px;
+}
+
+.hw-minimal .hw-chip:nth-of-type(5) {
+  top: 35px;
+}
+
+.hw-minimal .hw-input {
+  left: 10%;
+  right: 10%;
+  bottom: 6px;
+}
+
+/* hero：左对齐大标题 + 底部输入 */
+.hw-hero .hw-mark {
+  display: none;
+}
+
+.hw-hero .hw-title {
+  left: 10%;
+  top: 10px;
+  width: 52%;
+  height: 8px;
+  opacity: 0.62;
+}
+
+.hw-hero .hw-chip:nth-of-type(4) {
+  left: 10%;
+  top: 26px;
+  width: 30%;
+  height: 14px;
+  opacity: 0.14;
+}
+
+.hw-hero .hw-chip:nth-of-type(5) {
+  left: 44%;
+  top: 26px;
+  width: 30%;
+  height: 14px;
+  opacity: 0.14;
+}
+
+.hw-hero .hw-input {
+  left: 10%;
+  right: 10%;
+  bottom: 6px;
+}
+
+/* studio：左上品牌块 + 三列磁贴 + 输入 */
+.hw-studio .hw-mark {
+  left: 9px;
+  top: 9px;
+}
+
+.hw-studio .hw-title {
+  left: 24px;
+  top: 10px;
+  width: 34%;
+}
+
+.hw-studio .hw-chip:nth-of-type(4) {
+  left: 9px;
+  top: 26px;
+  width: 24%;
+  height: 16px;
+  opacity: 0.16;
+}
+
+.hw-studio .hw-chip:nth-of-type(5) {
+  left: 37%;
+  top: 26px;
+  width: 24%;
+  height: 16px;
+  opacity: 0.16;
+}
+
+.hw-studio .hw-input {
+  left: 9px;
+  right: 9px;
+  bottom: 6px;
+}
+
 
 /* Claude 桌面：侧栏贴边、无圆角，正文收窄居中 */
 .lay-claude .lw-side {

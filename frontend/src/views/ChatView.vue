@@ -198,46 +198,77 @@
         @click="handleMessageClick"
         @scroll="onMessagesScroll"
       >
-        <!-- 欢迎页 -->
+        <!-- 欢迎页：四种样式共享结构，差异由 html[data-home] 与文案控制 -->
         <div v-if="!messages.length && !loading" class="welcome">
-          <div class="welcome-mark">
-            <span class="welcome-glyph">问</span>
-          </div>
-          <h2 class="welcome-title">有什么可以帮你？</h2>
-          <p class="welcome-sub">支持知识库问答、联网搜索与多轮对话记忆</p>
-          <div class="suggestions">
-            <div
-              v-for="s in suggestions"
-              :key="s.text"
-              class="suggestion"
-              @click="ask(s)"
-            >
-              <span class="suggestion-icon">
-                <el-icon :size="16"><component :is="s.icon" /></el-icon>
+          <div class="welcome-inner">
+            <div class="welcome-eyebrow">
+              <span class="welcome-eyebrow-dot" aria-hidden="true"></span>
+              {{ welcomeEyebrow }}
+            </div>
+            <div class="welcome-mark">
+              <span class="welcome-glyph">问</span>
+            </div>
+            <div class="welcome-heading">
+              <h2 class="welcome-title">{{ welcomeGreeting }}</h2>
+              <p class="welcome-sub">{{ welcomeSubtitle }}</p>
+            </div>
+            <div v-if="suggestions.length" class="suggestions" :data-count="suggestions.length">
+              <button
+                v-for="(s, i) in suggestions"
+                :key="s.text"
+                type="button"
+                class="suggestion"
+                :style="{ '--suggestion-index': i }"
+                @click="ask(s)"
+              >
+                <span class="suggestion-icon">
+                  <el-icon :size="16"><component :is="s.icon" /></el-icon>
+                </span>
+                <span class="suggestion-body">
+                  <span class="suggestion-text">{{ s.text }}</span>
+                  <span class="suggestion-desc">{{ s.desc }}</span>
+                </span>
+                <span class="suggestion-arrow" aria-hidden="true">
+                  <el-icon :size="14"><ArrowRight /></el-icon>
+                </span>
+              </button>
+            </div>
+            <!-- 工作台样式：把导航入口也铺在首屏，减少一次侧栏寻找 -->
+            <div v-if="homeStyle === 'studio'" class="quick-actions">
+              <button
+                v-for="action in quickActions"
+                :key="action.to"
+                type="button"
+                class="quick-action"
+                @click="router.push(action.to)"
+              >
+                <span class="quick-action-icon">
+                  <el-icon :size="16"><component :is="action.icon" /></el-icon>
+                </span>
+                <span class="quick-action-body">
+                  <span class="quick-action-label">{{ action.label }}</span>
+                  <span class="quick-action-desc">{{ action.desc }}</span>
+                </span>
+              </button>
+            </div>
+            <!-- 静态能力标签（纯展示，不联动开关状态） -->
+            <div class="capability-chips">
+              <span class="capability-chip" title="回答附带知识库原文出处">
+                <el-icon :size="13"><Collection /></el-icon>知识库检索
               </span>
-              <span class="suggestion-body">
-                <span class="suggestion-text" :title="s.text">{{ s.text }}</span>
-                <span class="suggestion-desc">{{ s.desc }}</span>
+              <span class="capability-chip" title="需要最新信息时自动联网检索">
+                <el-icon :size="13"><Position /></el-icon>联网搜索
+              </span>
+              <span class="capability-chip" title="支持图片理解与知识库图片问答">
+                <el-icon :size="13"><Picture /></el-icon>图片理解
+              </span>
+              <span class="capability-chip" title="可读写文件、执行命令并回读验证">
+                <el-icon :size="13"><Operation /></el-icon>工具执行
+              </span>
+              <span class="capability-chip" title="多轮上下文、滚动摘要与长期记忆">
+                <el-icon :size="13"><Clock /></el-icon>多轮记忆
               </span>
             </div>
-          </div>
-          <!-- 静态能力标签（纯展示，不联动开关状态） -->
-          <div class="capability-chips">
-            <span class="capability-chip">
-              <el-icon :size="13"><Collection /></el-icon>知识库 RAG
-            </span>
-            <span class="capability-chip">
-              <el-icon :size="13"><Position /></el-icon>联网搜索
-            </span>
-            <span class="capability-chip">
-              <el-icon :size="13"><Picture /></el-icon>识图
-            </span>
-            <span class="capability-chip">
-              <el-icon :size="13"><Operation /></el-icon>工具执行
-            </span>
-            <span class="capability-chip">
-              <el-icon :size="13"><List /></el-icon>计划模式
-            </span>
           </div>
         </div>
 
@@ -1198,8 +1229,10 @@
 <script setup>
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { pickGreeting } from '../utils/greetings.js'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import {
+  ArrowRight,
   Bottom,
   Clock,
   Collection,
@@ -1756,11 +1789,57 @@ const {
       promptAdmin.clearConversationPrompt()
       restoreScopeForSession()
       pendingWorkspace.value = null
+      rotateGreeting()
     },
     setTemplateFromSession: (value) => promptAdmin.setTemplateFromSession(value),
     onSessionDeleted: dropScopeForSession,
   },
 })
+
+// 欢迎页问候语：按时间段轮换，避免连续两次相同（localStorage 记住上一条）
+const welcomeGreeting = ref('')
+function rotateGreeting() {
+  try {
+    const last = localStorage.getItem('rag_last_greeting') || ''
+    welcomeGreeting.value = pickGreeting(new Date(), last)
+    localStorage.setItem('rag_last_greeting', welcomeGreeting.value)
+  } catch {
+    welcomeGreeting.value = '有什么可以帮你？'
+  }
+}
+rotateGreeting()
+
+// 主页样式（App.vue 提供的外观实例）：四种样式共用同一套 DOM，文案与排布由 CSS 切换
+const homeStyle = appearance?.homeStyle || ref('classic')
+const HOME_COPY = {
+  classic: {
+    eyebrow: '知问 · 个人知识助手',
+    subtitle: '知识库、联网与工具，一条链路上的回答',
+  },
+  minimal: {
+    eyebrow: '快速开始',
+    subtitle: '选一条开始，或直接输入你的问题',
+  },
+  hero: {
+    eyebrow: 'ZHIWEN · KNOWLEDGE ASSISTANT',
+    subtitle: '把你的文档、笔记与网页，变成可以对话的知识',
+  },
+  studio: {
+    eyebrow: '工作台',
+    subtitle: '检索、执行、记录，从一屏开始今天的工作',
+  },
+}
+const welcomeEyebrow = computed(
+  () => (HOME_COPY[homeStyle.value] || HOME_COPY.classic).eyebrow
+)
+const welcomeSubtitle = computed(
+  () => (HOME_COPY[homeStyle.value] || HOME_COPY.classic).subtitle
+)
+const quickActions = [
+  { to: '/knowledge', label: '知识库', desc: '文档、索引与健康', icon: Collection },
+  { to: '/runs', label: '运行记录', desc: '用量、轨迹与回放', icon: DataAnalysis },
+  { to: '/prompts', label: '提示词工作台', desc: '模板、片段与版本', icon: List },
+]
 
 // ---------------- 工作区：当前值 / 候选列表 / 赋值 ----------------
 const activeSession = computed(

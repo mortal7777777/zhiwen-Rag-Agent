@@ -1,0 +1,69 @@
+/* ============================================================================
+   桌面客户端外壳（Electron）
+   - 隐藏式标题栏（titleBarStyle: hidden + titleBarOverlay）：原生窗口按钮
+     叠加在右上角，应用自己渲染 40px 品牌条作为拖动区，不再出现系统白条。
+   - 页面高度统一用 var(--titlebar-h) 扣减（浏览器下为 0）。
+   - .app-main 作为页面级布局变体的查询容器：断点按内容区宽度而非窗口宽度，
+     避免侧栏占宽后 1180/1280 断点把网格提前折叠成单列。
+   ============================================================================ */
+
+:root {
+  --titlebar-h: 0px;
+}
+
+html[data-desktop] {
+  --titlebar-h: 40px;
+}
+
+.app-shell {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-shell > .app-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+}
+
+.app-main {
+  container-type: inline-size;
+  container-name: page-content;
+}
+
+.desktop-titlebar {
+  flex: 0 0 auto;
+  height: var(--titlebar-h);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  background: var(--bg-app);
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.dtb-mark {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--primary-grad);
+  color: var(--text-on-brand);
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.dtb-name {
+  font-size: var(--font-sm);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-2);
+}

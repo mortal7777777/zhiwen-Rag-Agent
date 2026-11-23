@@ -503,7 +503,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .runs-page {
-  height: calc(100vh - 32px);
+  height: calc(100vh - var(--titlebar-h, 0px) - 32px);
   overflow-y: auto;
   display: flex;
   flex-direction: column;

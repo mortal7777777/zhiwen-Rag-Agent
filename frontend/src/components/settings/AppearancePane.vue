@@ -138,7 +138,8 @@
         </div>
       </div>
       <div class="settings-tip">
-        只影响空对话时的欢迎页：图标、问候语、推荐问法与输入区排布。四种都能关掉欢迎语。
+        只影响空对话时的欢迎页：品牌块、问候语、推荐问法与快捷入口。四种样式都按聊天列宽自适应，
+        窄窗口自动改为单列，不再横向滚动。
       </div>
     </div>
 
@@ -225,9 +226,9 @@ const widthOptions = [
 // 布局：图标体系与导航形态都不同，不是同一套骨架换皮
 const homeOptions = [
   { value: 'classic', label: '经典问候' },
-  { value: 'minimal', label: '极简无欢迎语' },
-  { value: 'hero', label: '巨幅标题 + 推荐卡' },
-  { value: 'studio', label: '工作台入口' },
+  { value: 'minimal', label: '极简启动器' },
+  { value: 'hero', label: '巨幅标题' },
+  { value: 'studio', label: '工作台' },
 ]
 
 const layoutOptions = [

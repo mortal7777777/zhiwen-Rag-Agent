@@ -20,7 +20,7 @@ const GROUP_WS_KEY = 'rag_group_sessions_by_workspace'
 
 export function useAppearance() {
   const theme = ref('system')
-  const contentWidth = ref('1200px')
+  const contentWidth = ref('100%')
   const styleMode = ref('default')
   const layoutMode = ref('standard')
   const fontMode = ref('auto')
@@ -39,6 +39,7 @@ export function useAppearance() {
     } else {
       document.documentElement.dataset.style = styleMode.value
     }
+    syncDesktopTitlebar()
   }
 
   /** 布局总是写到 dataset：html[data-layout="standard"] 也要能命中。 */
@@ -72,6 +73,21 @@ export function useAppearance() {
     const dark = resolveDark()
     document.documentElement.classList.toggle('dark', dark)
     document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+    syncDesktopTitlebar()
+  }
+
+  /** 桌面端隐藏式标题栏：把当前主题实际的底色/符号色同步给主进程（浏览器 no-op）。 */
+  function syncDesktopTitlebar() {
+    try {
+      const shell = typeof window !== 'undefined' ? window.zhiwenShell : undefined
+      if (!shell || typeof shell.setTitleBarTheme !== 'function') return
+      const styles = getComputedStyle(document.documentElement)
+      const color = styles.getPropertyValue('--bg-app').trim()
+      const symbolColor = styles.getPropertyValue('--text-2').trim()
+      if (color) shell.setTitleBarTheme({ color, symbolColor })
+    } catch {
+      // 非桌面环境忽略
+    }
   }
 
   function applyWidth() {
@@ -128,13 +144,23 @@ export function useAppearance() {
       fontMode.value = localStorage.getItem(FONT_KEY) || 'auto'
       mergedSidebar.value = localStorage.getItem(SIDEBAR_KEY) === '1'
       sidebarCollapsed.value = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1'
-      homeStyle.value = localStorage.getItem(HOME_KEY) || 'classic'
+      // 旧值/坏值回落到 classic：样式名参与 html[data-home] 选择器，必须可枚举
+      const savedHome = localStorage.getItem(HOME_KEY) || 'classic'
+      homeStyle.value = ['classic', 'minimal', 'hero', 'studio'].includes(savedHome)
+        ? savedHome
+        : 'classic'
       // 默认开启的布尔项：只有显式存过 '0' 才关闭
       groupSessionsByWorkspace.value = localStorage.getItem(GROUP_WS_KEY) !== '0'
       const savedWidth = localStorage.getItem(WIDTH_KEY)
-      // 旧版 px 档位迁移到按比例档位
-      const legacyMap = { '960px': '55%', '1200px': '70%', '1440px': '85%', none: '100%' }
-      contentWidth.value = legacyMap[savedWidth] || savedWidth || '70%'
+      // 旧版 px 档位迁移到按比例档位；旧默认（70% / 1200px）归位到全宽
+      const legacyMap = {
+        '960px': '55%',
+        '1440px': '85%',
+        none: '100%',
+        '1200px': '100%',
+        '70%': '100%',
+      }
+      contentWidth.value = legacyMap[savedWidth] || savedWidth || '100%'
     } catch {
       // ignore
     }
